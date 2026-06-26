@@ -3,7 +3,6 @@ import MapKit
 import SwiftData
 
 struct LiveTrackingView: View {
-    @Environment(\.modelContext) private var modelContext
     @Query private var vehicles: [Vehicle]
 
     @State private var tracker = LocationTracker()
@@ -265,8 +264,9 @@ struct LiveTrackingView: View {
             let startAddr = await reverseGeocode(start)
             let endAddr = await reverseGeocode(end)
 
-            let trip = Trip(
-                date: .now,
+            let f = ISO8601DateFormatter()
+            let create = APITripCreate(
+                date: f.string(from: .now),
                 startAddress: startAddr,
                 endAddress: endAddr,
                 startLat: start.latitude,
@@ -276,9 +276,9 @@ struct LiveTrackingView: View {
                 distance: dist,
                 duration: dur,
                 notes: notes,
-                category: category
+                category: category.rawValue
             )
-            modelContext.insert(trip)
+            _ = try? await APIClient.createTrip(create)
             showingSummary = false
         }
     }

@@ -1,10 +1,9 @@
 import SwiftUI
 import MapKit
-import SwiftData
 
 struct NewTripView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
+    var onSaved: (() async -> Void)?
 
     @State private var date = Date.now
     @State private var startAddress = ""
@@ -15,13 +14,13 @@ struct NewTripView: View {
     @State private var endCoordinate: CLLocationCoordinate2D?
     @State private var route: MKRoute?
     @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var saving = false
 
     private var distance: Double {
         if let route { return route.distance / 1609.34 }
         guard let s = startCoordinate, let e = endCoordinate else { return 0 }
-        let start = CLLocation(latitude: s.latitude, longitude: s.longitude)
-        let end = CLLocation(latitude: e.latitude, longitude: e.longitude)
-        return start.distance(from: end) / 1609.34
+        return CLLocation(latitude: s.latitude, longitude: s.longitude)
+            .distance(from: CLLocation(latitude: e.latitude, longitude: e.longitude)) / 1609.34
     }
 
     private var duration: Int {
@@ -42,12 +41,10 @@ struct NewTripView: View {
             .navigationTitle("New Trip")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { saveTrip() }
-                        .disabled(startCoordinate == nil || endCoordinate == nil)
+                        .disabled(startCoordinate == nil || endCoordinate == nil || saving)
                 }
             }
         }
@@ -56,15 +53,9 @@ struct NewTripView: View {
     private var mapSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Map(position: $cameraPosition) {
-                if let s = startCoordinate {
-                    Marker("Start", systemImage: "flag.fill", coordinate: s).tint(.blue)
-                }
-                if let e = endCoordinate {
-                    Marker("End", systemImage: "mappin", coordinate: e).tint(.red)
-                }
-                if let route {
-                    MapPolyline(route.polyline).stroke(.blue, lineWidth: 4)
-                }
+                if let s = startCoordinate { Marker("Start", systemImage: "flag.fill", coordinate: s).tint(.blue) }
+                if let e = endCoordinate { Marker("End", systemImage: "mappin", coordinate: e).tint(.red) }
+                if let route { MapPolyline(route.polyline).stroke(.blue, lineWidth: 4) }
             }
             .frame(height: 300)
             .clipShape(.rect(cornerRadius: 16))
@@ -75,8 +66,7 @@ struct NewTripView: View {
                     Spacer()
                     Label("\(duration) min", systemImage: "clock")
                 }
-                .font(.subheadline)
-                .fontWeight(.medium)
+                .font(.subheadline).fontWeight(.medium)
                 .padding()
                 .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
             }
@@ -85,9 +75,7 @@ struct NewTripView: View {
 
     private var categorySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Category")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            Text("Category").font(.subheadline).foregroundStyle(.secondary)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(TripCategory.allCases, id: \.self) { cat in
@@ -95,9 +83,7 @@ struct NewTripView: View {
                             withAnimation(.spring(duration: 0.25)) { category = cat }
                         } label: {
                             Label(cat.label, systemImage: cat.icon)
-                                .font(.caption)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
+                                .font(.caption).padding(.horizontal, 12).padding(.vertical, 8)
                                 .background(category == cat ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.1), in: .capsule)
                         }
                         .buttonStyle(.plain)
@@ -110,9 +96,7 @@ struct NewTripView: View {
     private var formSection: some View {
         VStack(spacing: 12) {
             DatePicker("Date", selection: $date, displayedComponents: .date)
-                .padding()
-                .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
-
+                .padding().background(Color(.systemGray6), in: .rect(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 8) {
                 TextField("Start address", text: $startAddress)
                     .textFieldStyle(.roundedBorder)
@@ -129,14 +113,10 @@ struct NewTripView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(startAddress.isEmpty || endAddress.isEmpty)
             }
-            .padding()
-            .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
-
+            .padding().background(Color(.systemGray6), in: .rect(cornerRadius: 12))
             TextField("Notes (optional)", text: $notes, axis: .vertical)
-                .lineLimit(3)
-                .textFieldStyle(.roundedBorder)
-                .padding()
-                .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
+                .lineLimit(3).textFieldStyle(.roundedBorder)
+                .padding().background(Color(.systemGray6), in: .rect(cornerRadius: 12))
         }
     }
 
@@ -145,12 +125,7 @@ struct NewTripView: View {
             guard let request = MKGeocodingRequest(addressString: address) else { return }
             guard let items = try? await request.mapItems, let item = items.first else { return }
             let coord = item.placemark.coordinate
-            if isStart {
-                startCoordinate = coord
-            } else {
-                endCoordinate = coord
-                calculateRoute()
-            }
+            if isStart { startCoordinate = coord } else { endCoordinate = coord; calculateRoute() }
         }
     }
 
@@ -161,8 +136,7 @@ struct NewTripView: View {
             request.source = MKMapItem(placemark: .init(coordinate: s))
             request.destination = MKMapItem(placemark: .init(coordinate: e))
             request.transportType = .automobile
-            let directions = MKDirections(request: request)
-            if let response = try? await directions.calculate() {
+            if let response = try? await MKDirections(request: request).calculate() {
                 self.route = response.routes.first
                 cameraPosition = .automatic
             }
@@ -171,16 +145,21 @@ struct NewTripView: View {
 
     private func saveTrip() {
         guard let s = startCoordinate, let e = endCoordinate else { return }
-        let trip = Trip(
-            date: date,
-            startAddress: startAddress, endAddress: endAddress,
-            startLat: s.latitude, startLng: s.longitude,
-            endLat: e.latitude, endLng: e.longitude,
-            distance: distance, duration: duration,
-            notes: notes.isEmpty ? nil : notes,
-            category: category
-        )
-        modelContext.insert(trip)
-        dismiss()
+        saving = true
+        let f = ISO8601DateFormatter()
+        Task {
+            let create = APITripCreate(
+                date: f.string(from: date),
+                startAddress: startAddress, endAddress: endAddress,
+                startLat: s.latitude, startLng: s.longitude,
+                endLat: e.latitude, endLng: e.longitude,
+                distance: distance, duration: duration,
+                notes: notes.isEmpty ? nil : notes,
+                category: category.rawValue
+            )
+            _ = try? await APIClient.createTrip(create)
+            await onSaved?()
+            dismiss()
+        }
     }
 }

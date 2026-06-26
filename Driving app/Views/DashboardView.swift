@@ -1,10 +1,9 @@
 import SwiftUI
-import SwiftData
 
 struct DashboardView: View {
-    @Query private var trips: [Trip]
-    @Query private var gasEntries: [GasEntry]
-    @Query private var settings: [UserSettings]
+    @State private var stats: APIStats?
+    @State private var recentTrip: APITrip?
+    @State private var loading = true
 
     private var greeting: String {
         let hour = Calendar.current.component(.hour, from: .now)
@@ -13,77 +12,72 @@ struct DashboardView: View {
         return "Good evening"
     }
 
-    private var totalMiles: Double { trips.reduce(0) { $0 + $1.distance } }
-    private var totalGallons: Double { gasEntries.reduce(0) { $0 + $1.gallons } }
-    private var totalSpent: Double { gasEntries.reduce(0) { $0 + $1.totalCost } }
-    private var selfPaid: Double { gasEntries.filter { $0.paidBy == .myself }.reduce(0) { $0 + $1.totalCost } }
-    private var parentsPaid: Double { gasEntries.filter { $0.paidBy == .parents }.reduce(0) { $0 + $1.totalCost } }
-    private var avgMpg: Double { totalGallons > 0 ? totalMiles / totalGallons : 0 }
-    private var costPerMile: Double { totalMiles > 0 ? totalSpent / totalMiles : 0 }
-
-    private var monthlySpent: Double {
-        let now = Date.now
-        let cal = Calendar.current
-        return gasEntries
-            .filter { cal.isDate($0.date, equalTo: now, toGranularity: .month) }
-            .reduce(0) { $0 + $1.totalCost }
-    }
-
-    private var weeklyTrips: [Trip] {
-        let weekAgo = Date.now.addingTimeInterval(-7 * 24 * 60 * 60)
-        return trips.filter { $0.date > weekAgo }
-    }
-
-    private var budget: Double { settings.first?.monthlyBudget ?? 0 }
-
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 20) {
-                    statsGrid
-                    miniStats
-                    spendingSection
-                    if let recentTrip = trips.sorted(by: { $0.date > $1.date }).first {
-                        recentTripSection(recentTrip)
+                if loading {
+                    ProgressView()
+                        .padding(.top, 80)
+                } else if let stats {
+                    VStack(spacing: 20) {
+                        statsGrid(stats)
+                        miniStats(stats)
+                        spendingSection(stats)
+                        if let trip = recentTrip {
+                            recentTripSection(trip)
+                        }
                     }
+                    .padding(.horizontal)
+                    .padding(.bottom, 20)
                 }
-                .padding(.horizontal)
-                .padding(.bottom, 20)
             }
             .background(.black)
             .navigationTitle(greeting)
+            .refreshable { await loadData() }
+            .task { await loadData() }
         }
     }
 
-    private var statsGrid: some View {
+    private func loadData() async {
+        do {
+            async let s = APIClient.fetchStats()
+            async let t = APIClient.fetchTrips()
+            let (fetchedStats, trips) = try await (s, t)
+            stats = fetchedStats
+            recentTrip = trips.first
+            loading = false
+        } catch {
+            loading = false
+        }
+    }
+
+    private func statsGrid(_ s: APIStats) -> some View {
         LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 12) {
-            StatTile(icon: "car.fill", label: "Trips", value: "\(trips.count)", sublabel: "\(weeklyTrips.count) this week", tint: .blue)
-            StatTile(icon: "arrow.triangle.swap", label: "Miles", value: String(format: "%.1f", totalMiles), sublabel: String(format: "%.1f this week", weeklyTrips.reduce(0) { $0 + $1.distance }), tint: .green)
-            StatTile(icon: "drop.fill", label: "Gallons", value: String(format: "%.1f", totalGallons), sublabel: String(format: "%.1f avg MPG", avgMpg), tint: .orange)
-            StatTile(icon: "dollarsign", label: "Spent", value: totalSpent.formatted(.currency(code: "USD")), sublabel: String(format: "$%.2f/mi", costPerMile), tint: .purple)
+            StatTile(icon: "car.fill", label: "Trips", value: "\(s.totalTrips)", sublabel: "\(s.weeklyTrips) this week", tint: .blue)
+            StatTile(icon: "arrow.triangle.swap", label: "Miles", value: String(format: "%.1f", s.totalMiles), sublabel: String(format: "%.1f this week", s.weeklyMiles), tint: .green)
+            StatTile(icon: "drop.fill", label: "Gallons", value: String(format: "%.1f", s.totalGallons), sublabel: String(format: "%.1f avg MPG", s.avgMpg), tint: .orange)
+            StatTile(icon: "dollarsign", label: "Spent", value: String(format: "$%.2f", s.totalSpent), sublabel: String(format: "$%.2f/mi", s.costPerMile), tint: .purple)
         }
     }
 
-    private var miniStats: some View {
+    private func miniStats(_ s: APIStats) -> some View {
         HStack(spacing: 12) {
-            MiniTile(label: "This Month", value: monthlySpent.formatted(.currency(code: "USD")))
-            MiniTile(label: "Favorites", value: "\(trips.filter(\.isFavorite).count)")
+            MiniTile(label: "This Month", value: String(format: "$%.2f", s.monthlySpent))
+            MiniTile(label: "Favorites", value: "\(s.favoriteCount)")
         }
     }
 
-    private var spendingSection: some View {
+    private func spendingSection(_ s: APIStats) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Gas Spending")
                 .font(.headline)
-
-            Text(totalSpent, format: .currency(code: "USD"))
+            Text(s.totalSpent, format: .currency(code: "USD"))
                 .font(.system(.largeTitle, design: .rounded, weight: .bold))
-                .contentTransition(.numericText())
 
-            if totalSpent > 0 {
+            if s.totalSpent > 0 {
                 VStack(spacing: 10) {
-                    BarRow(label: "Paid by Me", amount: selfPaid, total: totalSpent, color: .blue)
-                    BarRow(label: "Paid by Parents", amount: parentsPaid, total: totalSpent, color: .green)
+                    BarRow(label: "Paid by Me", amount: s.selfPaid, total: s.totalSpent, color: .blue)
+                    BarRow(label: "Paid by Parents", amount: s.parentsPaid, total: s.totalSpent, color: .green)
                 }
             } else {
                 Text("No spending yet")
@@ -93,17 +87,16 @@ struct DashboardView: View {
                     .padding(.vertical, 8)
             }
 
-            if budget > 0 {
+            if s.monthlyBudget > 0 {
                 Divider()
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("Monthly Budget")
-                            .font(.subheadline)
+                        Text("Monthly Budget").font(.subheadline)
                         Spacer()
-                        Text("\(monthlySpent.formatted(.currency(code: "USD"))) / \(budget.formatted(.currency(code: "USD")))")
+                        Text(String(format: "$%.2f / $%.2f", s.monthlySpent, s.monthlyBudget))
                             .font(.subheadline.weight(.semibold))
                     }
-                    let pct = min(monthlySpent / budget, 1)
+                    let pct = min(s.monthlySpent / s.monthlyBudget, 1)
                     ProgressView(value: pct)
                         .tint(pct > 0.9 ? .red : pct > 0.7 ? .orange : .green)
                 }
@@ -113,32 +106,27 @@ struct DashboardView: View {
         .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
     }
 
-    private func recentTripSection(_ trip: Trip) -> some View {
+    private func recentTripSection(_ trip: APITrip) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Latest Trip")
-                    .font(.headline)
+                Text("Latest Trip").font(.headline)
                 Spacer()
-                Label(trip.category.label, systemImage: trip.category.icon)
+                Label(trip.tripCategory.label, systemImage: trip.tripCategory.icon)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(trip.startAddress)
-                        .font(.subheadline.weight(.medium))
+                    Text(trip.startAddress).font(.subheadline.weight(.medium))
                     Label(trip.endAddress, systemImage: "arrow.right")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 4) {
                     Text(String(format: "%.1f mi", trip.distance))
                         .font(.subheadline.weight(.semibold))
-                    Text(trip.date, style: .date)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text(trip.parsedDate, style: .date)
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
@@ -147,31 +135,15 @@ struct DashboardView: View {
     }
 }
 
-// MARK: - Components
-
 private struct StatTile: View {
-    let icon: String
-    let label: String
-    let value: String
-    var sublabel: String? = nil
-    let tint: Color
-
+    let icon: String; let label: String; let value: String
+    var sublabel: String? = nil; let tint: Color
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Image(systemName: icon)
-                .font(.title3.weight(.medium))
-                .foregroundStyle(tint)
-            Text(value)
-                .font(.system(.title, design: .rounded, weight: .bold))
-                .contentTransition(.numericText())
-            Text(label)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            if let sublabel {
-                Text(sublabel)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
+            Image(systemName: icon).font(.title3.weight(.medium)).foregroundStyle(tint)
+            Text(value).font(.system(.title, design: .rounded, weight: .bold))
+            Text(label).font(.subheadline).foregroundStyle(.secondary)
+            if let sublabel { Text(sublabel).font(.caption).foregroundStyle(.tertiary) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
@@ -180,39 +152,27 @@ private struct StatTile: View {
 }
 
 private struct MiniTile: View {
-    let label: String
-    let value: String
-
+    let label: String; let value: String
     var body: some View {
         VStack(spacing: 4) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(.title3, design: .rounded, weight: .semibold))
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.system(.title3, design: .rounded, weight: .semibold))
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity).padding(.vertical, 14)
         .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
     }
 }
 
 private struct BarRow: View {
-    let label: String
-    let amount: Double
-    let total: Double
-    let color: Color
-
+    let label: String; let amount: Double; let total: Double; let color: Color
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(label).font(.subheadline)
                 Spacer()
-                Text(amount, format: .currency(code: "USD"))
-                    .font(.subheadline.weight(.semibold))
+                Text(amount, format: .currency(code: "USD")).font(.subheadline.weight(.semibold))
             }
-            ProgressView(value: total > 0 ? amount / total : 0)
-                .tint(color)
+            ProgressView(value: total > 0 ? amount / total : 0).tint(color)
         }
     }
 }

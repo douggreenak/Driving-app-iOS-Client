@@ -1,9 +1,8 @@
 import SwiftUI
-import SwiftData
 
 struct NewGasEntryView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
+    var onSaved: (() async -> Void)?
 
     @State private var date = Date.now
     @State private var gallons = ""
@@ -12,6 +11,7 @@ struct NewGasEntryView: View {
     @State private var fuelType: FuelType = .regular
     @State private var stationName = ""
     @State private var odometer = ""
+    @State private var saving = false
 
     private var totalCost: Double {
         (Double(gallons) ?? 0) * (Double(pricePerGallon) ?? 0)
@@ -22,15 +22,12 @@ struct NewGasEntryView: View {
             Form {
                 Section {
                     VStack(spacing: 4) {
-                        Text("Total")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Text("Total").font(.caption).foregroundStyle(.secondary)
                         Text(totalCost, format: .currency(code: "USD"))
                             .font(.system(size: 40, weight: .bold, design: .rounded))
                             .contentTransition(.numericText())
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity).padding(.vertical, 8)
                 }
 
                 Section("Who's Paying?") {
@@ -43,9 +40,7 @@ struct NewGasEntryView: View {
 
                 Section("Fuel Type") {
                     Picker("Type", selection: $fuelType) {
-                        ForEach(FuelType.allCases, id: \.self) { ft in
-                            Text(ft.label).tag(ft)
-                        }
+                        ForEach(FuelType.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.segmented)
                 }
@@ -53,57 +48,54 @@ struct NewGasEntryView: View {
                 Section("Details") {
                     DatePicker("Date", selection: $date, displayedComponents: .date)
                     HStack {
-                        Text("Gallons")
-                        Spacer()
+                        Text("Gallons"); Spacer()
                         TextField("0.00", text: $gallons)
-                            .keyboardType(.decimalPad)
-                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.decimalPad).multilineTextAlignment(.trailing)
                     }
                     HStack {
-                        Text("Price/Gallon")
-                        Spacer()
+                        Text("Price/Gallon"); Spacer()
                         TextField("0.00", text: $pricePerGallon)
-                            .keyboardType(.decimalPad)
-                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.decimalPad).multilineTextAlignment(.trailing)
                     }
                 }
 
                 Section("Optional") {
                     TextField("Station Name", text: $stationName)
                     HStack {
-                        Text("Odometer")
-                        Spacer()
+                        Text("Odometer"); Spacer()
                         TextField("Miles", text: $odometer)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.numberPad).multilineTextAlignment(.trailing)
                     }
                 }
             }
             .navigationTitle("Add Gas")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { save() }
-                        .disabled(gallons.isEmpty || pricePerGallon.isEmpty)
+                        .disabled(gallons.isEmpty || pricePerGallon.isEmpty || saving)
                 }
             }
         }
     }
 
     private func save() {
-        let entry = GasEntry(
-            date: date,
-            gallons: Double(gallons) ?? 0,
-            pricePerGallon: Double(pricePerGallon) ?? 0,
-            paidBy: paidBy,
-            fuelType: fuelType,
-            stationName: stationName.isEmpty ? nil : stationName,
-            odometer: Double(odometer)
-        )
-        modelContext.insert(entry)
-        dismiss()
+        saving = true
+        let f = ISO8601DateFormatter()
+        Task {
+            let create = APIGasEntryCreate(
+                date: f.string(from: date),
+                gallons: Double(gallons) ?? 0,
+                pricePerGallon: Double(pricePerGallon) ?? 0,
+                paidBy: paidBy.rawValue,
+                fuelType: fuelType.rawValue,
+                stationName: stationName.isEmpty ? nil : stationName,
+                odometer: Double(odometer)
+            )
+            _ = try? await APIClient.createGasEntry(create)
+            await onSaved?()
+            dismiss()
+        }
     }
 }
