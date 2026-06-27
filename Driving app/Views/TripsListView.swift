@@ -1,12 +1,12 @@
 import SwiftUI
+import SwiftData
 
 struct TripsListView: View {
-    @State private var trips: [APITrip] = []
-    @State private var loading = true
-    @State private var showingNewTrip = false
+    @Environment(\.modelContext) private var context
+    @Query(sort: \DriveTrip.date, order: .reverse) private var trips: [DriveTrip]
     @State private var searchText = ""
 
-    private var filteredTrips: [APITrip] {
+    private var filtered: [DriveTrip] {
         if searchText.isEmpty { return trips }
         return trips.filter {
             $0.startAddress.localizedCaseInsensitiveContains(searchText) ||
@@ -17,19 +17,22 @@ struct TripsListView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if loading {
-                    ProgressView().padding(.top, 80)
-                } else if trips.isEmpty {
-                    ContentUnavailableView("No Trips Yet", systemImage: "road.lanes", description: Text("Start tracking your drives"))
+                if trips.isEmpty {
+                    ContentUnavailableView("No Trips Yet", systemImage: "road.lanes",
+                                           description: Text("Start tracking your drives on the Track tab"))
                 } else {
                     List {
-                        ForEach(filteredTrips) { trip in
-                            TripRow(trip: trip)
-                                .swipeActions(edge: .trailing) {
-                                    Button(role: .destructive) { deleteTrip(trip) } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
+                        ForEach(filtered) { trip in
+                            NavigationLink {
+                                TripDetailView(trip: trip)
+                            } label: {
+                                TripRow(trip: trip)
+                            }
+                            .swipeActions(edge: .trailing) {
+                                Button(role: .destructive) { delete(trip) } label: {
+                                    Label("Delete", systemImage: "trash")
                                 }
+                            }
                         }
                     }
                     .searchable(text: $searchText, prompt: "Search trips")
@@ -37,65 +40,68 @@ struct TripsListView: View {
             }
             .background(.black)
             .navigationTitle("Trips")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    HStack(spacing: 12) {
-                        NavigationLink { TripMapView() } label: {
-                            Image(systemName: "map")
-                        }
-                        Button { showingNewTrip = true } label: {
-                            Image(systemName: "plus")
-                        }
-                    }
+                    NavigationLink { TripMapView() } label: { Image(systemName: "map") }
                 }
             }
-            .sheet(isPresented: $showingNewTrip) {
-                NewTripView { await loadTrips() }
-            }
-            .refreshable { await loadTrips() }
-            .task { await loadTrips() }
         }
     }
 
-    private func loadTrips() async {
-        do {
-            trips = try await APIClient.fetchTrips()
-            loading = false
-        } catch { loading = false }
-    }
-
-    private func deleteTrip(_ trip: APITrip) {
-        Task {
-            try? await APIClient.deleteTrip(id: trip.id)
-            trips.removeAll { $0.id == trip.id }
+    private func delete(_ trip: DriveTrip) {
+        if let remoteID = trip.remoteID {
+            Task { try? await APIClient.deleteTrip(id: remoteID) }
         }
+        context.delete(trip)
     }
 }
 
 private struct TripRow: View {
-    let trip: APITrip
+    let trip: DriveTrip
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(trip.parsedDate, style: .date)
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Label(trip.tripCategory.label, systemImage: trip.tripCategory.icon)
-                    .font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text(trip.date, format: .dateTime.month().day().hour().minute())
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 4)
+                if trip.delaySeconds != nil {
+                    StatusChip(status: .forTrip(delaySeconds: trip.delaySeconds), compact: true)
+                }
                 Text(String(format: "%.1f mi", trip.distance))
                     .font(.caption).fontWeight(.semibold)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(.blue.opacity(0.15), in: .capsule)
             }
-            Text(trip.startAddress).font(.subheadline).fontWeight(.medium)
+            Text(trip.startAddress).font(.subheadline).fontWeight(.medium).lineLimit(1)
             HStack(spacing: 4) {
                 Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
-                Text(trip.endAddress).font(.subheadline).foregroundStyle(.secondary)
+                Text(trip.endAddress).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
             }
-            if let notes = trip.notes, !notes.isEmpty {
-                Text(notes).font(.caption).foregroundStyle(.tertiary).italic()
+            HStack(spacing: 10) {
+                stat(trip.category.icon, trip.category.label)
+                stat("clock.fill", durationString(trip.duration))
+                stat("fuelpump.fill", String(format: "%.2f gal", trip.estimatedGallons))
+                Spacer(minLength: 4)
+                if !trip.synced { Image(systemName: "icloud.slash").font(.caption2).foregroundStyle(.tertiary) }
+                PayerChip(payer: trip.paidBy, compact: true)
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func stat(_ icon: String, _ text: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).font(.caption2)
+            Text(text).font(.caption2)
+        }
+        .foregroundStyle(.tertiary)
+    }
+
+    private func durationString(_ seconds: Int) -> String {
+        let h = seconds / 3600, m = (seconds % 3600) / 60
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m) min"
     }
 }

@@ -70,6 +70,7 @@ struct NewGasEntryView: View {
             }
             .navigationTitle("Add Gas")
             .navigationBarTitleDisplayMode(.inline)
+            .keyboardDismissable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {

@@ -3,6 +3,8 @@ import SwiftUI
 struct GasListView: View {
     @State private var entries: [APIGasEntry] = []
     @State private var loading = true
+    @State private var isRefreshing = false
+    @State private var lastUpdated: Date?
     @State private var showingNewEntry = false
     @State private var filter: PaidByFilter = .all
 
@@ -48,6 +50,8 @@ struct GasListView: View {
                 }
                 .padding(.horizontal).padding(.bottom, 8)
 
+                LastUpdatedBanner(lastUpdated: lastUpdated, isRefreshing: isRefreshing)
+
                 if loading {
                     ProgressView().padding(.top, 40)
                     Spacer()
@@ -68,6 +72,7 @@ struct GasListView: View {
             }
             .background(.black)
             .navigationTitle("Gas Log")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button { showingNewEntry = true } label: { Image(systemName: "plus") }
@@ -82,10 +87,38 @@ struct GasListView: View {
     }
 
     private func loadEntries() async {
-        do {
-            entries = try await APIClient.fetchGasEntries()
+        // Show cached entries instantly, then refresh in the background.
+        if entries.isEmpty, let cached = Self.cached() {
+            entries = cached.entries
+            lastUpdated = cached.date
             loading = false
+        }
+        isRefreshing = true
+        do {
+            let fresh = try await APIClient.fetchGasEntries()
+            entries = fresh
+            lastUpdated = .now
+            loading = false
+            Self.cache(fresh, at: .now)
         } catch { loading = false }
+        isRefreshing = false
+    }
+
+    private static let cacheKey = "gas.cachedEntries"
+    private static let dateKey = "gas.cachedEntriesDate"
+
+    private static func cached() -> (entries: [APIGasEntry], date: Date)? {
+        guard let data = UserDefaults.standard.data(forKey: cacheKey),
+              let entries = try? JSONDecoder().decode([APIGasEntry].self, from: data) else { return nil }
+        let date = UserDefaults.standard.object(forKey: dateKey) as? Date ?? .now
+        return (entries, date)
+    }
+
+    private static func cache(_ entries: [APIGasEntry], at date: Date) {
+        if let data = try? JSONEncoder().encode(entries) {
+            UserDefaults.standard.set(data, forKey: cacheKey)
+            UserDefaults.standard.set(date, forKey: dateKey)
+        }
     }
 
     private func deleteEntry(_ entry: APIGasEntry) {

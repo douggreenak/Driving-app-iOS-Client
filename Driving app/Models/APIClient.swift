@@ -66,9 +66,19 @@ struct APIClient {
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
-        let (data, _) = try await URLSession.shared.data(for: req)
+        // Fail fast instead of hanging on the default 60s timeout when the backend is slow/unreachable.
+        req.timeoutInterval = 12
+        let (data, _) = try await session.data(for: req)
         return data
     }
+
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForResource = 20
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
 }
 
 // MARK: - API Models
@@ -112,6 +122,7 @@ struct APITripCreate: Codable {
     let duration: Int
     let notes: String?
     let category: String
+    var routeEncoded: String? = nil
 }
 
 struct APIGasEntry: Codable, Identifiable {

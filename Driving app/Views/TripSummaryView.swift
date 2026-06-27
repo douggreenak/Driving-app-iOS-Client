@@ -4,10 +4,12 @@ import MapKit
 struct TripSummaryView: View {
     let tracker: LocationTracker
     let vehicle: Vehicle?
-    let onSave: (TripCategory, String?) -> Void
+    var initialPaidBy: PaidBy = .myself
+    let onSave: (TripCategory, PaidBy, String?) -> Void
     let onDiscard: () -> Void
 
     @State private var category: TripCategory = .other
+    @State private var paidBy: PaidBy = .myself
     @State private var notes = ""
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var roadNames: [String] = []
@@ -28,6 +30,7 @@ struct TripSummaryView: View {
                         roadsList
                     }
                     addressSection
+                    paidByPicker
                     categoryPicker
                     notesField
                 }
@@ -35,14 +38,16 @@ struct TripSummaryView: View {
             }
             .navigationTitle("Trip Complete")
             .navigationBarTitleDisplayMode(.inline)
+            .keyboardDismissable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Discard", role: .destructive) { onDiscard() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save Trip") { onSave(category, notes.isEmpty ? nil : notes) }
+                    Button("Save Trip") { onSave(category, paidBy, notes.isEmpty ? nil : notes) }
                 }
             }
+            .onAppear { paidBy = initialPaidBy }
             .task { await resolveDetails() }
         }
     }
@@ -51,8 +56,8 @@ struct TripSummaryView: View {
 
     private var routeMap: some View {
         Map(position: $cameraPosition) {
-            if tracker.routeCoordinates.count >= 2 {
-                MapPolyline(coordinates: tracker.routeCoordinates)
+            if tracker.points.map(\.coordinate).count >= 2 {
+                MapPolyline(coordinates: tracker.points.map(\.coordinate))
                     .stroke(.blue, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
             }
             if let start = tracker.startCoordinate {
@@ -218,6 +223,20 @@ struct TripSummaryView: View {
 
     // MARK: - Category & Notes
 
+    private var paidByPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Who's paying for gas?", systemImage: "dollarsign.circle.fill")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(paidBy == .parents ? .green : .blue)
+            Picker("Paid by", selection: $paidBy) {
+                ForEach(PaidBy.allCases, id: \.self) { Label($0.label, systemImage: $0.icon).tag($0) }
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding()
+        .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
+    }
+
     private var categoryPicker: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Category")
@@ -282,7 +301,7 @@ struct TripSummaryView: View {
     }
 
     private func resolveRoadNames() async {
-        let coords = tracker.routeCoordinates
+        let coords = tracker.points.map(\.coordinate)
         guard coords.count >= 2 else { return }
 
         let sampleCount = min(coords.count, 12)

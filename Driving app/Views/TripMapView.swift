@@ -1,41 +1,34 @@
 import SwiftUI
+import SwiftData
 import MapKit
 
 struct TripMapView: View {
-    @State private var trips: [APITrip] = []
-    @State private var loading = true
-    @State private var cameraPosition: MapCameraPosition = .automatic
+    @Query(sort: \DriveTrip.date, order: .reverse) private var trips: [DriveTrip]
 
     var body: some View {
         Group {
-            if loading {
-                ProgressView()
-            } else if trips.isEmpty {
-                ContentUnavailableView("No Trips on Map", systemImage: "map", description: Text("Log trips to see them here"))
+            if trips.isEmpty {
+                ContentUnavailableView("No Trips on Map", systemImage: "map",
+                                       description: Text("Log trips to see them here"))
             } else {
-                Map(position: $cameraPosition) {
+                Map(initialPosition: .region(.enclosing(allCoords))) {
                     ForEach(trips) { trip in
-                        Marker(trip.startAddress, systemImage: "flag.fill", coordinate:
-                            CLLocationCoordinate2D(latitude: trip.startLat, longitude: trip.startLng)
-                        ).tint(.blue)
-                        Marker(trip.endAddress, systemImage: "mappin", coordinate:
-                            CLLocationCoordinate2D(latitude: trip.endLat, longitude: trip.endLng)
-                        ).tint(.red)
-                        MapPolyline(coordinates: [
-                            CLLocationCoordinate2D(latitude: trip.startLat, longitude: trip.startLng),
-                            CLLocationCoordinate2D(latitude: trip.endLat, longitude: trip.endLng),
-                        ]).stroke(.blue.opacity(0.6), lineWidth: 3)
+                        let coords = trip.displayCoordinates
+                        if coords.count >= 2 {
+                            MapPolyline(coordinates: coords)
+                                .stroke(.blue.opacity(0.8), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
+                        }
+                        Marker(trip.endAddress, systemImage: "mappin", coordinate: trip.endCoordinate)
+                            .tint(.red)
                     }
                 }
                 .mapControls { MapUserLocationButton(); MapCompass(); MapScaleView() }
             }
         }
         .navigationTitle("Trip Map")
-        .task {
-            do {
-                trips = try await APIClient.fetchTrips()
-            } catch {}
-            loading = false
-        }
+    }
+
+    private var allCoords: [CLLocationCoordinate2D] {
+        trips.flatMap { [$0.startCoordinate, $0.endCoordinate] }
     }
 }
