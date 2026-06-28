@@ -3,6 +3,13 @@ import Foundation
 struct APIClient {
     static let baseURL = "https://drive-tracker-gamma.vercel.app"
 
+    // Shared secret authenticating this app to the web API. Injected at build
+    // time from Secrets.xcconfig (gitignored) → Info.plist `APIKey`, so the key
+    // is never a literal in committed source. Must match the backend's API_KEY.
+    static let apiKey: String = {
+        Bundle.main.object(forInfoDictionaryKey: "APIKey") as? String ?? ""
+    }()
+
     // MARK: - Trips
 
     static func fetchTrips() async throws -> [APITrip] {
@@ -67,6 +74,7 @@ struct APIClient {
         var req = URLRequest(url: URL(string: baseURL + path)!)
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         req.httpBody = body
         // Fail fast instead of hanging on the default 60s timeout when the backend is slow/unreachable.
         req.timeoutInterval = 12

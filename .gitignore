@@ -1,0 +1,8 @@
+# Local secrets — never commit. Use Secrets.xcconfig.example as the template.
+Secrets.xcconfig
+
+# Xcode build artifacts
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
