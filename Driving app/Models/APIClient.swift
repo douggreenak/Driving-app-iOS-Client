@@ -61,6 +61,8 @@ struct APIClient {
         try await request("POST", path, body: body)
     }
 
+    enum APIError: Error { case http(Int) }
+
     private static func request(_ method: String, _ path: String, body: Data?) async throws -> Data {
         var req = URLRequest(url: URL(string: baseURL + path)!)
         req.httpMethod = method
@@ -68,7 +70,12 @@ struct APIClient {
         req.httpBody = body
         // Fail fast instead of hanging on the default 60s timeout when the backend is slow/unreachable.
         req.timeoutInterval = 12
-        let (data, _) = try await session.data(for: req)
+        let (data, response) = try await session.data(for: req)
+        // Treat non-2xx as a real failure so error bodies aren't decoded as data and a failed
+        // create/delete/patch surfaces to the caller instead of looking like success.
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw APIError.http(http.statusCode)
+        }
         return data
     }
 

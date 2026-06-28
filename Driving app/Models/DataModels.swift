@@ -121,6 +121,8 @@ final class DriveTrip {
     var maxSpeed: Double
     var avgSpeed: Double
     var notes: String?
+    /// Title carried over from the schedule this drive was run from (e.g. "Morning Commute").
+    var name: String?
     var categoryRaw: String
     var isFavorite: Bool
     /// Who covers this drive's fuel cost — the app's core concept.
@@ -131,7 +133,8 @@ final class DriveTrip {
     /// Speed-aware fuel estimate (gallons).
     var estimatedGallons: Double
 
-    /// Scheduled arrival this drive was measured against (if launched from a schedule).
+    /// Scheduled departure & arrival this drive was measured against (if launched from a schedule).
+    var scheduledDeparture: Date?
     var scheduledArrival: Date?
 
     /// Map-matching outputs.
@@ -174,12 +177,14 @@ final class DriveTrip {
         maxSpeed: Double = 0,
         avgSpeed: Double = 0,
         notes: String? = nil,
+        name: String? = nil,
         category: TripCategory = .other,
         isFavorite: Bool = false,
         paidBy: PaidBy = .myself,
         vehicleName: String? = nil,
         vehicleMpg: Double? = nil,
         estimatedGallons: Double = 0,
+        scheduledDeparture: Date? = nil,
         scheduledArrival: Date? = nil,
         matchedFraction: Double = 0,
         usedRouteMatching: Bool = false,
@@ -199,12 +204,14 @@ final class DriveTrip {
         self.maxSpeed = maxSpeed
         self.avgSpeed = avgSpeed
         self.notes = notes
+        self.name = name
         self.categoryRaw = category.rawValue
         self.isFavorite = isFavorite
         self.paidByRaw = paidBy.rawValue
         self.vehicleName = vehicleName
         self.vehicleMpg = vehicleMpg
         self.estimatedGallons = estimatedGallons
+        self.scheduledDeparture = scheduledDeparture
         self.scheduledArrival = scheduledArrival
         self.matchedFraction = matchedFraction
         self.usedRouteMatching = usedRouteMatching
@@ -235,6 +242,13 @@ final class DriveTrip {
             return arr.compactMap { $0.count == 2 ? CLLocationCoordinate2D(latitude: $0[0], longitude: $0[1]) : nil }
         }
         return orderedPoints.map { $0.coordinate }
+    }
+
+    /// How late the actual departure was vs. the scheduled departure (positive = late). Nil if
+    /// the drive wasn't run from a schedule.
+    var departureDelaySeconds: Int? {
+        guard let scheduledDeparture else { return nil }
+        return Int(date.timeIntervalSince(scheduledDeparture))
     }
 
     /// Delay vs. the scheduled arrival in seconds (positive = late). Nil if not scheduled.
@@ -306,6 +320,9 @@ final class ScheduledDrive {
     var isEnabled: Bool
     var isCanceled: Bool = false
     var lastStartedAt: Date?
+    /// When the drive was last completed (tracking stopped). Used to drop a finished occurrence
+    /// off the departures board.
+    var lastCompletedAt: Date?
     var createdAt: Date = Date()
 
     init(
@@ -535,6 +552,8 @@ final class Vehicle {
     var year: Int?
     var tankSize: Double?
     var avgMpg: Double?
+    /// Date of this car's most recent fill-up. The paid-by gas cost only counts trips since then.
+    var lastFilledUp: Date?
 
     init(name: String, make: String? = nil, model: String? = nil, year: Int? = nil, tankSize: Double? = nil, avgMpg: Double? = nil) {
         self.name = name

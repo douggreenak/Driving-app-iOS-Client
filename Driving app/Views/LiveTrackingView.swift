@@ -97,12 +97,24 @@ struct LiveTrackingView: View {
         if !isModal {
             recovered = LocationTracker.recoverableSession()
         }
-        // Auto-start a scheduled drive once, pre-loaded with its destination & arrival target.
+        // Auto-start a scheduled drive once, pre-loaded with its destination & schedule timing.
         if let scheduled, !didAutoStart {
             didAutoStart = true
             tracker.destination = scheduled.endCoordinate
             tracker.destinationName = scheduled.endAddress
-            tracker.scheduledArrival = scheduled.targetArrival()
+            tracker.tripName = scheduled.title
+            // The occurrence happening today: the schedule's departure & arrival times-of-day on
+            // today's date. (Computing these directly avoids the delay being read as the full
+            // travel time.)
+            let cal = Calendar.current
+            let today = Date()
+            let depT = cal.dateComponents([.hour, .minute], from: scheduled.departure)
+            let arrT = cal.dateComponents([.hour, .minute], from: scheduled.scheduledArrival)
+            let schedDep = cal.date(bySettingHour: depT.hour ?? 0, minute: depT.minute ?? 0, second: 0, of: today) ?? today
+            var schedArr = cal.date(bySettingHour: arrT.hour ?? 0, minute: arrT.minute ?? 0, second: 0, of: today) ?? today
+            if schedArr < schedDep { schedArr = cal.date(byAdding: .day, value: 1, to: schedArr) ?? schedArr }  // overnight
+            tracker.scheduledDeparture = schedDep
+            tracker.scheduledArrival = schedArr
             tracker.plannedCategory = scheduled.category
             tracker.plannedPaidBy = scheduled.paidBy
             tracker.plannedVehicleName = scheduled.vehicleName
@@ -138,8 +150,16 @@ struct LiveTrackingView: View {
             }
         }
         .mapStyle(.standard(elevation: .flat))
+        // Apple-Maps behavior: panning or pinching the map breaks the follow lock; the recenter
+        // button re-engages it.
+        .simultaneousGesture(DragGesture(minimumDistance: 6).onChanged { _ in
+            if followUser { followUser = false }
+        })
+        .simultaneousGesture(MagnifyGesture().onChanged { _ in
+            if followUser { followUser = false }
+        })
         .onChange(of: tracker.currentLocation?.latitude) { _, _ in
-            // Auto-follow the current location instead of staying frozen on the start point.
+            // While locked on, keep the camera centered on the current location.
             // MapKit interpolates camera moves itself; avoid stacking explicit animations.
             if followUser, let loc = tracker.currentLocation {
                 cameraPosition = .region(MKCoordinateRegion(
@@ -305,7 +325,7 @@ struct LiveTrackingView: View {
                     let gallons = tracker.accumulatedGallons
                     HStack {
                         Image(systemName: "fuelpump.fill").foregroundStyle(.orange)
-                        Text(String(format: "~%.2f gal used", gallons)).font(.subheadline).fontWeight(.medium)
+                        Text(String(format: "Est. %.2f gal used", gallons)).font(.subheadline).fontWeight(.medium)
                         Text(String(format: "(%.0f MPG)", mpg)).font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 16).padding(.vertical, 10)
@@ -339,6 +359,7 @@ struct LiveTrackingView: View {
 
     private var startButton: some View {
         Button {
+            Haptics.rigid()
             withAnimation(.spring(duration: 0.4)) { startTracking() }
         } label: {
             controlLabel("Start Tracking", "location.fill", .green)
@@ -348,6 +369,7 @@ struct LiveTrackingView: View {
 
     private var stopButton: some View {
         Button {
+            Haptics.rigid()
             withAnimation(.spring(duration: 0.4)) { tracker.stopTracking() }
             showingSummary = true
         } label: {
@@ -379,30 +401,38 @@ struct LiveTrackingView: View {
 
     private func saveTrip(category: TripCategory, paidBy: PaidBy, notes: String?) {
         let pts = tracker.points
+        let scheduledDeparture = tracker.scheduledDeparture
         let scheduledArrival = tracker.scheduledArrival
+        let tripName = tracker.tripName
         let destName = tracker.destinationName
+        let schedStart = scheduled?.startAddress
         let vehName = selectedVehicle?.name
         let vehMpg = selectedVehicle?.avgMpg
+        // Dismiss + clear the crash log *synchronously* so the trip can't be saved twice (a second
+        // Save tap during the async save, or a stale crash-recovery) creating a duplicate.
+        tracker.clearCrashLog()
+        showingSummary = false
+        // The scheduled occurrence is done — drop it off the departures board.
+        scheduled?.lastCompletedAt = .now
+        try? context.save()
         guard let start = pts.first?.coordinate, let end = pts.last?.coordinate else {
-            showingSummary = false
             if isModal { dismiss() }
             return
         }
         Task { @MainActor in
-            let startAddr = await reverseGeocode(start)
+            let startAddr: String
+            if let schedStart { startAddr = schedStart } else { startAddr = await reverseGeocode(start) }
             let endAddr: String
             if let destName { endAddr = destName } else { endAddr = await reverseGeocode(end) }
             let input = TripStore.Input(
                 points: pts, startAddress: startAddr, endAddress: endAddr,
-                category: category, paidBy: paidBy, notes: notes,
+                category: category, paidBy: paidBy, notes: notes, name: tripName,
                 vehicleName: vehName, vehicleMpg: vehMpg,
-                scheduledArrival: scheduledArrival
+                scheduledDeparture: scheduledDeparture, scheduledArrival: scheduledArrival
             )
             await TripStore.save(input, context: context)
-            tracker.clearCrashLog()
-            showingSummary = false
-            if isModal { dismiss() }
         }
+        if isModal { dismiss() }
     }
 
     private func discardTrip() {
@@ -420,9 +450,9 @@ struct LiveTrackingView: View {
         let input = TripStore.Input(
             points: rec.points, startAddress: startAddr, endAddress: endAddr,
             category: TripCategory(rawValue: rec.meta.category) ?? .other, paidBy: .myself,
-            notes: "Recovered drive",
+            notes: "Recovered drive", name: nil,
             vehicleName: rec.meta.vehicleName, vehicleMpg: veh?.avgMpg,
-            scheduledArrival: rec.meta.scheduledArrival
+            scheduledDeparture: nil, scheduledArrival: rec.meta.scheduledArrival
         )
         await TripStore.save(input, context: context)
         LocationTracker.discardRecoverableSession()

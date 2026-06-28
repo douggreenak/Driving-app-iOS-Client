@@ -15,8 +15,10 @@ enum TripStore {
         var category: TripCategory
         var paidBy: PaidBy
         var notes: String?
+        var name: String?
         var vehicleName: String?
         var vehicleMpg: Double?
+        var scheduledDeparture: Date?
         var scheduledArrival: Date?
     }
 
@@ -58,11 +60,13 @@ enum TripStore {
             maxSpeed: maxSpeed,
             avgSpeed: avgSpeed,
             notes: input.notes,
+            name: input.name,
             category: input.category,
             paidBy: input.paidBy,
             vehicleName: input.vehicleName,
             vehicleMpg: input.vehicleMpg,
             estimatedGallons: gallons,
+            scheduledDeparture: input.scheduledDeparture,
             scheduledArrival: input.scheduledArrival,
             matchedFraction: match.matchedFraction,
             usedRouteMatching: match.usedRoute,
@@ -89,11 +93,39 @@ enum TripStore {
         return trip
     }
 
+    /// Retroactively update every past trip in a car when its name or MPG changes: re-point the
+    /// trips to the (possibly new) name and recompute their speed-aware fuel estimate with the new
+    /// MPG. This keeps the gas-used and paid-by-cost numbers consistent across the whole history.
+    static func updateTripsForVehicle(oldName: String, newName: String, newMpg: Double?, context: ModelContext) {
+        let descriptor = FetchDescriptor<DriveTrip>(predicate: #Predicate { $0.vehicleName == oldName })
+        guard let trips = try? context.fetch(descriptor), !trips.isEmpty else { return }
+        for trip in trips {
+            trip.vehicleName = newName
+            guard let mpg = newMpg, mpg > 0 else { continue }
+            trip.vehicleMpg = mpg
+            let recorded = trip.orderedPoints.map {
+                RecordedPoint(t: $0.t, coordinate: $0.coordinate, speed: $0.speed,
+                              course: $0.course, accuracy: $0.accuracy, altitude: $0.altitude)
+            }
+            if recorded.count >= 2 {
+                trip.estimatedGallons = FuelModel.gallons(segments: FuelModel.segments(from: recorded), ratedMpg: mpg)
+            } else {
+                trip.estimatedGallons = trip.distance / mpg
+            }
+        }
+        try? context.save()
+    }
+
     private static func movingSeconds(_ pts: [RecordedPoint]) -> Int {
         guard pts.count >= 2 else { return 0 }
         var s = 0.0
-        for i in 1..<pts.count where pts[i].speed > 3 {
-            s += pts[i].t.timeIntervalSince(pts[i - 1].t)
+        for i in 1..<pts.count {
+            // Use the interval's representative speed (average of its endpoints) so a pure idle
+            // interval isn't counted, while genuine accel/decel intervals are.
+            let avg = (pts[i].speed + pts[i - 1].speed) / 2
+            if avg > 3 {
+                s += pts[i].t.timeIntervalSince(pts[i - 1].t)
+            }
         }
         return Int(s)
     }
@@ -107,7 +139,8 @@ enum TripStore {
             startLat: trip.startLat, startLng: trip.startLng,
             endLat: trip.endLat, endLng: trip.endLng,
             distance: trip.distance,
-            duration: max(1, trip.duration / 60),
+            // Round to the nearest minute (not truncate) so a 90s trip reports 2 min, not 1.
+            duration: max(1, (trip.duration + 30) / 60),
             notes: trip.notes,
             category: trip.categoryRaw,
             routeEncoded: Polyline.encode(displayCoords)

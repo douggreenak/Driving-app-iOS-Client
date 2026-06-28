@@ -8,6 +8,11 @@ struct NewScheduledDriveView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var context
     @Query private var vehicles: [Vehicle]
+    /// Most-recent schedules first — used to prefill non-location/time details on a new drive.
+    @Query(sort: \ScheduledDrive.createdAt, order: .reverse) private var recentDrives: [ScheduledDrive]
+
+    /// When non-nil the form edits this existing drive in place rather than creating a new one.
+    private let editing: ScheduledDrive?
 
     @State private var title = ""
     @State private var startAddress = ""
@@ -25,13 +30,40 @@ struct NewScheduledDriveView: View {
     @State private var arrivalOverride: Date?
     @State private var calculating = false
     @State private var routeError: String?
+    @State private var didPrefill = false
+
+    init(editing: ScheduledDrive? = nil) {
+        self.editing = editing
+        if let d = editing {
+            _title = State(initialValue: d.title)
+            _startAddress = State(initialValue: d.startAddress)
+            _endAddress = State(initialValue: d.endAddress)
+            _departure = State(initialValue: d.departure)
+            _repeatRule = State(initialValue: d.repeatRule)
+            _category = State(initialValue: d.category)
+            _paidBy = State(initialValue: d.paidBy)
+            _vehicleName = State(initialValue: d.vehicleName)
+            _notes = State(initialValue: d.notes ?? "")
+            _startCoord = State(initialValue: d.startCoordinate)
+            _endCoord = State(initialValue: d.endCoordinate)
+            _travelSeconds = State(initialValue: d.estimatedTravelTime)
+            _arrivalOverride = State(initialValue: d.scheduledArrival)
+        }
+    }
 
     private var arrival: Date {
         arrivalOverride ?? departure.addingTimeInterval(TimeInterval(travelSeconds ?? 0))
     }
 
+    /// Start and destination must be meaningfully different (not the same pin).
+    private var sameStartAndEnd: Bool {
+        guard let s = startCoord, let e = endCoord else { return false }
+        return s.distanceMeters(to: e) < 50
+    }
+
     private var canSave: Bool {
-        !title.isEmpty && startCoord != nil && endCoord != nil && travelSeconds != nil
+        !title.trimmingCharacters(in: .whitespaces).isEmpty
+            && startCoord != nil && endCoord != nil && travelSeconds != nil && !sameStartAndEnd
     }
 
     var body: some View {
@@ -54,7 +86,12 @@ struct NewScheduledDriveView: View {
                         }
                     }
                     if let routeError {
-                        Text(routeError).font(.caption).foregroundStyle(.orange)
+                        Label(routeError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    if sameStartAndEnd {
+                        Label("Start and destination are the same place.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
                     }
                 }
 
@@ -105,12 +142,15 @@ struct NewScheduledDriveView: View {
                         .lineLimit(2)
                 }
             }
-            .navigationTitle("New Scheduled Drive")
+            .navigationTitle(editing == nil ? "New Scheduled Drive" : "Edit Scheduled Drive")
             .navigationBarTitleDisplayMode(.inline)
             .keyboardDismissable()
+            .onAppear(perform: prefillFromLast)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(!canSave) }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(editing == nil ? "Save" : "Done") { save() }.disabled(!canSave)
+                }
             }
         }
     }
@@ -130,27 +170,56 @@ struct NewScheduledDriveView: View {
             travelSeconds = Int(eta.expectedTravelTime)
             arrivalOverride = nil
         } catch {
-            routeError = "Couldn't compute a driving route."
+            routeError = "Couldn't find a driving route between these two places. Check the addresses and your connection."
         }
+    }
+
+    /// On a brand-new drive, copy the non-location/time details from the most recent schedule so
+    /// repeated trips don't have to be reconfigured every time.
+    private func prefillFromLast() {
+        guard editing == nil, !didPrefill else { return }
+        didPrefill = true
+        guard let last = recentDrives.first else { return }
+        repeatRule = last.repeatRule
+        category = last.category
+        paidBy = last.paidBy
+        vehicleName = last.vehicleName
     }
 
     private func save() {
         guard let s = startCoord, let e = endCoord, let travel = travelSeconds else { return }
-        let drive = ScheduledDrive(
-            title: title,
-            startAddress: startAddress, endAddress: endAddress,
-            startLat: s.latitude, startLng: s.longitude,
-            endLat: e.latitude, endLng: e.longitude,
-            departure: departure,
-            estimatedTravelTime: travel,
-            scheduledArrival: arrival,
-            repeatRule: repeatRule,
-            category: category,
-            paidBy: paidBy,
-            vehicleName: vehicleName,
-            notes: notes.isEmpty ? nil : notes
-        )
-        context.insert(drive)
+        Haptics.success()
+        if let drive = editing {
+            drive.title = title
+            drive.startAddress = startAddress
+            drive.endAddress = endAddress
+            drive.startLat = s.latitude; drive.startLng = s.longitude
+            drive.endLat = e.latitude; drive.endLng = e.longitude
+            drive.departure = departure
+            drive.estimatedTravelTime = travel
+            drive.scheduledArrival = arrival
+            drive.repeatRule = repeatRule
+            drive.category = category
+            drive.paidBy = paidBy
+            drive.vehicleName = vehicleName
+            drive.notes = notes.isEmpty ? nil : notes
+        } else {
+            let drive = ScheduledDrive(
+                title: title,
+                startAddress: startAddress, endAddress: endAddress,
+                startLat: s.latitude, startLng: s.longitude,
+                endLat: e.latitude, endLng: e.longitude,
+                departure: departure,
+                estimatedTravelTime: travel,
+                scheduledArrival: arrival,
+                repeatRule: repeatRule,
+                category: category,
+                paidBy: paidBy,
+                vehicleName: vehicleName,
+                notes: notes.isEmpty ? nil : notes
+            )
+            context.insert(drive)
+        }
         try? context.save()
         dismiss()
     }
@@ -163,7 +232,11 @@ struct NewScheduledDriveView: View {
 
     private static func defaultDeparture() -> Date {
         let cal = Calendar.current
-        let tomorrow = cal.date(byAdding: .day, value: 1, to: Date()) ?? Date()
-        return cal.date(bySettingHour: 8, minute: 0, second: 0, of: tomorrow) ?? Date()
+        let now = Date()
+        // Default to today at 8 AM; if that's already past, use the next round hour.
+        let eightToday = cal.date(bySettingHour: 8, minute: 0, second: 0, of: now) ?? now
+        if eightToday > now { return eightToday }
+        let nextHour = cal.date(byAdding: .hour, value: 1, to: now) ?? now
+        return cal.date(bySettingHour: cal.component(.hour, from: nextHour), minute: 0, second: 0, of: now) ?? now
     }
 }

@@ -51,6 +51,56 @@ final class AddressCompleter: NSObject, MKLocalSearchCompleterDelegate {
     }
 }
 
+/// One-shot current-location fetch + reverse geocode, for the "Use current location" option.
+@MainActor
+@Observable
+final class CurrentLocationProvider: NSObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private var continuation: CheckedContinuation<CLLocation?, Never>?
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+    }
+
+    /// Request authorization (if needed) and return the device's current fix, or nil on failure.
+    func current() async -> PickedLocation? {
+        let status = manager.authorizationStatus
+        if status == .notDetermined { manager.requestWhenInUseAuthorization() }
+        if status == .denied || status == .restricted { return nil }
+        let location: CLLocation? = await withCheckedContinuation { cont in
+            continuation = cont
+            manager.requestLocation()
+        }
+        guard let location else { return nil }
+        let address = await reverseGeocode(location) ?? "Current Location"
+        return PickedLocation(address: address, coordinate: location.coordinate)
+    }
+
+    private func reverseGeocode(_ location: CLLocation) async -> String? {
+        guard let placemark = try? await CLGeocoder().reverseGeocodeLocation(location).first else { return nil }
+        let parts = [placemark.subThoroughfare, placemark.thoroughfare].compactMap { $0 }
+        let street = parts.joined(separator: " ")
+        return [street.isEmpty ? nil : street, placemark.locality]
+            .compactMap { $0 }.joined(separator: ", ")
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        Task { @MainActor in
+            continuation?.resume(returning: locations.last)
+            continuation = nil
+        }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        Task { @MainActor in
+            continuation?.resume(returning: nil)
+            continuation = nil
+        }
+    }
+}
+
 /// A tappable form row that opens the address search sheet and fills in the picked address.
 struct AddressPickerRow: View {
     let title: String
@@ -93,11 +143,17 @@ struct LocationSearchSheet: View {
     var onPick: (PickedLocation) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var context
     @Query(sort: \SavedPlace.sortOrder) private var places: [SavedPlace]
     @State private var completer = AddressCompleter()
+    @State private var locator = CurrentLocationProvider()
     @State private var query = ""
     @State private var resolving = false
+    @State private var showingAdd = false
+    @State private var pendingDelete: SavedPlace?
     @FocusState private var focused: Bool
+
+    private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
 
     private var isSearching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
 
@@ -105,14 +161,11 @@ struct LocationSearchSheet: View {
         NavigationStack {
             VStack(spacing: 0) {
                 searchBar
-                List {
-                    if isSearching {
-                        resultsSection
-                    } else {
-                        savedSection
-                    }
+                if isSearching {
+                    List { resultsSection }.listStyle(.plain)
+                } else {
+                    savedCards
                 }
-                .listStyle(.plain)
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
@@ -122,9 +175,20 @@ struct LocationSearchSheet: View {
             .overlay {
                 if resolving { ProgressView().controlSize(.large) }
             }
+            .sheet(isPresented: $showingAdd) {
+                AddBookmarkView(nextOrder: (places.map(\.sortOrder).max() ?? -1) + 1)
+            }
+            .confirmationDialog("Remove this saved place?",
+                                isPresented: Binding(get: { pendingDelete != nil },
+                                                     set: { if !$0 { pendingDelete = nil } }),
+                                titleVisibility: .visible) {
+                Button("Remove", role: .destructive) {
+                    if let p = pendingDelete { Haptics.warning(); context.delete(p); try? context.save() }
+                    pendingDelete = nil
+                }
+            }
             .onAppear {
                 if !initialQuery.isEmpty { query = initialQuery; completer.query = initialQuery }
-                focused = true
             }
         }
     }
@@ -132,7 +196,7 @@ struct LocationSearchSheet: View {
     private var searchBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Start typing an address…", text: $query)
+            TextField("Search for an address", text: $query)
                 .focused($focused)
                 .autocorrectionDisabled()
                 .submitLabel(.search)
@@ -148,27 +212,87 @@ struct LocationSearchSheet: View {
         .padding()
     }
 
-    @ViewBuilder
-    private var savedSection: some View {
-        if places.isEmpty {
-            ContentUnavailableView("Search an address", systemImage: "mappin.and.ellipse",
-                description: Text("Start typing to see suggestions, or bookmark places in Settings."))
-                .listRowSeparator(.hidden)
-        } else {
-            Section("Saved Places") {
+    // MARK: - Saved-place cards (shown when not actively searching)
+
+    private var savedCards: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 12) {
+                currentLocationCard
                 ForEach(places) { place in
-                    Button { pick(PickedLocation(address: place.address, coordinate: place.coordinate)) } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: place.icon).foregroundStyle(.blue).frame(width: 26)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(place.label).font(.subheadline.weight(.medium))
-                                Text(place.address).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
+                    placeCard(place)
                 }
+                addCard
             }
+            .padding(.horizontal)
+            .padding(.bottom, 24)
+        }
+    }
+
+    private var currentLocationCard: some View {
+        Button { Task { await useCurrentLocation() } } label: {
+            cardBody(icon: "location.fill", iconColor: .white, iconBackground: .blue,
+                     title: "Current Location", subtitle: "Use where you are now",
+                     tint: .blue.opacity(0.18))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func placeCard(_ place: SavedPlace) -> some View {
+        Button { pick(PickedLocation(address: place.address, coordinate: place.coordinate)) } label: {
+            cardBody(icon: place.icon, iconColor: .blue, iconBackground: .blue.opacity(0.15),
+                     title: place.label, subtitle: place.address, tint: Color(.systemGray6))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive) { pendingDelete = place } label: {
+                Label("Remove", systemImage: "trash")
+            }
+        }
+    }
+
+    private var addCard: some View {
+        Button { Haptics.tap(); showingAdd = true } label: {
+            VStack(spacing: 8) {
+                Image(systemName: "plus")
+                    .font(.title2.weight(.semibold)).foregroundStyle(.blue)
+                    .frame(width: 40, height: 40)
+                    .background(.blue.opacity(0.12), in: .circle)
+                Text("Add Place").font(.subheadline.weight(.semibold)).foregroundStyle(.blue)
+                Text("Save an address").font(.caption2).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity).frame(height: 116)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6]))
+                    .foregroundStyle(.blue.opacity(0.5))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Shared card chrome: a tinted icon chip, a bold title, and a one-line subtitle.
+    private func cardBody(icon: String, iconColor: Color, iconBackground: Color,
+                          title: String, subtitle: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: icon)
+                .font(.headline).foregroundStyle(iconColor)
+                .frame(width: 40, height: 40)
+                .background(iconBackground, in: .circle)
+            Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
+            Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: 116)
+        .padding(12)
+        .background(tint, in: .rect(cornerRadius: 16))
+    }
+
+    private func useCurrentLocation() async {
+        resolving = true
+        defer { resolving = false }
+        if let picked = await locator.current() {
+            pick(picked)
         }
     }
 

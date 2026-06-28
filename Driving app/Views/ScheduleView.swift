@@ -7,6 +7,7 @@ import SwiftData
 struct ScheduleView: View {
     @Query private var drives: [ScheduledDrive]
     @State private var showingNew = false
+    @State private var pendingDelete: ScheduledDrive?
 
     /// All today/upcoming occurrences across all drives, grouped by day.
     private var grouped: [(day: Date, items: [DriveOccurrence])] {
@@ -16,8 +17,12 @@ struct ScheduleView: View {
         var all: [DriveOccurrence] = []
         for drive in drives {
             for dep in drive.occurrences(in: start...end) {
-                all.append(DriveOccurrence(drive: drive, departure: dep,
-                                           arrival: dep.addingTimeInterval(drive.arrivalBudget)))
+                let occ = DriveOccurrence(drive: drive, departure: dep,
+                                          arrival: dep.addingTimeInterval(drive.arrivalBudget))
+                // Once a trip has arrived (tracking stopped within this occurrence's window),
+                // drop it from the board.
+                if occ.isCompleted { continue }
+                all.append(occ)
             }
         }
         let dict = Dictionary(grouping: all) { cal.startOfDay(for: $0.departure) }
@@ -44,6 +49,25 @@ struct ScheduleView: View {
                 }
             }
             .sheet(isPresented: $showingNew) { NewScheduledDriveView() }
+            .confirmationDialog("Delete this scheduled drive?",
+                                isPresented: Binding(get: { pendingDelete != nil },
+                                                     set: { if !$0 { pendingDelete = nil } }),
+                                titleVisibility: .visible) {
+                Button("Delete Drive", role: .destructive) {
+                    if let d = pendingDelete {
+                        Haptics.warning()
+                        let ctx = d.modelContext
+                        ctx?.delete(d)
+                        try? ctx?.save()
+                    }
+                    pendingDelete = nil
+                }
+            } message: {
+                let repeats = (pendingDelete?.repeatRule ?? .none) != .none
+                Text(repeats
+                     ? "This is a repeating drive — deleting it removes all of its occurrences."
+                     : "This removes the scheduled drive.")
+            }
         }
     }
 
@@ -81,6 +105,7 @@ struct ScheduleView: View {
 
     private func cancelButton(_ drive: ScheduledDrive) -> some View {
         Button {
+            Haptics.selection()
             drive.isCanceled.toggle()
             try? drive.modelContext?.save()
         } label: {
@@ -92,9 +117,7 @@ struct ScheduleView: View {
 
     private func deleteButton(_ drive: ScheduledDrive) -> some View {
         Button(role: .destructive) {
-            let ctx = drive.modelContext
-            ctx?.delete(drive)
-            try? ctx?.save()
+            pendingDelete = drive
         } label: {
             Label("Delete", systemImage: "trash")
         }
@@ -122,6 +145,13 @@ struct DriveOccurrence: Identifiable {
     var isDeparted: Bool {
         guard let s = drive.lastStartedAt else { return false }
         return s >= departure.addingTimeInterval(-1800) && s <= arrival.addingTimeInterval(3 * 3600)
+    }
+
+    /// Has this occurrence arrived (tracking stopped within its window)? Completed occurrences
+    /// drop off the board.
+    var isCompleted: Bool {
+        guard let c = drive.lastCompletedAt else { return false }
+        return c >= departure.addingTimeInterval(-1800) && c <= arrival.addingTimeInterval(6 * 3600)
     }
 
     var status: TripStatus {
@@ -156,22 +186,25 @@ struct DepartureRow: View {
                 HStack(spacing: 6) {
                     Circle().fill(occ.startColor).frame(width: 7, height: 7)
                     Text(occ.departure, format: .dateTime.hour().minute())
-                        .font(.system(.subheadline, design: .rounded, weight: .bold)).monospacedDigit()
+                        .font(.system(.subheadline, design: .rounded, weight: .bold))
+                        .monospacedDigit().lineLimit(1).fixedSize()
                 }
                 HStack(spacing: 6) {
                     Circle().fill(occ.endColor).frame(width: 7, height: 7)
                     Text(occ.arrival, format: .dateTime.hour().minute())
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1).fixedSize()
                 }
             }
-            .frame(width: 92, alignment: .leading)
+            .frame(width: 86, alignment: .leading)
 
             Rectangle().fill(.secondary.opacity(0.25)).frame(width: 1, height: 36)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
-                    Label(occ.drive.title, systemImage: occ.drive.category.icon)
-                        .font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Image(systemName: occ.drive.category.icon)
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(occ.drive.title)
+                        .font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.85)
                     Image(systemName: occ.drive.paidBy.icon)
                         .font(.caption2).foregroundStyle(occ.drive.paidBy.tint)
                 }
@@ -180,7 +213,8 @@ struct DepartureRow: View {
                     Text(occ.drive.endAddress).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
-            Spacer(minLength: 6)
+            .layoutPriority(1)
+            Spacer(minLength: 4)
             StatusChip(status: occ.status, compact: true)
         }
         .padding(.vertical, 4)

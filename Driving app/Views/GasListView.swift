@@ -7,6 +7,7 @@ struct GasListView: View {
     @State private var lastUpdated: Date?
     @State private var showingNewEntry = false
     @State private var filter: PaidByFilter = .all
+    @State private var pendingDelete: APIGasEntry?
 
     enum PaidByFilter: CaseIterable {
         case all, myself, parents
@@ -34,21 +35,27 @@ struct GasListView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding()
+                .disabled(loading)
 
-                HStack {
-                    VStack {
-                        Text(filteredTotal, format: .currency(code: "USD"))
-                            .font(.title2).fontWeight(.bold).fontDesign(.rounded)
-                        Text("total").font(.caption2).foregroundStyle(.secondary)
+                // Only show the totals row once there's something to total.
+                if !filteredEntries.isEmpty {
+                    HStack {
+                        VStack {
+                            Text(filteredTotal, format: .currency(code: "USD"))
+                                .font(.title2).fontWeight(.bold).fontDesign(.rounded)
+                                .contentTransition(.numericText())
+                            Text(filteredEntries.count.things("fill-up")).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        VStack {
+                            Text(String(format: "%.1f gal", filteredGallons))
+                                .font(.title2).fontWeight(.bold).fontDesign(.rounded)
+                                .contentTransition(.numericText())
+                            Text("used").font(.caption2).foregroundStyle(.secondary)
+                        }
                     }
-                    Spacer()
-                    VStack {
-                        Text(String(format: "%.1f gal", filteredGallons))
-                            .font(.title2).fontWeight(.bold).fontDesign(.rounded)
-                        Text("used").font(.caption2).foregroundStyle(.secondary)
-                    }
+                    .padding(.horizontal).padding(.bottom, 8)
                 }
-                .padding(.horizontal).padding(.bottom, 8)
 
                 LastUpdatedBanner(lastUpdated: lastUpdated, isRefreshing: isRefreshing)
 
@@ -56,13 +63,25 @@ struct GasListView: View {
                     ProgressView().padding(.top, 40)
                     Spacer()
                 } else if filteredEntries.isEmpty {
-                    ContentUnavailableView("No Gas Entries", systemImage: "fuelpump", description: Text("Track your fuel expenses"))
+                    ContentUnavailableView {
+                        Label("No Gas Entries", systemImage: "fuelpump")
+                    } description: {
+                        Text(filter == .all ? "Log a fill-up to track fuel spending and who paid."
+                                            : "No fill-ups paid by \(filter.label).")
+                    } actions: {
+                        if filter == .all {
+                            Button { Haptics.tap(); showingNewEntry = true } label: {
+                                Label("Add Fill-up", systemImage: "plus")
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
                 } else {
                     List {
                         ForEach(filteredEntries) { entry in
                             GasRow(entry: entry)
                                 .swipeActions(edge: .trailing) {
-                                    Button(role: .destructive) { deleteEntry(entry) } label: {
+                                    Button(role: .destructive) { pendingDelete = entry } label: {
                                         Label("Delete", systemImage: "trash")
                                     }
                                 }
@@ -80,6 +99,15 @@ struct GasListView: View {
             }
             .sheet(isPresented: $showingNewEntry) {
                 NewGasEntryView { await loadEntries() }
+            }
+            .confirmationDialog("Delete this fill-up?",
+                                isPresented: Binding(get: { pendingDelete != nil },
+                                                     set: { if !$0 { pendingDelete = nil } }),
+                                titleVisibility: .visible) {
+                Button("Delete Fill-up", role: .destructive) {
+                    if let e = pendingDelete { deleteEntry(e) }
+                    pendingDelete = nil
+                }
             }
             .refreshable { await loadEntries() }
             .task { await loadEntries() }
@@ -122,9 +150,16 @@ struct GasListView: View {
     }
 
     private func deleteEntry(_ entry: APIGasEntry) {
+        Haptics.warning()
         Task {
-            try? await APIClient.deleteGasEntry(id: entry.id)
-            entries.removeAll { $0.id == entry.id }
+            // Only drop it locally if the server actually deleted it — otherwise a failed delete
+            // would vanish from the UI and reappear on the next refresh.
+            do {
+                try await APIClient.deleteGasEntry(id: entry.id)
+                entries.removeAll { $0.id == entry.id }
+            } catch {
+                // Leave the entry in place; the cache/refresh keeps it consistent with the server.
+            }
         }
     }
 }

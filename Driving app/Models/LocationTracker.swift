@@ -26,7 +26,9 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     // Destination / schedule context (optional).
     var destination: CLLocationCoordinate2D?
     var destinationName: String?
+    var scheduledDeparture: Date?
     var scheduledArrival: Date?
+    var tripName: String?
     var plannedCategory: TripCategory = .other
     var plannedPaidBy: PaidBy = .myself
     var plannedVehicleName: String?
@@ -172,9 +174,10 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
 
     var etaDate: Date? {
         guard let remainingMiles else { return nil }
-        if remainingMiles < 0.05 { return Date() }
+        let now = Date()
+        if remainingMiles < 0.05 { return now }
         let hours = remainingMiles / max(recentAvgSpeedMph, 5)
-        return Date().addingTimeInterval(hours * 3600)
+        return now.addingTimeInterval(hours * 3600)
     }
 
     /// Seconds late (positive) or early (negative) vs. the scheduled arrival.
@@ -250,14 +253,13 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
                     let segMph = max(0, (prevMph + mph) / 2)
                     accumulatedGallons += (step / 1609.34) / FuelModel.mpg(atMph: segMph, ratedMpg: ratedMpg ?? 25)
                 }
-                if mph > 3 {
-                    if let prev = lastMovingSample {
-                        movingSeconds += Int(location.timestamp.timeIntervalSince(prev).rounded())
-                    }
-                    lastMovingSample = location.timestamp
-                } else {
-                    lastMovingSample = location.timestamp
+                // Count an interval as "moving" only when both ends are above the idle threshold,
+                // so time spent stopped (then resuming) isn't folded into moving time.
+                let prevMph = last.speed >= 0 ? last.speed * 2.23694 : 0
+                if mph > 3, prevMph > 3, let prev = lastMovingSample {
+                    movingSeconds += Int(location.timestamp.timeIntervalSince(prev).rounded())
                 }
+                lastMovingSample = location.timestamp
             } else {
                 lastMovingSample = location.timestamp
             }

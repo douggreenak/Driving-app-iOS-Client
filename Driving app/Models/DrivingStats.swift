@@ -40,11 +40,17 @@ struct DrivingStats {
     var selfGallons = 0.0, parentsGallons = 0.0
     var selfDrives = 0, parentsDrives = 0
 
+    /// Gallons billable at the current pump price: only fuel burned since each car's last fill-up.
+    /// Cost is computed from these so the price applies to the current tank only.
+    var selfBillableGallons = 0.0, parentsBillableGallons = 0.0
+    var totalBillableGallons = 0.0
+
     func gallons(for payer: PaidBy) -> Double { payer == .parents ? parentsGallons : selfGallons }
     func miles(for payer: PaidBy) -> Double { payer == .parents ? parentsMiles : selfMiles }
     func drives(for payer: PaidBy) -> Int { payer == .parents ? parentsDrives : selfDrives }
-    func cost(for payer: PaidBy, pricePerGallon: Double) -> Double { gallons(for: payer) * pricePerGallon }
-    func totalCost(pricePerGallon: Double) -> Double { totalGallons * pricePerGallon }
+    func billableGallons(for payer: PaidBy) -> Double { payer == .parents ? parentsBillableGallons : selfBillableGallons }
+    func cost(for payer: PaidBy, pricePerGallon: Double) -> Double { billableGallons(for: payer) * pricePerGallon }
+    func totalCost(pricePerGallon: Double) -> Double { totalBillableGallons * pricePerGallon }
 
     var avgMph: Double { totalSeconds > 0 ? totalMiles / (Double(totalSeconds) / 3600) : 0 }
     var avgDriveMiles: Double { driveCount > 0 ? totalMiles / Double(driveCount) : 0 }
@@ -72,7 +78,9 @@ struct DrivingStats {
 
     init() {}
 
-    init(trips: [DriveTrip]) {
+    /// - Parameter fillUps: per-car (`vehicleName` → last fill-up date). Fuel burned on or after a
+    ///   car's last fill-up is "billable" at the current price; earlier fuel was paid for already.
+    init(trips: [DriveTrip], fillUps: [String: Date] = [:]) {
         guard !trips.isEmpty else { return }
         driveCount = trips.count
 
@@ -86,10 +94,17 @@ struct DrivingStats {
             totalSeconds += t.duration
             totalGallons += t.estimatedGallons
 
+            // Billable only if on/after this car's last fill-up (or the car has no recorded fill-up).
+            let fillUp = t.vehicleName.flatMap { fillUps[$0] }
+            let billable = fillUp == nil || t.date >= fillUp!
+            if billable { totalBillableGallons += t.estimatedGallons }
+
             if t.paidBy == .parents {
                 parentsMiles += t.distance; parentsGallons += t.estimatedGallons; parentsDrives += 1
+                if billable { parentsBillableGallons += t.estimatedGallons }
             } else {
                 selfMiles += t.distance; selfGallons += t.estimatedGallons; selfDrives += 1
+                if billable { selfBillableGallons += t.estimatedGallons }
             }
 
             longestMiles = max(longestMiles, t.distance)

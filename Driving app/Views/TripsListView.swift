@@ -5,12 +5,14 @@ struct TripsListView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \DriveTrip.date, order: .reverse) private var trips: [DriveTrip]
     @State private var searchText = ""
+    @State private var pendingDelete: DriveTrip?
 
     private var filtered: [DriveTrip] {
         if searchText.isEmpty { return trips }
         return trips.filter {
             $0.startAddress.localizedCaseInsensitiveContains(searchText) ||
-            $0.endAddress.localizedCaseInsensitiveContains(searchText)
+            $0.endAddress.localizedCaseInsensitiveContains(searchText) ||
+            ($0.name?.localizedCaseInsensitiveContains(searchText) ?? false)
         }
     }
 
@@ -19,7 +21,9 @@ struct TripsListView: View {
             Group {
                 if trips.isEmpty {
                     ContentUnavailableView("No Trips Yet", systemImage: "road.lanes",
-                                           description: Text("Start tracking your drives on the Track tab"))
+                                           description: Text("Record a drive from the Track tab and it'll show up here."))
+                } else if filtered.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
                 } else {
                     List {
                         ForEach(filtered) { trip in
@@ -29,7 +33,7 @@ struct TripsListView: View {
                                 TripRow(trip: trip)
                             }
                             .swipeActions(edge: .trailing) {
-                                Button(role: .destructive) { delete(trip) } label: {
+                                Button(role: .destructive) { pendingDelete = trip } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
                             }
@@ -46,10 +50,22 @@ struct TripsListView: View {
                     NavigationLink { TripMapView() } label: { Image(systemName: "map") }
                 }
             }
+            .confirmationDialog("Delete this trip?",
+                                isPresented: Binding(get: { pendingDelete != nil },
+                                                     set: { if !$0 { pendingDelete = nil } }),
+                                titleVisibility: .visible) {
+                Button("Delete Trip", role: .destructive) {
+                    if let t = pendingDelete { delete(t) }
+                    pendingDelete = nil
+                }
+            } message: {
+                Text("This permanently removes the recorded drive and its track.")
+            }
         }
     }
 
     private func delete(_ trip: DriveTrip) {
+        Haptics.warning()
         if let remoteID = trip.remoteID {
             Task { try? await APIClient.deleteTrip(id: remoteID) }
         }
@@ -62,8 +78,12 @@ private struct TripRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let name = trip.name, !name.isEmpty {
+                Text(name)
+                    .font(.headline).fontWeight(.semibold).foregroundStyle(.primary).lineLimit(1)
+            }
             HStack(spacing: 6) {
-                Text(trip.date, format: .dateTime.month().day().hour().minute())
+                Text(dateLabel(trip.date))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 4)
                 if trip.delaySeconds != nil {
@@ -81,7 +101,7 @@ private struct TripRow: View {
             }
             HStack(spacing: 10) {
                 stat(trip.category.icon, trip.category.label)
-                stat("clock.fill", durationString(trip.duration))
+                stat("clock.fill", Fmt.duration(trip.duration))
                 stat("fuelpump.fill", String(format: "%.2f gal", trip.estimatedGallons))
                 Spacer(minLength: 4)
                 if !trip.synced { Image(systemName: "icloud.slash").font(.caption2).foregroundStyle(.tertiary) }
@@ -99,9 +119,12 @@ private struct TripRow: View {
         .foregroundStyle(.tertiary)
     }
 
-    private func durationString(_ seconds: Int) -> String {
-        let h = seconds / 3600, m = (seconds % 3600) / 60
-        if h > 0 { return "\(h)h \(m)m" }
-        return "\(m) min"
+    /// "Today 3:14 PM", "Yesterday 9:02 AM", else "Jun 27 at 8:19 PM".
+    private func dateLabel(_ date: Date) -> String {
+        let cal = Calendar.current
+        let time = date.formatted(.dateTime.hour().minute())
+        if cal.isDateInToday(date) { return "Today \(time)" }
+        if cal.isDateInYesterday(date) { return "Yesterday \(time)" }
+        return date.formatted(.dateTime.month().day().hour().minute())
     }
 }

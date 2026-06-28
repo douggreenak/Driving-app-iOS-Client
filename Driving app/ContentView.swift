@@ -59,9 +59,6 @@ struct ContentView: View {
             Tab("Gas", systemImage: "fuelpump.fill") {
                 GasListView()
             }
-            Tab("Settings", systemImage: "gearshape.fill") {
-                SettingsView()
-            }
         }
         .preferredColorScheme(.dark)
         .task {

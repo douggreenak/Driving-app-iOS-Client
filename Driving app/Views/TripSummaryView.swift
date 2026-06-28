@@ -11,6 +11,9 @@ struct TripSummaryView: View {
     @State private var category: TripCategory = .other
     @State private var paidBy: PaidBy = .myself
     @State private var notes = ""
+    @State private var saving = false
+    @State private var didInit = false
+    @State private var showDiscardConfirm = false
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var roadNames: [String] = []
     @State private var startAddress = ""
@@ -41,13 +44,24 @@ struct TripSummaryView: View {
             .keyboardDismissable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Discard", role: .destructive) { onDiscard() }
+                    Button("Discard", role: .destructive) { showDiscardConfirm = true }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save Trip") { onSave(category, paidBy, notes.isEmpty ? nil : notes) }
+                    Button("Save Trip") {
+                        guard !saving else { return }
+                        saving = true
+                        Haptics.success()
+                        onSave(category, paidBy, notes.isEmpty ? nil : notes)
+                    }
+                    .disabled(saving)
                 }
             }
-            .onAppear { paidBy = initialPaidBy }
+            .confirmationDialog("Discard this drive?", isPresented: $showDiscardConfirm, titleVisibility: .visible) {
+                Button("Discard Drive", role: .destructive) { Haptics.warning(); onDiscard() }
+            } message: {
+                Text("The recorded route and stats won't be saved.")
+            }
+            .onAppear { if !didInit { paidBy = initialPaidBy; didInit = true } }
             .task { await resolveDetails() }
         }
     }
@@ -92,7 +106,7 @@ struct TripSummaryView: View {
                 color: .blue
             )
             summaryStatBox(
-                value: tracker.formattedElapsed(),
+                value: Fmt.duration(tracker.elapsedSeconds),
                 unit: "duration",
                 icon: "clock.fill",
                 color: .orange

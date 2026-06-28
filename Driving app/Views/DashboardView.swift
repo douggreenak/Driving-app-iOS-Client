@@ -7,12 +7,14 @@ struct DashboardView: View {
     @Query(sort: \DriveTrip.date, order: .reverse) private var allTrips: [DriveTrip]
     @Query private var scheduled: [ScheduledDrive]
     @Query private var settingsList: [UserSettings]
+    @Query private var vehicles: [Vehicle]
 
     private var fuelPrice: Double { settingsList.first?.fuelPricePerGallon ?? 3.75 }
 
     @State private var gas: APIStats?
     @State private var lastUpdated: Date?
     @State private var isRefreshing = false
+    @State private var showingSettings = false
 
     private var greeting: String {
         let hour = Calendar.current.component(.hour, from: .now)
@@ -30,6 +32,12 @@ struct DashboardView: View {
             ScrollView { scrollContent }
                 .background(.black)
                 .navigationTitle(greeting)
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button { showingSettings = true } label: { Image(systemName: "gearshape.fill") }
+                    }
+                }
+                .sheet(isPresented: $showingSettings) { SettingsView() }
                 .refreshable { await loadGas() }
                 .task { await loadGas() }
         }
@@ -37,7 +45,9 @@ struct DashboardView: View {
 
     private var scrollContent: some View {
         // Compute the (potentially large) stats roll-up once per render instead of once per section.
-        let stats = DrivingStats(trips: allTrips)
+        let fillUps = Dictionary(vehicles.compactMap { v in v.lastFilledUp.map { (v.name, $0) } },
+                                 uniquingKeysWith: { a, _ in a })
+        let stats = DrivingStats(trips: allTrips, fillUps: fillUps)
         return VStack(spacing: 20) {
             if let drive = nextDrive { upcomingCard(drive) }
 
@@ -65,13 +75,13 @@ struct DashboardView: View {
     private func heroStats(_ stats: DrivingStats) -> some View {
         LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 12) {
             HeroTile(icon: "road.lanes", tint: .blue, value: format(stats.totalMiles), unit: "miles driven",
-                     sub: String(format: "%.0f avg / drive", stats.avgDriveMiles))
+                     sub: String(format: "%.0f mi avg / trip", stats.avgDriveMiles))
             HeroTile(icon: "clock.fill", tint: .orange, value: DrivingStats.duration(stats.totalSeconds), unit: "time driving",
                      sub: String(format: "%.0f mph avg", stats.avgMph))
             HeroTile(icon: "fuelpump.fill", tint: .green, value: String(format: "%.1f", stats.totalGallons), unit: "gal burned",
                      sub: stats.avgMpg > 0 ? String(format: "%.0f MPG effective", stats.avgMpg) : "—")
-            HeroTile(icon: "flag.checkered", tint: .purple, value: "\(stats.driveCount)", unit: "drives logged",
-                     sub: "\(stats.byCar.count) car\(stats.byCar.count == 1 ? "" : "s")")
+            HeroTile(icon: "flag.checkered", tint: .purple, value: "\(stats.driveCount)", unit: stats.driveCount == 1 ? "drive logged" : "drives logged",
+                     sub: stats.byCar.count.things("car"))
         }
     }
 
@@ -213,10 +223,10 @@ struct DashboardView: View {
             .frame(width: 64, height: 64)
             VStack(alignment: .leading, spacing: 4) {
                 Text("On-time performance").font(.subheadline.weight(.semibold))
-                Text("\(stats.onTimeCount)/\(stats.scheduledCount) scheduled drives on time")
+                Text("\(stats.onTimeCount) of \(stats.scheduledCount.things("scheduled drive")) on time")
                     .font(.caption).foregroundStyle(.secondary)
                 if let avg = stats.avgDelaySeconds {
-                    Text(avg > 60 ? "Avg \(avg/60) min late" : avg < -60 ? "Avg \(-avg/60) min early" : "On schedule")
+                    Text(avg > 60 ? "Avg \(Fmt.duration(avg)) late" : avg < -60 ? "Avg \(Fmt.duration(-avg)) early" : "On schedule")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(avg > 60 ? .orange : .green)
                 }

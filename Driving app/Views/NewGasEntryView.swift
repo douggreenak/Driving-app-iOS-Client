@@ -17,6 +17,12 @@ struct NewGasEntryView: View {
         (Double(gallons) ?? 0) * (Double(pricePerGallon) ?? 0)
     }
 
+    /// Require valid, positive gallons & price before the entry can be saved.
+    private var canSave: Bool {
+        guard let g = Double(gallons), g > 0, let p = Double(pricePerGallon), p > 0 else { return false }
+        return !saving
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -26,6 +32,7 @@ struct NewGasEntryView: View {
                         Text(totalCost, format: .currency(code: "USD"))
                             .font(.system(size: 40, weight: .bold, design: .rounded))
                             .contentTransition(.numericText())
+                            .lineLimit(1).minimumScaleFactor(0.5)
                     }
                     .frame(maxWidth: .infinity).padding(.vertical, 8)
                 }
@@ -46,7 +53,7 @@ struct NewGasEntryView: View {
                 }
 
                 Section("Details") {
-                    DatePicker("Date", selection: $date, displayedComponents: .date)
+                    DatePicker("Date", selection: $date, displayedComponents: [.date, .hourAndMinute])
                     HStack {
                         Text("Gallons"); Spacer()
                         TextField("0.00", text: $gallons)
@@ -75,7 +82,7 @@ struct NewGasEntryView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { save() }
-                        .disabled(gallons.isEmpty || pricePerGallon.isEmpty || saving)
+                        .disabled(!canSave)
                 }
             }
         }
@@ -83,6 +90,7 @@ struct NewGasEntryView: View {
 
     private func save() {
         saving = true
+        Haptics.success()
         let f = ISO8601DateFormatter()
         Task {
             let create = APIGasEntryCreate(

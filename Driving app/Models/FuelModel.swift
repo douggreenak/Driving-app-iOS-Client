@@ -59,13 +59,19 @@ enum FuelModel {
         out.reserveCapacity(points.count - 1)
         for i in 1..<points.count {
             let a = points[i - 1], b = points[i]
-            let miles = a.coordinate.distanceMeters(to: b.coordinate) / 1609.34
+            let meters = a.coordinate.distanceMeters(to: b.coordinate)
+            // Reject teleport spikes from bad GPS fixes, matching how live distance is
+            // accumulated — otherwise a single glitch inflates the fuel estimate and makes it
+            // disagree with the trip's measured distance.
+            guard meters < 500 else { continue }
+            let miles = meters / 1609.34
             guard miles > 0 else { continue }
             // Prefer measured GPS speed; fall back to distance/time if speed is missing.
             var mph = (a.speed + b.speed) / 2
             if mph <= 0 {
                 let dt = b.t.timeIntervalSince(a.t)
-                if dt > 0 { mph = (miles / (dt / 3600)) }
+                // Require a sane interval so a sub-second gap can't imply thousands of mph.
+                if dt > 0.5 { mph = (miles / (dt / 3600)) }
             }
             out.append(Segment(miles: miles, mph: max(0, mph)))
         }

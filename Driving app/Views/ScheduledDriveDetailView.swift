@@ -13,10 +13,15 @@ struct ScheduledDriveDetailView: View {
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var loadingRoute = true
     @State private var showStart = false
+    @State private var showEdit = false
+    @State private var showDeleteConfirm = false
 
     private var departure: Date { drive.statusReferenceDeparture() }
     private var arrival: Date { drive.targetArrival() }
-    private var status: TripStatus { .upcoming(delaySeconds: drive.arrivalDelaySeconds(), isCanceled: drive.isCanceled) }
+    private var status: TripStatus {
+        .occurrence(departure: departure, scheduledArrival: arrival, travelSeconds: drive.estimatedTravelTime,
+                    isCanceled: drive.isCanceled, startedAt: drive.lastStartedAt)
+    }
 
     // Start dot = departure status, end dot = arrival status (green / yellow / red).
     private var startColor: Color { drive.isCanceled ? .red : (drive.departureIsLate() ? .yellow : .green) }
@@ -38,8 +43,14 @@ struct ScheduledDriveDetailView: View {
         .background(.black)
         .navigationTitle(drive.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { showEdit = true } label: { Image(systemName: "pencil") }
+            }
+        }
         .task { await loadRoute() }
         .fullScreenCover(isPresented: $showStart) { LiveTrackingView(scheduled: drive) }
+        .sheet(isPresented: $showEdit) { NewScheduledDriveView(editing: drive) }
     }
 
     // MARK: - Map header (optimal route)
@@ -197,6 +208,7 @@ struct ScheduledDriveDetailView: View {
     private var actions: some View {
         VStack(spacing: 12) {
             Button {
+                Haptics.tap()
                 showStart = true
             } label: {
                 Label("Start Drive", systemImage: "play.fill")
@@ -208,6 +220,7 @@ struct ScheduledDriveDetailView: View {
 
             HStack(spacing: 12) {
                 Button {
+                    Haptics.selection()
                     drive.isCanceled.toggle()
                     try? context.save()
                 } label: {
@@ -219,9 +232,7 @@ struct ScheduledDriveDetailView: View {
                         .background(Color(.systemGray6), in: .capsule)
                 }
                 Button(role: .destructive) {
-                    context.delete(drive)
-                    try? context.save()
-                    dismiss()
+                    showDeleteConfirm = true
                 } label: {
                     Label("Delete", systemImage: "trash")
                         .font(.subheadline.weight(.medium))
@@ -230,6 +241,19 @@ struct ScheduledDriveDetailView: View {
                         .background(Color(.systemGray6), in: .capsule)
                 }
             }
+        }
+        .confirmationDialog("Delete this scheduled drive?",
+                            isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("Delete Drive", role: .destructive) {
+                Haptics.warning()
+                context.delete(drive)
+                try? context.save()
+                dismiss()
+            }
+        } message: {
+            Text(drive.repeatRule == .none
+                 ? "This removes the scheduled drive."
+                 : "This is a repeating drive — deleting it removes all of its occurrences.")
         }
     }
 

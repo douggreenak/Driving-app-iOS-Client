@@ -9,7 +9,9 @@ import Charts
 struct TripDetailView: View {
     @Bindable var trip: DriveTrip
     @Environment(\.modelContext) private var context
+    @Query private var schedules: [ScheduledDrive]
     @State private var showPlayback = false
+    @State private var showEditSchedule = false
     /// Heavy track-derived values (polyline decode, fuel model, chart, region) computed once
     /// per trip instead of on every re-render (e.g. when the favorite star is toggled).
     @State private var derived: TripDerived?
@@ -23,22 +25,27 @@ struct TripDetailView: View {
             }
         }
         .background(.black)
-        .navigationTitle("Trip Detail")
+        .navigationTitle(trip.name ?? "Trip Detail")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
+                    Haptics.tap()
                     trip.isFavorite.toggle()
                     try? context.save()
                 } label: {
                     Image(systemName: trip.isFavorite ? "star.fill" : "star")
                         .foregroundStyle(trip.isFavorite ? .yellow : .secondary)
                 }
+                .accessibilityLabel(trip.isFavorite ? "Remove from favorites" : "Add to favorites")
             }
         }
         .task(id: trip.persistentModelID) { derived = TripDerived(trip: trip) }
         .fullScreenCover(isPresented: $showPlayback) {
             NavigationStack { RoutePlaybackView(trip: trip) }
+        }
+        .sheet(isPresented: $showEditSchedule) {
+            EditTripScheduleView(trip: trip)
         }
     }
 
@@ -53,6 +60,7 @@ struct TripDetailView: View {
                 if trip.usedRouteMatching { matchCard }
                 vehicleCard
                 paidByCard
+                scheduleLinkCard
                 fuelCard(d)
                 if !d.chart.isEmpty { speedChartCard(d) }
                 playButton(d)
@@ -63,10 +71,23 @@ struct TripDetailView: View {
 
     // MARK: - Map header
 
+    /// Start dot reflects the *departure*: green when on time or unscheduled, orange when the
+    /// departure was late. End dot reflects the *arrival*. Never red — that would imply a problem.
+    private var startTint: Color {
+        guard let d = trip.departureDelaySeconds else { return .green }
+        // Orange whenever tracking started after the scheduled departure (small grace for jitter).
+        return d >= 60 ? .orange : .green
+    }
+    private var endTint: Color {
+        guard let d = trip.delaySeconds else { return .green }
+        return d >= 60 ? .orange : .green
+    }
+
     private func mapHeader(_ d: TripDerived) -> some View {
         ZStack(alignment: .bottom) {
             TripRouteMap(coordinates: d.displayCoords, deviations: d.deviationCoords,
-                         region: d.region, start: trip.startCoordinate, end: trip.endCoordinate)
+                         region: d.region, start: trip.startCoordinate, end: trip.endCoordinate,
+                         startColor: startTint, endColor: endTint)
                 .frame(height: 280)
 
             LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .center, endPoint: .bottom)
@@ -74,12 +95,12 @@ struct TripDetailView: View {
                 .allowsHitTesting(false)
 
             HStack {
-                endpointLabel(title: trip.startAddress, time: trip.date, tint: .green, align: .leading)
+                endpointLabel(title: trip.startAddress, time: trip.date, tint: startTint, align: .leading)
                 Spacer(minLength: 8)
                 Image(systemName: "arrow.right")
                     .foregroundStyle(.white.opacity(0.7))
                 Spacer(minLength: 8)
-                endpointLabel(title: trip.endAddress, time: trip.endDate, tint: .red, align: .trailing)
+                endpointLabel(title: trip.endAddress, time: trip.endDate, tint: endTint, align: .trailing)
             }
             .padding()
         }
@@ -97,6 +118,8 @@ struct TripDetailView: View {
                 .foregroundStyle(tint)
         }
         .frame(maxWidth: .infinity, alignment: align == .leading ? .leading : .trailing)
+        // Keep the labels legible over busy map tiles / POI labels.
+        .shadow(color: .black.opacity(0.7), radius: 4, y: 1)
     }
 
     // MARK: - Schedule / status card (the flight-status look)
@@ -111,7 +134,8 @@ struct TripDetailView: View {
             }
 
             HStack(alignment: .top) {
-                timeColumn(label: "DEPARTED", time: trip.date, sub: trip.startAddress, align: .leading)
+                timeColumn(label: "DEPARTED", time: trip.date, scheduled: trip.scheduledDeparture,
+                           sub: trip.startAddress, tint: startTint, align: .leading)
                 Spacer()
                 VStack(spacing: 4) {
                     Image(systemName: "car.fill")
@@ -121,7 +145,8 @@ struct TripDetailView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                timeColumn(label: "ARRIVED", time: trip.endDate, sub: trip.endAddress, align: .trailing)
+                timeColumn(label: "ARRIVED", time: trip.endDate, scheduled: trip.scheduledArrival,
+                           sub: trip.endAddress, tint: endTint, align: .trailing)
             }
 
             // Departure → arrival progress line
@@ -129,21 +154,22 @@ struct TripDetailView: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.secondary.opacity(0.25)).frame(height: 4)
                     Capsule().fill(.blue).frame(width: geo.size.width, height: 4)
-                    Circle().fill(.green).frame(width: 10, height: 10)
-                    Circle().fill(.red).frame(width: 10, height: 10)
+                    Circle().fill(startTint).frame(width: 10, height: 10)
+                    Circle().fill(endTint).frame(width: 10, height: 10)
                         .offset(x: geo.size.width - 10)
                 }
             }
             .frame(height: 12)
 
-            if let scheduled = trip.scheduledArrival {
+            if trip.scheduledDeparture != nil || trip.scheduledArrival != nil {
                 HStack {
-                    Text("Scheduled arrival")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if let dep = trip.departureDelaySeconds {
+                        delaySummary("Departed", dep, startTint, .leading)
+                    }
                     Spacer()
-                    Text(scheduled, format: .dateTime.hour().minute())
-                        .font(.caption.weight(.medium))
+                    if let arr = trip.delaySeconds {
+                        delaySummary("Arrived", arr, endTint, .trailing)
+                    }
                 }
             }
         }
@@ -151,14 +177,36 @@ struct TripDetailView: View {
         .background(Color(.systemGray6), in: .rect(cornerRadius: 16))
     }
 
-    private func timeColumn(label: String, time: Date, sub: String, align: HorizontalAlignment) -> some View {
-        VStack(alignment: align, spacing: 3) {
+    /// Show the actual time prominently; whenever a scheduled time exists, show it beneath —
+    /// struck-through in the status tint when it differs, plain/secondary when it matches.
+    private func timeColumn(label: String, time: Date, scheduled: Date?, sub: String, tint: Color, align: HorizontalAlignment) -> some View {
+        let differs = scheduled.map { abs($0.timeIntervalSince(time)) >= 60 } ?? false
+        return VStack(alignment: align, spacing: 3) {
             Text(label).font(.caption2.weight(.bold)).foregroundStyle(.secondary)
             Text(time, format: .dateTime.hour().minute())
                 .font(.system(.title2, design: .rounded, weight: .bold))
+            if let scheduled {
+                HStack(spacing: 3) {
+                    Text("Sched").font(.caption2.weight(.semibold))
+                    Text(scheduled, format: .dateTime.hour().minute()).strikethrough(differs)
+                }
+                .font(.caption2)
+                .foregroundStyle(differs ? tint : .secondary)
+            }
             Text(sub).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: align == .leading ? .leading : .trailing)
+    }
+
+    private func delaySummary(_ verb: String, _ seconds: Int, _ tint: Color, _ align: HorizontalAlignment) -> some View {
+        let m = abs(seconds) / 60
+        let text: String
+        if abs(seconds) < 60 { text = "\(verb) on time" }
+        else { text = "\(verb) \(m)m \(seconds > 0 ? "late" : "early")" }
+        return Text(text)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(abs(seconds) < 60 ? .green : tint)
+            .frame(maxWidth: .infinity, alignment: align == .leading ? .leading : .trailing)
     }
 
     // MARK: - Stats
@@ -247,6 +295,67 @@ struct TripDetailView: View {
         }
         .padding()
         .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
+    }
+
+    // MARK: - Schedule link (retroactively apply a schedule)
+
+    private var scheduleLinkCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "calendar.badge.clock")
+                .font(.title2).foregroundStyle(.blue).frame(width: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Schedule").font(.subheadline.weight(.semibold))
+                Text(trip.scheduledArrival == nil
+                     ? "Not linked — apply a schedule to grade on-time"
+                     : "Graded against a scheduled arrival")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 6)
+            Menu {
+                Button { showEditSchedule = true } label: {
+                    Label("Edit times…", systemImage: "pencil")
+                }
+                if !schedules.isEmpty {
+                    Section("Apply a saved schedule") {
+                        ForEach(schedules) { s in
+                            Button { apply(s) } label: { Label(s.title, systemImage: s.category.icon) }
+                        }
+                    }
+                }
+                if trip.scheduledArrival != nil || trip.scheduledDeparture != nil {
+                    Button(role: .destructive) {
+                        trip.scheduledArrival = nil
+                        trip.scheduledDeparture = nil
+                        try? context.save()
+                    } label: { Label("Remove schedule", systemImage: "xmark.circle") }
+                }
+            } label: {
+                Text(trip.scheduledArrival == nil ? "Apply" : "Change")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 7)
+                    .background(.blue.gradient, in: .capsule)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
+    }
+
+    /// Apply a scheduled drive's arrival target to this past trip so it's graded on-time/delayed,
+    /// using the schedule's arrival time-of-day on the day this trip happened.
+    private func apply(_ schedule: ScheduledDrive) {
+        let cal = Calendar.current
+        let t = cal.dateComponents([.hour, .minute], from: schedule.scheduledArrival)
+        if let arrival = cal.date(bySettingHour: t.hour ?? 0, minute: t.minute ?? 0, second: 0, of: trip.date) {
+            trip.scheduledArrival = arrival
+        }
+        let d = cal.dateComponents([.hour, .minute], from: schedule.departure)
+        if let departure = cal.date(bySettingHour: d.hour ?? 0, minute: d.minute ?? 0, second: 0, of: trip.date) {
+            trip.scheduledDeparture = departure
+        }
+        trip.name = schedule.title
+        trip.category = schedule.category
+        trip.paidBy = schedule.paidBy
+        try? context.save()
     }
 
     // MARK: - Fuel (speed-aware)
@@ -370,6 +479,85 @@ struct TripDerived {
     }
 }
 
+/// Edit a completed trip's schedule after the fact: its name and the scheduled departure/arrival
+/// times it should be graded against (on-time / late). Either time can be cleared.
+struct EditTripScheduleView: View {
+    @Bindable var trip: DriveTrip
+    @Environment(\.modelContext) private var context
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name: String
+    @State private var hasDeparture: Bool
+    @State private var hasArrival: Bool
+    @State private var departure: Date
+    @State private var arrival: Date
+
+    init(trip: DriveTrip) {
+        self.trip = trip
+        _name = State(initialValue: trip.name ?? "")
+        _hasDeparture = State(initialValue: trip.scheduledDeparture != nil)
+        _hasArrival = State(initialValue: trip.scheduledArrival != nil)
+        _departure = State(initialValue: trip.scheduledDeparture ?? trip.date)
+        _arrival = State(initialValue: trip.scheduledArrival ?? trip.endDate)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Trip") {
+                    TextField("Name (e.g. Morning Commute)", text: $name)
+                }
+                Section {
+                    Toggle("Scheduled departure", isOn: $hasDeparture.animation())
+                    if hasDeparture {
+                        DatePicker("Departs", selection: $departure)
+                        labeledDelta("Actual departure", trip.date, departure)
+                    }
+                } footer: {
+                    Text("Set the time you were supposed to leave. The start dot turns orange if you left late.")
+                }
+                Section {
+                    Toggle("Scheduled arrival", isOn: $hasArrival.animation())
+                    if hasArrival {
+                        DatePicker("Arrives", selection: $arrival)
+                        labeledDelta("Actual arrival", trip.endDate, arrival)
+                    }
+                } footer: {
+                    Text("Set the time you were supposed to arrive. The trip is graded on-time or late against this.")
+                }
+            }
+            .navigationTitle("Edit Schedule")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { save() } }
+            }
+        }
+    }
+
+    /// Shows the actual time and the resulting delay vs. the chosen scheduled time.
+    private func labeledDelta(_ label: String, _ actual: Date, _ scheduled: Date) -> some View {
+        let secs = Int(actual.timeIntervalSince(scheduled))
+        let m = abs(secs) / 60
+        let text = abs(secs) < 60 ? "on time" : "\(m)m \(secs > 0 ? "late" : "early")"
+        return HStack {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(actual, format: .dateTime.hour().minute())
+            Text("(\(text))").foregroundStyle(abs(secs) < 60 ? .green : (secs > 0 ? .orange : .blue))
+        }
+        .font(.caption)
+    }
+
+    private func save() {
+        trip.name = name.isEmpty ? nil : name
+        trip.scheduledDeparture = hasDeparture ? departure : nil
+        trip.scheduledArrival = hasArrival ? arrival : nil
+        try? context.save()
+        dismiss()
+    }
+}
+
 /// Static map of a recorded trip from pre-computed coordinates (no per-render decoding).
 struct TripRouteMap: View {
     let coordinates: [CLLocationCoordinate2D]
@@ -377,6 +565,8 @@ struct TripRouteMap: View {
     let region: MKCoordinateRegion
     let start: CLLocationCoordinate2D
     let end: CLLocationCoordinate2D
+    var startColor: Color = .green
+    var endColor: Color = .red
 
     var body: some View {
         Map(initialPosition: .region(region)) {
@@ -389,8 +579,8 @@ struct TripRouteMap: View {
                 MapCircle(center: deviations[i], radius: 18)
                     .foregroundStyle(.orange.opacity(0.7))
             }
-            Annotation("Start", coordinate: start) { pin(.green) }
-            Annotation("End", coordinate: end) { pin(.red) }
+            Annotation("Start", coordinate: start) { pin(startColor) }
+            Annotation("End", coordinate: end) { pin(endColor) }
         }
         .mapStyle(.standard(elevation: .flat))
     }

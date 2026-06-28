@@ -20,6 +20,8 @@ struct PayerChip: View {
         .padding(.horizontal, compact ? 7 : 9).padding(.vertical, compact ? 3 : 5)
         .background(payer.tint, in: .capsule)
         .fixedSize()
+        .accessibilityElement()
+        .accessibilityLabel("Paid by \(payer.label)")
     }
 }
 
@@ -49,8 +51,8 @@ struct TripStatus {
     /// Status for a completed trip given how late it arrived (positive = late).
     static func forTrip(delaySeconds: Int?) -> TripStatus {
         guard let d = delaySeconds else {
-            return .init(kind: .none, headline: "NOT SCHEDULED", detail: nil,
-                         color: .gray, icon: "minus.circle.fill")
+            return .init(kind: .none, headline: "UNSCHEDULED", detail: "Not linked to a schedule",
+                         color: .secondary, icon: "calendar.badge.minus")
         }
         let mins = max(1, abs(d) / 60)
         if d > tolerance {
@@ -110,9 +112,10 @@ struct TripStatus {
         .init(kind: .onTime, headline: "DEPARTED", detail: nil, color: .gray, icon: "checkmark.circle.fill")
     }
 
-    /// Status for a single departures-board occurrence, judged against its own departure/arrival —
-    /// same ON TIME / DELAYED / EARLY logic as the detail page (a passed, unstarted drive reads
-    /// DELAYED, not a separate "missed" state).
+    /// Status for a single departures-board occurrence (also used by the scheduled-detail page).
+    /// Follows the product spec: an upcoming drive is ON TIME (green) until its departure time;
+    /// once departure passes with no recorded start it becomes LATE (orange); a start in the
+    /// window marks it DEPARTED; canceled wins over everything.
     static func occurrence(departure: Date, scheduledArrival: Date, travelSeconds: Int,
                            isCanceled: Bool, startedAt: Date?, now: Date = .now) -> TripStatus {
         if isCanceled {
@@ -124,10 +127,15 @@ struct TripStatus {
            startedAt <= scheduledArrival.addingTimeInterval(3 * 3600) {
             return departed
         }
-        // Compare projected arrival (leave on time if still possible, else now) to scheduled —
-        // an overdue, unstarted occurrence comes out DELAYED, matching the detail page.
-        let estimatedArrival = max(departure, now).addingTimeInterval(TimeInterval(travelSeconds))
-        return upcoming(delaySeconds: Int(estimatedArrival.timeIntervalSince(scheduledArrival)), isCanceled: false)
+        // Still before departure → on time, with a friendly countdown.
+        if now < departure {
+            return .init(kind: .onTime, headline: "ON TIME", detail: countdown(to: departure, from: now),
+                         color: .green, icon: "checkmark.seal.fill")
+        }
+        // Departure time has passed without a recorded start → late to leave.
+        let lateMins = max(1, Int(now.timeIntervalSince(departure)) / 60)
+        return .init(kind: .delayed, headline: "LATE", detail: "\(delayLabel(minutes: lateMins)) past departure",
+                     color: .orange, icon: "exclamationmark.triangle.fill")
     }
 
     /// "in 3h 20m" / "20m ago" relative to a departure time.
@@ -163,6 +171,8 @@ struct StatusBanner: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(status.color.gradient, in: .rect(cornerRadius: 16))
         .shadow(color: status.color.opacity(0.35), radius: 10, y: 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(status.detail.map { "\(status.headline). \($0)" } ?? status.headline)
     }
 }
 
@@ -183,5 +193,7 @@ struct StatusChip: View {
         .padding(.vertical, compact ? 4 : 6)
         .background(status.color, in: .capsule)
         .fixedSize()
+        .accessibilityElement()
+        .accessibilityLabel(status.detail.map { "\(status.headline). \($0)" } ?? status.headline)
     }
 }

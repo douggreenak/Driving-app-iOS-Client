@@ -34,6 +34,9 @@ struct ScreenshotHarness: View {
             case "search":
                 LocationSearchSheet(title: "Start", initialQuery: "Farmers Loop") { _ in }
                     .onAppear { SampleData.seedPlaces(into: container.mainContext) }
+            case "searchcards":
+                LocationSearchSheet(title: "Start") { _ in }
+                    .onAppear { SampleData.seedPlaces(into: container.mainContext) }
             case "insights":
                 DashboardView().onAppear {
                     SampleData.seedTrips(into: container.mainContext)
@@ -51,6 +54,8 @@ struct ScreenshotHarness: View {
                 TripsListView().onAppear { _ = SampleData.makeTrip(into: container.mainContext) }
             case "gas":
                 GasListView()
+            case "editvehicle":
+                NavigationStack { EditVehicleView(vehicle: seededVehicle) }
             case "track":
                 LiveTrackingView(previewTracker: SampleData.inProgressTracker())
             case "summary":
@@ -135,7 +140,7 @@ enum SampleData {
         let gallons = FuelModel.gallons(segments: segs, ratedMpg: 28)
 
         // Scheduled to arrive well before the actual end → a >60 min delay (verifies h:m formatting).
-        let scheduled = last.t.addingTimeInterval(-75 * 60)
+        let scheduled: Date? = nil   // unscheduled trip → both endpoints green, "Apply" available
 
         let trip = DriveTrip(
             date: first.t, endDate: last.t,
