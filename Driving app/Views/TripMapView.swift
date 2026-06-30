@@ -4,6 +4,7 @@ import MapKit
 
 struct TripMapView: View {
     @Query(sort: \DriveTrip.date, order: .reverse) private var trips: [DriveTrip]
+    @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
 
     var body: some View {
         Group {
@@ -18,7 +19,8 @@ struct TripMapView: View {
                             MapPolyline(coordinates: coords)
                                 .stroke(.blue.opacity(0.8), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
                         }
-                        Marker(trip.endAddress, systemImage: "mappin", coordinate: trip.endCoordinate)
+                        Marker(PlaceNamer.name(for: trip.endCoordinate, fallback: trip.endAddress, in: savedPlaces),
+                               systemImage: "mappin", coordinate: trip.endCoordinate)
                             .tint(.red)
                     }
                 }

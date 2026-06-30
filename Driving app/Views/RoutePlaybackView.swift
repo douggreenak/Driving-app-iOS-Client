@@ -8,6 +8,7 @@ import Combine
 struct RoutePlaybackView: View {
     let trip: DriveTrip
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var index: Double = 0
     @State private var playing = false
@@ -120,6 +121,9 @@ struct RoutePlaybackView: View {
             }
             .onReceive(timer) { _ in tick() }
             .onChange(of: index) { _, _ in if follow { recenter() } }
+            // Pause playback when the device locks or the app is backgrounded, so the marker
+            // doesn't silently run to the end while the screen is off.
+            .onChange(of: scenePhase) { _, phase in if phase != .active { playing = false } }
             .sheet(isPresented: $showPanel) {
                 telemetryPanel
                     .presentationDetents([collapsedDetent, expandedDetent], selection: $selectedDetent)
@@ -149,6 +153,9 @@ struct RoutePlaybackView: View {
             }
         }
         .mapStyle(.standard(elevation: .flat))
+        // Hide the default MapKit controls (the scale bar in particular collided with the clock
+        // and notch since the map ignores the safe area); distance is shown in the telemetry bar.
+        .mapControls { }
     }
 
     private var marker: some View {

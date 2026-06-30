@@ -45,6 +45,7 @@ struct ScreenshotHarness: View {
             case "scheddetail":
                 NavigationStack {
                     ScheduledDriveDetailView(drive: SampleData.makeSchedule(into: container.mainContext))
+                        .onAppear { SampleData.seedPlaces(into: container.mainContext) }
                 }
             case "drives":
                 ScheduleView().onAppear {

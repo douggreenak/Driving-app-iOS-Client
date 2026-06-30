@@ -9,9 +9,12 @@ import Charts
 struct TripDetailView: View {
     @Bindable var trip: DriveTrip
     @Environment(\.modelContext) private var context
+    @Environment(\.dismiss) private var dismiss
     @Query private var schedules: [ScheduledDrive]
+    @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
     @State private var showPlayback = false
     @State private var showEditSchedule = false
+    @State private var showDeleteConfirm = false
     /// Heavy track-derived values (polyline decode, fuel model, chart, region) computed once
     /// per trip instead of on every re-render (e.g. when the favorite star is toggled).
     @State private var derived: TripDerived?
@@ -47,6 +50,11 @@ struct TripDetailView: View {
         .sheet(isPresented: $showEditSchedule) {
             EditTripScheduleView(trip: trip)
         }
+        .confirmationDialog("Delete this trip?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("Delete Trip", role: .destructive) { deleteTrip() }
+        } message: {
+            Text("This permanently removes the recorded drive and all of its data — the track, fuel entries, and the synced copy.")
+        }
     }
 
     @ViewBuilder
@@ -64,9 +72,36 @@ struct TripDetailView: View {
                 fuelCard(d)
                 if !d.chart.isEmpty { speedChartCard(d) }
                 playButton(d)
+                deleteButton
             }
             .padding()
         }
+    }
+
+    private var deleteButton: some View {
+        Button(role: .destructive) {
+            Haptics.tap()
+            showDeleteConfirm = true
+        } label: {
+            Label("Delete Trip", systemImage: "trash")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.red)
+                .frame(maxWidth: .infinity).padding(.vertical, 12)
+                .background(Color(.systemGray6), in: .capsule)
+        }
+        .padding(.top, 4)
+    }
+
+    /// Remove the trip everywhere: the synced copy on the backend, then the local record — whose
+    /// cascade rules also delete its track points and fuel entries — and return to the list.
+    private func deleteTrip() {
+        Haptics.warning()
+        if let remoteID = trip.remoteID {
+            Task { try? await APIClient.deleteTrip(id: remoteID) }
+        }
+        context.delete(trip)
+        try? context.save()
+        dismiss()
     }
 
     // MARK: - Map header
@@ -76,11 +111,19 @@ struct TripDetailView: View {
     private var startTint: Color {
         guard let d = trip.departureDelaySeconds else { return .green }
         // Orange whenever tracking started after the scheduled departure (small grace for jitter).
-        return d >= 60 ? .orange : .green
+        return d >= 60 ? .statusDelay : .green
     }
     private var endTint: Color {
         guard let d = trip.delaySeconds else { return .green }
-        return d >= 60 ? .orange : .green
+        return d >= 60 ? .statusDelay : .green
+    }
+
+    // Prefer a saved-place label ("Home") over the raw street address when one is bookmarked nearby.
+    private var startName: String {
+        PlaceNamer.name(for: trip.startCoordinate, fallback: trip.startAddress, in: savedPlaces)
+    }
+    private var endName: String {
+        PlaceNamer.name(for: trip.endCoordinate, fallback: trip.endAddress, in: savedPlaces)
     }
 
     private func mapHeader(_ d: TripDerived) -> some View {
@@ -95,12 +138,12 @@ struct TripDetailView: View {
                 .allowsHitTesting(false)
 
             HStack {
-                endpointLabel(title: trip.startAddress, time: trip.date, tint: startTint, align: .leading)
+                endpointLabel(title: startName, time: trip.date, tint: startTint, align: .leading)
                 Spacer(minLength: 8)
                 Image(systemName: "arrow.right")
                     .foregroundStyle(.white.opacity(0.7))
                 Spacer(minLength: 8)
-                endpointLabel(title: trip.endAddress, time: trip.endDate, tint: endTint, align: .trailing)
+                endpointLabel(title: endName, time: trip.endDate, tint: endTint, align: .trailing)
             }
             .padding()
         }
@@ -135,7 +178,7 @@ struct TripDetailView: View {
 
             HStack(alignment: .top) {
                 timeColumn(label: "DEPARTED", time: trip.date, scheduled: trip.scheduledDeparture,
-                           sub: trip.startAddress, tint: startTint, align: .leading)
+                           sub: startName, tint: startTint, align: .leading)
                 Spacer()
                 VStack(spacing: 4) {
                     Image(systemName: "car.fill")
@@ -146,7 +189,7 @@ struct TripDetailView: View {
                 }
                 Spacer()
                 timeColumn(label: "ARRIVED", time: trip.endDate, scheduled: trip.scheduledArrival,
-                           sub: trip.endAddress, tint: endTint, align: .trailing)
+                           sub: endName, tint: endTint, align: .trailing)
             }
 
             // Departure → arrival progress line
@@ -544,7 +587,7 @@ struct EditTripScheduleView: View {
             Text(label).foregroundStyle(.secondary)
             Spacer()
             Text(actual, format: .dateTime.hour().minute())
-            Text("(\(text))").foregroundStyle(abs(secs) < 60 ? .green : (secs > 0 ? .orange : .blue))
+            Text("(\(text))").foregroundStyle(abs(secs) < 60 ? .green : (secs > 0 ? .statusDelay : .blue))
         }
         .font(.caption)
     }

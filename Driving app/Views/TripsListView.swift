@@ -40,6 +40,7 @@ struct TripsListView: View {
                         }
                     }
                     .searchable(text: $searchText, prompt: "Search trips")
+                    .refreshable { await TripStore.syncPending(context: context) }
                 }
             }
             .background(.black)
@@ -75,6 +76,7 @@ struct TripsListView: View {
 
 private struct TripRow: View {
     let trip: DriveTrip
+    @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -94,10 +96,12 @@ private struct TripRow: View {
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(.blue.opacity(0.15), in: .capsule)
             }
-            Text(trip.startAddress).font(.subheadline).fontWeight(.medium).lineLimit(1)
+            Text(PlaceNamer.name(for: trip.startCoordinate, fallback: trip.startAddress, in: savedPlaces))
+                .font(.subheadline).fontWeight(.medium).lineLimit(1)
             HStack(spacing: 4) {
                 Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
-                Text(trip.endAddress).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                Text(PlaceNamer.name(for: trip.endCoordinate, fallback: trip.endAddress, in: savedPlaces))
+                    .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
             }
             HStack(spacing: 10) {
                 stat(trip.category.icon, trip.category.label)

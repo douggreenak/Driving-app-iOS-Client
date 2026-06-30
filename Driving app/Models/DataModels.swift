@@ -69,6 +69,17 @@ enum FuelType: String, Codable, CaseIterable {
         case .diesel: "Diesel"
         }
     }
+
+    /// Just the grade name, no octane parenthetical — used where space is tight (the segmented
+    /// picker) so all four options stay equal width without truncating.
+    var shortLabel: String {
+        switch self {
+        case .regular: "Regular"
+        case .midgrade: "Midgrade"
+        case .premium: "Premium"
+        case .diesel: "Diesel"
+        }
+    }
 }
 
 /// How a scheduled drive repeats.
@@ -323,6 +334,9 @@ final class ScheduledDrive {
     /// When the drive was last completed (tracking stopped). Used to drop a finished occurrence
     /// off the departures board.
     var lastCompletedAt: Date?
+    /// Individual occurrences the user deleted via "just this once" — the repeat keeps going, but
+    /// these specific departures are skipped. Matched by time when expanding occurrences.
+    var skippedOccurrences: [Date] = []
     var createdAt: Date = Date()
 
     init(
@@ -389,12 +403,18 @@ final class ScheduledDrive {
         let time = cal.dateComponents([.hour, .minute], from: departure)
         var candidate = cal.date(bySettingHour: time.hour ?? 0, minute: time.minute ?? 0, second: 0, of: reference) ?? departure
         for _ in 0..<400 {
-            if candidate >= reference && matchesRule(candidate, calendar: cal) {
+            if candidate >= reference && matchesRule(candidate, calendar: cal) && !isSkipped(candidate) {
                 return candidate
             }
             candidate = cal.date(byAdding: .day, value: 1, to: candidate) ?? candidate
         }
         return candidate
+    }
+
+    /// True if this exact occurrence was deleted "just this once". Matched with a small tolerance
+    /// since occurrence times are recomputed (not stored byte-for-byte).
+    func isSkipped(_ date: Date) -> Bool {
+        skippedOccurrences.contains { abs($0.timeIntervalSince(date)) < 60 }
     }
 
     private func matchesRule(_ date: Date, calendar cal: Calendar) -> Bool {
@@ -480,7 +500,7 @@ final class ScheduledDrive {
     func occurrences(in range: ClosedRange<Date>) -> [Date] {
         let cal = Calendar.current
         if repeatRule == .none {
-            return range.contains(departure) ? [departure] : []
+            return (range.contains(departure) && !isSkipped(departure)) ? [departure] : []
         }
         let time = cal.dateComponents([.hour, .minute], from: departure)
         let firstDay = cal.startOfDay(for: departure)
@@ -489,7 +509,7 @@ final class ScheduledDrive {
         for _ in 0..<500 {
             if day > range.upperBound { break }
             if let occ = cal.date(bySettingHour: time.hour ?? 0, minute: time.minute ?? 0, second: 0, of: day),
-               occ >= firstDay, range.contains(occ), matchesRule(occ, calendar: cal) {
+               occ >= firstDay, range.contains(occ), matchesRule(occ, calendar: cal), !isSkipped(occ) {
                 result.append(occ)
             }
             day = cal.date(byAdding: .day, value: 1, to: day) ?? day

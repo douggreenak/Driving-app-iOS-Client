@@ -8,6 +8,7 @@ struct ScheduledDriveDetailView: View {
     @Bindable var drive: ScheduledDrive
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
+    @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
 
     @State private var routeCoords: [CLLocationCoordinate2D] = []
     @State private var cameraPosition: MapCameraPosition = .automatic
@@ -18,6 +19,14 @@ struct ScheduledDriveDetailView: View {
 
     private var departure: Date { drive.statusReferenceDeparture() }
     private var arrival: Date { drive.targetArrival() }
+
+    // Show a bookmarked place's name ("Home") instead of the street address when one is nearby.
+    private var startName: String {
+        PlaceNamer.name(for: drive.startCoordinate, fallback: drive.startAddress, in: savedPlaces)
+    }
+    private var endName: String {
+        PlaceNamer.name(for: drive.endCoordinate, fallback: drive.endAddress, in: savedPlaces)
+    }
     private var status: TripStatus {
         .occurrence(departure: departure, scheduledArrival: arrival, travelSeconds: drive.estimatedTravelTime,
                     isCanceled: drive.isCanceled, startedAt: drive.lastStartedAt)
@@ -82,11 +91,11 @@ struct ScheduledDriveDetailView: View {
                 .frame(height: 110).allowsHitTesting(false)
 
             HStack {
-                endpoint(drive.startAddress, departure, startColor, .leading)
+                endpoint(startName, departure, startColor, .leading)
                 Spacer(minLength: 8)
                 Image(systemName: "arrow.right").foregroundStyle(.white.opacity(0.7))
                 Spacer(minLength: 8)
-                endpoint(drive.endAddress, arrival, endColor, .trailing)
+                endpoint(endName, arrival, endColor, .trailing)
             }
             .padding()
         }
@@ -118,14 +127,14 @@ struct ScheduledDriveDetailView: View {
                 Text(drive.repeatRule.label).font(.caption.weight(.medium)).foregroundStyle(.blue)
             }
             HStack(alignment: .top) {
-                timeColumn("DEPARTS", departure, drive.startAddress, .leading)
+                timeColumn("DEPARTS", departure, startName, .leading)
                 Spacer()
                 VStack(spacing: 4) {
                     Image(systemName: "car.fill").foregroundStyle(.blue)
                     Text(travelString(drive.estimatedTravelTime)).font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
-                timeColumn("ARRIVES", arrival, drive.endAddress, .trailing)
+                timeColumn("ARRIVES", arrival, endName, .trailing)
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {

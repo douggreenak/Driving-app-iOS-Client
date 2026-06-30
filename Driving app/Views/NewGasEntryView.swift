@@ -1,7 +1,9 @@
 import SwiftUI
+import SwiftData
 
 struct NewGasEntryView: View {
     @Environment(\.dismiss) private var dismiss
+    @Query(sort: \Vehicle.name) private var vehicles: [Vehicle]
     var onSaved: (() async -> Void)?
 
     @State private var date = Date.now
@@ -11,6 +13,7 @@ struct NewGasEntryView: View {
     @State private var fuelType: FuelType = .regular
     @State private var stationName = ""
     @State private var odometer = ""
+    @State private var vehicleName: String?
     @State private var saving = false
 
     private var totalCost: Double {
@@ -45,9 +48,20 @@ struct NewGasEntryView: View {
                     .pickerStyle(.segmented)
                 }
 
+                if !vehicles.isEmpty {
+                    Section("Vehicle") {
+                        Picker("Car", selection: $vehicleName) {
+                            Text("None").tag(String?.none)
+                            ForEach(vehicles) { vehicle in
+                                Text(vehicle.name).tag(String?.some(vehicle.name))
+                            }
+                        }
+                    }
+                }
+
                 Section("Fuel Type") {
                     Picker("Type", selection: $fuelType) {
-                        ForEach(FuelType.allCases, id: \.self) { Text($0.label).tag($0) }
+                        ForEach(FuelType.allCases, id: \.self) { Text($0.shortLabel).tag($0) }
                     }
                     .pickerStyle(.segmented)
                 }
@@ -77,6 +91,8 @@ struct NewGasEntryView: View {
             }
             .navigationTitle("Add Gas")
             .navigationBarTitleDisplayMode(.inline)
+            // Default the picker to the only/most likely car so a fill-up is attributed by default.
+            .onAppear { if vehicleName == nil { vehicleName = vehicles.first?.name } }
             .keyboardDismissable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -100,7 +116,8 @@ struct NewGasEntryView: View {
                 paidBy: paidBy.rawValue,
                 fuelType: fuelType.rawValue,
                 stationName: stationName.isEmpty ? nil : stationName,
-                odometer: Double(odometer)
+                odometer: Double(odometer),
+                vehicleName: vehicleName
             )
             _ = try? await APIClient.createGasEntry(create)
             await onSaved?()

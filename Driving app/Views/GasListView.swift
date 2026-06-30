@@ -179,8 +179,11 @@ private struct GasRow: View {
                 }
                 Text(String(format: "%.1f gal @ $%.2f/gal", entry.gallons, entry.pricePerGallon))
                     .font(.subheadline).fontWeight(.medium)
-                if let station = entry.stationName, !station.isEmpty {
-                    Text(station).font(.caption).foregroundStyle(.secondary)
+                // Show car and/or station when present (e.g. "Subaru · Costco").
+                let subtitle = [entry.vehicleName, entry.stationName]
+                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+                if !subtitle.isEmpty {
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
                 }
             }
             Spacer()

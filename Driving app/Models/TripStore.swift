@@ -116,6 +116,39 @@ enum TripStore {
         try? context.save()
     }
 
+    /// Push any locally-recorded trips that haven't reached the backend yet. The phone is the
+    /// source of truth, so a "pull to refresh" flushes outstanding uploads rather than fetching.
+    /// Safe to call repeatedly — only unsynced trips are sent. Returns the number newly synced.
+    @MainActor
+    @discardableResult
+    static func syncPending(context: ModelContext) async -> Int {
+        let descriptor = FetchDescriptor<DriveTrip>(predicate: #Predicate { !$0.synced })
+        guard let pending = try? context.fetch(descriptor), !pending.isEmpty else { return 0 }
+        var synced = 0
+        for trip in pending {
+            let f = ISO8601DateFormatter()
+            let create = APITripCreate(
+                date: f.string(from: trip.date),
+                startAddress: trip.startAddress,
+                endAddress: trip.endAddress,
+                startLat: trip.startLat, startLng: trip.startLng,
+                endLat: trip.endLat, endLng: trip.endLng,
+                distance: trip.distance,
+                duration: max(1, (trip.duration + 30) / 60),
+                notes: trip.notes,
+                category: trip.categoryRaw,
+                routeEncoded: Polyline.encode(trip.displayCoordinates)
+            )
+            if let remote = try? await APIClient.createTrip(create) {
+                trip.remoteID = remote.id
+                trip.synced = true
+                synced += 1
+            }
+        }
+        try? context.save()
+        return synced
+    }
+
     private static func movingSeconds(_ pts: [RecordedPoint]) -> Int {
         guard pts.count >= 2 else { return 0 }
         var s = 0.0

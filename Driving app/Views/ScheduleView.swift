@@ -5,9 +5,10 @@ import SwiftData
 /// of every (repeating) drive is its own row — time, who's paying, destination, and a clear
 /// status. Swipe to cancel or delete; tap for the full detail page.
 struct ScheduleView: View {
+    @Environment(\.modelContext) private var context
     @Query private var drives: [ScheduledDrive]
     @State private var showingNew = false
-    @State private var pendingDelete: ScheduledDrive?
+    @State private var pendingDelete: DriveOccurrence?
 
     /// All today/upcoming occurrences across all drives, grouped by day.
     private var grouped: [(day: Date, items: [DriveOccurrence])] {
@@ -53,19 +54,20 @@ struct ScheduleView: View {
                                 isPresented: Binding(get: { pendingDelete != nil },
                                                      set: { if !$0 { pendingDelete = nil } }),
                                 titleVisibility: .visible) {
-                Button("Delete Drive", role: .destructive) {
-                    if let d = pendingDelete {
-                        Haptics.warning()
-                        let ctx = d.modelContext
-                        ctx?.delete(d)
-                        try? ctx?.save()
+                if let occ = pendingDelete {
+                    if occ.drive.repeatRule != .none {
+                        // Repeating drive → let the user keep the series but drop this one date,
+                        // or remove every future occurrence.
+                        Button("Delete Just This One", role: .destructive) { deleteOccurrence(occ) }
+                        Button("Delete All Future Drives", role: .destructive) { deleteSeries(occ.drive) }
+                    } else {
+                        Button("Delete Drive", role: .destructive) { deleteSeries(occ.drive) }
                     }
-                    pendingDelete = nil
                 }
             } message: {
-                let repeats = (pendingDelete?.repeatRule ?? .none) != .none
+                let repeats = (pendingDelete?.drive.repeatRule ?? .none) != .none
                 Text(repeats
-                     ? "This is a repeating drive — deleting it removes all of its occurrences."
+                     ? "This drive repeats. Delete only this occurrence, or all future occurrences?"
                      : "This removes the scheduled drive.")
             }
         }
@@ -87,13 +89,14 @@ struct ScheduleView: View {
                             DepartureRow(occ: occ)
                         }
                         .swipeActions(edge: .leading) { cancelButton(occ.drive) }
-                        .swipeActions(edge: .trailing) { deleteButton(occ.drive) }
+                        .swipeActions(edge: .trailing) { deleteButton(occ) }
                     }
                 }
                 header: { Text(dayLabel(group.day)) }
             }
         }
         .listStyle(.plain)
+        .refreshable { await TripStore.syncPending(context: context) }
     }
 
     private func dayLabel(_ day: Date) -> String {
@@ -115,12 +118,29 @@ struct ScheduleView: View {
         .tint(drive.isCanceled ? .blue : .orange)
     }
 
-    private func deleteButton(_ drive: ScheduledDrive) -> some View {
+    private func deleteButton(_ occ: DriveOccurrence) -> some View {
         Button(role: .destructive) {
-            pendingDelete = drive
+            pendingDelete = occ
         } label: {
             Label("Delete", systemImage: "trash")
         }
+    }
+
+    /// "Just this one": keep the repeating drive but skip this single occurrence.
+    private func deleteOccurrence(_ occ: DriveOccurrence) {
+        Haptics.warning()
+        occ.drive.skippedOccurrences.append(occ.departure)
+        try? occ.drive.modelContext?.save()
+        pendingDelete = nil
+    }
+
+    /// "All future": remove the drive template, which removes every occurrence.
+    private func deleteSeries(_ drive: ScheduledDrive) {
+        Haptics.warning()
+        let ctx = drive.modelContext
+        ctx?.delete(drive)
+        try? ctx?.save()
+        pendingDelete = nil
     }
 
     private var emptyState: some View {
@@ -179,6 +199,7 @@ struct DriveOccurrence: Identifiable {
 /// Airport-departures-board row: status dots + times, who's paying, destination, and a status chip.
 struct DepartureRow: View {
     let occ: DriveOccurrence
+    @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
 
     var body: some View {
         HStack(spacing: 12) {
@@ -210,7 +231,8 @@ struct DepartureRow: View {
                 }
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
-                    Text(occ.drive.endAddress).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Text(PlaceNamer.name(for: occ.drive.endCoordinate, fallback: occ.drive.endAddress, in: savedPlaces))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
             .layoutPriority(1)

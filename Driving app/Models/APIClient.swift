@@ -150,6 +150,7 @@ struct APIGasEntry: Codable, Identifiable {
     let fuelType: String
     let stationName: String?
     let odometer: Double?
+    let vehicleName: String?
 
     var parsedDate: Date {
         let f = ISO8601DateFormatter()
@@ -174,6 +175,7 @@ struct APIGasEntryCreate: Codable {
     let fuelType: String
     let stationName: String?
     let odometer: Double?
+    let vehicleName: String?
 }
 
 struct APIStats: Codable {

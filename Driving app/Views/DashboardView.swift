@@ -8,6 +8,7 @@ struct DashboardView: View {
     @Query private var scheduled: [ScheduledDrive]
     @Query private var settingsList: [UserSettings]
     @Query private var vehicles: [Vehicle]
+    @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
 
     private var fuelPrice: Double { settingsList.first?.fuelPricePerGallon ?? 3.75 }
 
@@ -24,7 +25,12 @@ struct DashboardView: View {
     }
 
     private var nextDrive: ScheduledDrive? {
-        scheduled.filter { $0.isEnabled && !$0.isCanceled }.min { $0.nextDeparture() < $1.nextDeparture() }
+        let now = Date.now
+        // Only surface drives whose next departure is still ahead of us — a one-time drive whose
+        // scheduled time has already passed is in the past and shouldn't show under "Up Next".
+        return scheduled
+            .filter { $0.isEnabled && !$0.isCanceled && $0.nextDeparture(after: now) >= now }
+            .min { $0.nextDeparture(after: now) < $1.nextDeparture(after: now) }
     }
 
     var body: some View {
@@ -280,7 +286,7 @@ struct DashboardView: View {
                     Text(drive.statusReferenceDeparture(), format: .dateTime.weekday().hour().minute()).font(.subheadline.weight(.medium))
                     Text(TripStatus.countdown(to: drive.statusReferenceDeparture())).font(.caption.weight(.semibold)).foregroundStyle(.blue)
                 }
-                Text("\(drive.startAddress) → \(drive.endAddress)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text("\(PlaceNamer.name(for: drive.startCoordinate, fallback: drive.startAddress, in: savedPlaces)) → \(PlaceNamer.name(for: drive.endCoordinate, fallback: drive.endAddress, in: savedPlaces))").font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
@@ -311,8 +317,8 @@ struct DashboardView: View {
                 }
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(trip.startAddress).font(.subheadline.weight(.medium)).lineLimit(1)
-                        Label(trip.endAddress, systemImage: "arrow.right").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                        Text(PlaceNamer.name(for: trip.startCoordinate, fallback: trip.startAddress, in: savedPlaces)).font(.subheadline.weight(.medium)).lineLimit(1)
+                        Label(PlaceNamer.name(for: trip.endCoordinate, fallback: trip.endAddress, in: savedPlaces), systemImage: "arrow.right").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 4) {

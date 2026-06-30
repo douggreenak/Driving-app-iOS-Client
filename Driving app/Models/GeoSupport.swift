@@ -52,6 +52,22 @@ extension CLLocationCoordinate2D {
     }
 }
 
+/// Resolves a coordinate to a saved-place label ("Home", "Work") when one is bookmarked nearby,
+/// so the UI can show the friendly name instead of a raw street address.
+enum PlaceNamer {
+    /// The label of the nearest saved place within `maxMeters` of `coordinate`, else `fallback`
+    /// (the reverse-geocoded address).
+    static func name(for coordinate: CLLocationCoordinate2D, fallback: String,
+                     in places: [SavedPlace], maxMeters: Double = 160) -> String {
+        var best: (label: String, dist: Double)?
+        for place in places {
+            let d = place.coordinate.distanceMeters(to: coordinate)
+            if d <= maxMeters, best == nil || d < best!.dist { best = (place.label, d) }
+        }
+        return best?.label ?? fallback
+    }
+}
+
 /// Simple local-tangent-plane projection so we can do fast planar geometry (point-to-segment
 /// projection for map matching) at city/region scale without expensive geodesic math.
 struct LocalPlane {
