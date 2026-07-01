@@ -41,30 +41,58 @@ enum MapPrewarmer {
     }
 }
 
+/// The app's top-level tabs. Backing the TabView with an explicit selection lets a finished drive
+/// route the user straight back to the Dashboard.
+enum AppTab: Hashable { case dashboard, track, schedule, trips, gas }
+
 struct ContentView: View {
+    @State private var selection: AppTab = .dashboard
+    @Query private var scheduled: [ScheduledDrive]
+    /// A scheduled drive the watch asked us to start, presented as live tracking.
+    @State private var watchStart: WatchStartRequest?
+
     var body: some View {
-        TabView {
-            Tab("Dashboard", systemImage: "square.grid.2x2.fill") {
+        TabView(selection: $selection) {
+            Tab("Dashboard", systemImage: "square.grid.2x2.fill", value: AppTab.dashboard) {
                 DashboardView()
             }
-            Tab("Track", systemImage: "location.fill") {
-                LiveTrackingView()
+            Tab("Track", systemImage: "location.fill", value: AppTab.track) {
+                LiveTrackingView(onFinish: { selection = .dashboard })
             }
-            Tab("Schedule", systemImage: "calendar") {
+            Tab("Schedule", systemImage: "calendar", value: AppTab.schedule) {
                 ScheduleView()
             }
-            Tab("Trips", systemImage: "map.fill") {
+            Tab("Trips", systemImage: "map.fill", value: AppTab.trips) {
                 TripsListView()
             }
-            Tab("Gas", systemImage: "fuelpump.fill") {
+            Tab("Gas", systemImage: "fuelpump.fill", value: AppTab.gas) {
                 GasListView()
             }
         }
         .preferredColorScheme(.dark)
         .task {
+            #if canImport(WatchConnectivity) && os(iOS)
+            PhoneWatchConnectivity.shared.activate()
+            #endif
             // Let the dashboard settle, then warm MapKit in the background.
             try? await Task.sleep(for: .milliseconds(600))
             MapPrewarmer.warm()
         }
+        #if canImport(WatchConnectivity) && os(iOS)
+        .fullScreenCover(item: $watchStart) { req in
+            if let drive = scheduled.first(where: { $0.id.uuidString == req.id }) {
+                LiveTrackingView(scheduled: drive)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .startDriveFromWatch)) { note in
+            // The watch tapped "Start" on a scheduled drive — open live tracking for it.
+            guard let id = note.userInfo?["id"] as? String else { return }
+            selection = .track
+            watchStart = WatchStartRequest(id: id)
+        }
+        #endif
     }
 }
+
+/// Identifiable wrapper so a watch "start" request can drive a `.fullScreenCover(item:)`.
+struct WatchStartRequest: Identifiable { let id: String }

@@ -141,6 +141,30 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     /// Discard a finished/recovered session's crash log (called once it's been saved).
     func clearCrashLog() { logger.finish() }
 
+    /// Wipe the finished drive's data so the Track tab returns to a clean idle state instead of
+    /// lingering on the last trip's stale track, stats, and destination after we route away.
+    func resetAfterFinish() {
+        points = []
+        totalDistance = 0
+        elapsedSeconds = 0
+        movingSeconds = 0
+        maxSpeed = 0
+        currentSpeed = 0
+        accumulatedGallons = 0
+        recentSpeeds = []
+        lastLocation = nil
+        lastMovingSample = nil
+        startTime = nil
+        destination = nil
+        destinationName = nil
+        scheduledDeparture = nil
+        scheduledArrival = nil
+        tripName = nil
+        plannedCategory = .other
+        plannedPaidBy = .myself
+        plannedVehicleName = nil
+    }
+
     // MARK: - Derived values
 
     var distanceMiles: Double { totalDistance / 1609.34 }

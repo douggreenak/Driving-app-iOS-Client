@@ -33,6 +33,14 @@ struct APIClient {
         _ = try await request("PATCH", "/api/trips", body: body)
     }
 
+    /// Update just the payer on an already-synced trip (used to backfill `paidBy` onto historical
+    /// trips that were uploaded before the server had the column). Non-destructive: updates the
+    /// existing row by id, never creates or deletes.
+    static func patchTripPaidBy(id: String, paidBy: String) async throws {
+        let body = try JSONEncoder.api.encode(["id": id, "paidBy": paidBy])
+        _ = try await request("PATCH", "/api/trips", body: body)
+    }
+
     // MARK: - Gas
 
     static func fetchGasEntries() async throws -> [APIGasEntry] {
@@ -49,6 +57,29 @@ struct APIClient {
     static func deleteGasEntry(id: String) async throws {
         let body = try JSONEncoder.api.encode(["id": id])
         _ = try await request("DELETE", "/api/gas", body: body)
+    }
+
+    // MARK: - Scheduled drives
+
+    static func fetchScheduledDrives() async throws -> [APIScheduledDrive] {
+        let data = try await get("/api/scheduled")
+        return try JSONDecoder.api.decode([APIScheduledDrive].self, from: data)
+    }
+
+    static func createScheduledDrive(_ drive: APIScheduledDrivePayload) async throws -> APIScheduledDrive {
+        let body = try JSONEncoder.api.encode(drive)
+        let data = try await post("/api/scheduled", body: body)
+        return try JSONDecoder.api.decode(APIScheduledDrive.self, from: data)
+    }
+
+    static func updateScheduledDrive(_ drive: APIScheduledDrivePayload) async throws {
+        let body = try JSONEncoder.api.encode(drive)
+        _ = try await request("PATCH", "/api/scheduled", body: body)
+    }
+
+    static func deleteScheduledDrive(id: String) async throws {
+        let body = try JSONEncoder.api.encode(["id": id])
+        _ = try await request("DELETE", "/api/scheduled", body: body)
     }
 
     // MARK: - Stats
@@ -112,6 +143,7 @@ struct APITrip: Codable, Identifiable {
     let notes: String?
     let category: String
     let isFavorite: Bool
+    let paidBy: String?
     let gasEntries: [APIGasEntry]?
 
     var parsedDate: Date {
@@ -137,7 +169,60 @@ struct APITripCreate: Codable {
     let duration: Int
     let notes: String?
     let category: String
+    let paidBy: String
     var routeEncoded: String? = nil
+}
+
+// MARK: Scheduled drives
+
+/// A scheduled drive as returned by the backend (dates are ISO-8601 strings).
+struct APIScheduledDrive: Codable, Identifiable {
+    let id: String
+    let title: String
+    let startAddress: String
+    let endAddress: String
+    let startLat: Double
+    let startLng: Double
+    let endLat: Double
+    let endLng: Double
+    let departure: String
+    let estimatedTravelTime: Int
+    let scheduledArrival: String
+    let repeatRule: String
+    let category: String
+    let paidBy: String
+    let vehicleName: String?
+    let notes: String?
+    let isEnabled: Bool
+    let isCanceled: Bool
+    let lastStartedAt: String?
+    let lastCompletedAt: String?
+    let skippedOccurrences: [Double]
+}
+
+/// Payload for creating (id nil) or updating (id set) a scheduled drive.
+struct APIScheduledDrivePayload: Codable {
+    var id: String?
+    let title: String
+    let startAddress: String
+    let endAddress: String
+    let startLat: Double
+    let startLng: Double
+    let endLat: Double
+    let endLng: Double
+    let departure: String
+    let estimatedTravelTime: Int
+    let scheduledArrival: String
+    let repeatRule: String
+    let category: String
+    let paidBy: String
+    let vehicleName: String?
+    let notes: String?
+    let isEnabled: Bool
+    let isCanceled: Bool
+    let lastStartedAt: String?
+    let lastCompletedAt: String?
+    let skippedOccurrences: [Double]
 }
 
 struct APIGasEntry: Codable, Identifiable {

@@ -64,7 +64,7 @@ struct TripStatus {
         let mins = max(1, abs(d) / 60)
         if d > tolerance {
             return .init(kind: .delayed, headline: "DELAYED", detail: "\(delayLabel(minutes: mins)) behind schedule",
-                         color: .statusDelay, icon: "clock.badge.exclamationmark.fill")
+                         color: .statusDelay, icon: "clock.fill")
         } else if d < -tolerance {
             return .init(kind: .early, headline: "EARLY", detail: "\(delayLabel(minutes: mins)) ahead of schedule",
                          color: .green, icon: "checkmark.seal.fill")
@@ -81,7 +81,7 @@ struct TripStatus {
         let mins = max(1, abs(d) / 60)
         if d > tolerance {
             return .init(kind: .delayed, headline: "DELAYED", detail: "\(delayLabel(minutes: mins)) behind",
-                         color: .statusDelay, icon: "clock.badge.exclamationmark.fill")
+                         color: .statusDelay, icon: "clock.fill")
         } else if d < -tolerance {
             return .init(kind: .early, headline: "AHEAD", detail: "\(delayLabel(minutes: mins)) early",
                          color: .green, icon: "checkmark.seal.fill")
@@ -106,7 +106,7 @@ struct TripStatus {
         let mins = max(1, abs(delaySeconds) / 60)
         if delaySeconds > tolerance {
             return .init(kind: .delayed, headline: "DELAYED", detail: "Arriving ~\(delayLabel(minutes: mins)) late",
-                         color: .statusDelay, icon: "clock.badge.exclamationmark.fill")
+                         color: .statusDelay, icon: "clock.fill")
         } else if delaySeconds < -tolerance {
             return .init(kind: .early, headline: "EARLY", detail: "Arriving ~\(delayLabel(minutes: mins)) early",
                          color: .green, icon: "checkmark.seal.fill")
@@ -142,7 +142,7 @@ struct TripStatus {
         // Departure time has passed without a recorded start → late to leave.
         let lateMins = max(1, Int(now.timeIntervalSince(departure)) / 60)
         return .init(kind: .delayed, headline: "LATE", detail: "\(delayLabel(minutes: lateMins)) past departure",
-                     color: .statusDelay, icon: "clock.badge.exclamationmark.fill")
+                     color: .statusDelay, icon: "clock.fill")
     }
 
     /// "in 3h 20m" / "20m ago" relative to a departure time.

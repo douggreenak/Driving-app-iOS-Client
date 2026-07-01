@@ -10,6 +10,10 @@ struct LiveTrackingView: View {
     /// When launched from a scheduled drive, the view runs modally and pre-loads the destination.
     let scheduled: ScheduledDrive?
 
+    /// Called after a non-modal drive finishes (saved or discarded) so the app can route back to
+    /// the Dashboard instead of leaving the user on the Track tab looking at a stale, stopped map.
+    var onFinish: (() -> Void)?
+
     @State private var tracker: LocationTracker
     @State private var selectedVehicle: Vehicle?
     @State private var cameraPosition: MapCameraPosition = .userLocation(followsHeading: true, fallback: .automatic)
@@ -19,14 +23,22 @@ struct LiveTrackingView: View {
     @State private var recovered: DriveLogger.Recovered?
     @State private var didAutoStart = false
 
-    init(scheduled: ScheduledDrive? = nil) {
+    /// The most-efficient (fastest) road route from where the driver is now to the destination,
+    /// drawn as a dotted light-blue guide line. Refreshed as they drive so it re-routes if they
+    /// deviate. Empty when there's no destination or no route yet.
+    @State private var efficientRoute: [CLLocationCoordinate2D] = []
+    @State private var lastRouteFetchFrom: CLLocationCoordinate2D?
+
+    init(scheduled: ScheduledDrive? = nil, onFinish: (() -> Void)? = nil) {
         self.scheduled = scheduled
+        self.onFinish = onFinish
         _tracker = State(initialValue: LocationTracker())
     }
 
     #if DEBUG
     init(previewTracker: LocationTracker) {
         self.scheduled = nil
+        self.onFinish = nil
         _tracker = State(initialValue: previewTracker)
     }
     #endif
@@ -131,6 +143,14 @@ struct LiveTrackingView: View {
         Map(position: $cameraPosition) {
             UserAnnotation()
 
+            // Dotted light-blue guide: the most efficient route still ahead to the destination.
+            // Drawn first so the actual (solid) track sits on top of it.
+            if tracker.isTracking, efficientRoute.count >= 2 {
+                MapPolyline(coordinates: efficientRoute)
+                    .stroke(.cyan.opacity(0.9),
+                            style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round, dash: [1, 12]))
+            }
+
             if tracker.points.count >= 2 {
                 MapPolyline(coordinates: tracker.points.map(\.coordinate))
                     .stroke(.blue, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
@@ -166,6 +186,8 @@ struct LiveTrackingView: View {
                     center: loc,
                     span: MKCoordinateSpan(latitudeDelta: 0.008, longitudeDelta: 0.008)))
             }
+            refreshEfficientRoute()
+            updateLiveActivity()
         }
         .ignoresSafeArea(edges: .top)
     }
@@ -397,6 +419,65 @@ struct LiveTrackingView: View {
         tracker.startTracking()
         followUser = true
         cameraPosition = .userLocation(followsHeading: true, fallback: .automatic)
+        efficientRoute = []
+        lastRouteFetchFrom = nil
+        refreshEfficientRoute()
+        startLiveActivity()
+    }
+
+    // MARK: - Live Activity (trip progress on Lock Screen / Dynamic Island)
+
+    private func startLiveActivity() {
+        #if canImport(ActivityKit) && !os(macOS)
+        LiveActivityController.start(title: tracker.tripName ?? "Drive",
+                                     scheduledArrival: tracker.scheduledArrival,
+                                     state: liveActivityState())
+        #endif
+    }
+
+    private func updateLiveActivity() {
+        #if canImport(ActivityKit) && !os(macOS)
+        guard tracker.isTracking else { return }
+        LiveActivityController.update(liveActivityState())
+        #endif
+    }
+
+    #if canImport(ActivityKit) && !os(macOS)
+    private func liveActivityState() -> DriveActivityAttributes.ContentState {
+        // Progress toward the destination = traveled / (traveled + straight-line remaining).
+        var progress: Double?
+        if let remaining = tracker.remainingMiles {
+            let done = tracker.distanceMiles
+            let total = done + max(remaining, 0)
+            progress = total > 0.1 ? min(1, done / total) : nil
+        }
+        return .init(milesTraveled: tracker.distanceMiles,
+                     currentSpeed: tracker.currentSpeed,
+                     elapsedSeconds: tracker.elapsedSeconds,
+                     progress: progress,
+                     eta: tracker.etaDate,
+                     delaySeconds: tracker.delaySeconds,
+                     destinationName: tracker.destinationName)
+    }
+    #endif
+
+    /// Fetch the fastest road route from the current location to the destination for the dotted
+    /// guide line. Throttled: only re-routes after the driver has moved ~350 m (or when we have no
+    /// line yet), keeping well under MapKit's directions rate limit while still re-routing on
+    /// meaningful deviations.
+    private func refreshEfficientRoute() {
+        guard tracker.isTracking, let dest = tracker.destination, let from = tracker.currentLocation else { return }
+        if let last = lastRouteFetchFrom, !efficientRoute.isEmpty, from.distanceMeters(to: last) < 350 { return }
+        lastRouteFetchFrom = from
+        Task {
+            let routes = await RouteMatcher.candidateRoutes(from: from, to: dest)
+            guard let best = routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) else { return }
+            let coords = best.polyline.coordinates()
+            await MainActor.run {
+                // Ignore a stale response if the drive ended while it was in flight.
+                if tracker.isTracking { efficientRoute = coords }
+            }
+        }
     }
 
     private func saveTrip(category: TripCategory, paidBy: PaidBy, notes: String?) {
@@ -416,7 +497,7 @@ struct LiveTrackingView: View {
         scheduled?.lastCompletedAt = .now
         try? context.save()
         guard let start = pts.first?.coordinate, let end = pts.last?.coordinate else {
-            if isModal { dismiss() }
+            finishAndExit()
             return
         }
         Task { @MainActor in
@@ -432,13 +513,30 @@ struct LiveTrackingView: View {
             )
             await TripStore.save(input, context: context)
         }
-        if isModal { dismiss() }
+        finishAndExit()
     }
 
     private func discardTrip() {
         tracker.clearCrashLog()
         showingSummary = false
-        if isModal { dismiss() }
+        finishAndExit()
+    }
+
+    /// Leave a finished drive cleanly: a modal (scheduled) drive dismisses back to its detail page;
+    /// a Track-tab drive resets the tracker and routes to the Dashboard, so the user never sees the
+    /// old trip's stale stats flash by on the way out.
+    private func finishAndExit() {
+        efficientRoute = []
+        lastRouteFetchFrom = nil
+        #if canImport(ActivityKit) && !os(macOS)
+        LiveActivityController.end()
+        #endif
+        if isModal {
+            dismiss()
+        } else {
+            tracker.resetAfterFinish()
+            onFinish?()
+        }
     }
 
     private func saveRecovered(_ rec: DriveLogger.Recovered) async {

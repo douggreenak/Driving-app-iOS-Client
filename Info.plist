@@ -6,6 +6,9 @@
 	<array>
 		<string>location</string>
 	</array>
+	<!-- Enables ActivityKit Live Activities (trip progress on the Lock Screen / Dynamic Island). -->
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<!-- Injected at build time from Secrets.xcconfig (API_KEY); never hard-coded here. -->
 	<key>APIKey</key>
 	<string>$(API_KEY)</string>

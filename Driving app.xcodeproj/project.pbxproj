@@ -7,8 +7,8 @@
 	objects = {
 
 /* Begin PBXFileReference section */
+		0000000000000000000000C0 /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 		000000000000000000000120 /* Driving app.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Driving app.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		0000000000000000000000C0 /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Secrets.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */

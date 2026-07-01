@@ -121,6 +121,23 @@ enum TripStore {
     /// Safe to call repeatedly — only unsynced trips are sent. Returns the number newly synced.
     @MainActor
     @discardableResult
+    /// One-time backfill of `paidBy` onto trips that were synced before the server had the column
+    /// (their remote rows all defaulted to SELF). PATCHes each already-synced trip's real payer by
+    /// its remote id — non-destructive (never creates or deletes) and idempotent. Only marks itself
+    /// done once every PATCH has succeeded, so it safely retries after a network failure.
+    static func backfillPaidBy(context: ModelContext) async {
+        let doneKey = "didBackfillTripPaidBy.v1"
+        guard !UserDefaults.standard.bool(forKey: doneKey) else { return }
+        guard let trips = try? context.fetch(FetchDescriptor<DriveTrip>()) else { return }
+        var allSucceeded = true
+        for trip in trips where trip.synced {
+            guard let remoteID = trip.remoteID else { continue }
+            do { try await APIClient.patchTripPaidBy(id: remoteID, paidBy: trip.paidByRaw) }
+            catch { allSucceeded = false }
+        }
+        if allSucceeded { UserDefaults.standard.set(true, forKey: doneKey) }
+    }
+
     static func syncPending(context: ModelContext) async -> Int {
         let descriptor = FetchDescriptor<DriveTrip>(predicate: #Predicate { !$0.synced })
         guard let pending = try? context.fetch(descriptor), !pending.isEmpty else { return 0 }
@@ -137,6 +154,7 @@ enum TripStore {
                 duration: max(1, (trip.duration + 30) / 60),
                 notes: trip.notes,
                 category: trip.categoryRaw,
+                paidBy: trip.paidByRaw,
                 routeEncoded: Polyline.encode(trip.displayCoordinates)
             )
             if let remote = try? await APIClient.createTrip(create) {
@@ -176,6 +194,7 @@ enum TripStore {
             duration: max(1, (trip.duration + 30) / 60),
             notes: trip.notes,
             category: trip.categoryRaw,
+            paidBy: trip.paidByRaw,
             routeEncoded: Polyline.encode(displayCoords)
         )
         if let remote = try? await APIClient.createTrip(create) {

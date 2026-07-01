@@ -8,16 +8,33 @@ import Foundation
 /// at each segment's speed and integrate fuel use segment by segment.
 enum FuelModel {
 
-    /// Fraction of a vehicle's rated (best/combined) MPG achieved at a given speed in mph.
-    /// Anchored to a realistic efficiency curve and linearly interpolated between anchors.
+    /// Curve *shape*: efficiency as a fraction of the car's best-case (peak) MPG at a given speed.
+    /// Anchored to a realistic economy curve — poor when crawling, peaks ~50–55 mph, falls off at
+    /// highway speed as aerodynamic drag grows. Linearly interpolated between anchors.
     private static let anchors: [(mph: Double, frac: Double)] = [
         (0, 0.30), (10, 0.55), (20, 0.74), (30, 0.87), (40, 0.96),
         (50, 1.00), (55, 1.00), (60, 0.95), (65, 0.89), (70, 0.82),
         (80, 0.70), (90, 0.58), (100, 0.48),
     ]
 
-    /// Relative efficiency (fraction of rated MPG) at `mph`.
+    /// The user enters their car's *average* MPG (the Settings field is literally "Avg MPG"), not
+    /// its unreachable best-case peak. The shape above is a fraction of the *peak*, and over an
+    /// everyday mix of speeds it averages well below 1.0 — so treating the entered number as the
+    /// peak would systematically under-state economy and over-estimate fuel by ~10%. We normalize
+    /// the curve by its distance-neutral mean over the common 20–70 mph band, so that ordinary
+    /// driving averages exactly the entered MPG (steady mid-speed cruising lands a bit above it,
+    /// crawling and highway-speed a bit below). Value below is the piecewise-linear integral mean
+    /// of `anchors` from 20 to 70 mph.
+    private static let everydayMeanFraction: Double = 0.915
+
+    /// Relative efficiency (multiple of the entered *average* MPG) at `mph`. Around 1.0 for typical
+    /// driving; >1 at the efficient ~50–55 mph cruise, <1 crawling or at highway speed.
     static func efficiencyFraction(atMph mph: Double) -> Double {
+        peakFraction(atMph: mph) / everydayMeanFraction
+    }
+
+    /// Fraction of the car's *peak* MPG at `mph` (the raw curve shape, before normalization).
+    private static func peakFraction(atMph mph: Double) -> Double {
         let v = max(0, mph)
         if v <= anchors.first!.mph { return anchors.first!.frac }
         if v >= anchors.last!.mph { return anchors.last!.frac }

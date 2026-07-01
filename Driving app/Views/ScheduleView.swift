@@ -8,13 +8,39 @@ struct ScheduleView: View {
     @Environment(\.modelContext) private var context
     @Query private var drives: [ScheduledDrive]
     @State private var showingNew = false
+    @State private var showingPredict = false
     @State private var pendingDelete: DriveOccurrence?
+
+    /// How many days of occurrences are currently materialized. Grows in batches as the user
+    /// scrolls, so a repeating drive's series is effectively infinite instead of stopping after a
+    /// couple of weeks.
+    @State private var horizonDays = 21
+    private let pageDays = 21
+
+    /// Is there anything past the current horizon worth loading? Repeating drives generate forever;
+    /// a one-time drive only extends the list if it departs beyond the horizon.
+    private var hasMoreToLoad: Bool {
+        if drives.contains(where: { $0.repeatRule != .none }) { return true }
+        let cal = Calendar.current
+        let horizonEnd = cal.date(byAdding: .day, value: horizonDays, to: cal.startOfDay(for: .now)) ?? .now
+        return drives.contains { $0.repeatRule == .none && $0.departure > horizonEnd }
+    }
+
+    /// Extend the horizon by one page. A brief delay lets the loading wheel show before the next
+    /// batch materializes, so scrolling to the bottom feels like paging in more drives.
+    private func loadMore() {
+        guard hasMoreToLoad else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            horizonDays += pageDays
+        }
+    }
 
     /// All today/upcoming occurrences across all drives, grouped by day.
     private var grouped: [(day: Date, items: [DriveOccurrence])] {
         let cal = Calendar.current
         let start = cal.startOfDay(for: .now)
-        let end = cal.date(byAdding: .day, value: 14, to: start) ?? start
+        let end = cal.date(byAdding: .day, value: horizonDays, to: start) ?? start
         var all: [DriveOccurrence] = []
         for drive in drives {
             for dep in drive.occurrences(in: start...end) {
@@ -45,11 +71,17 @@ struct ScheduleView: View {
             .navigationTitle("Schedule")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { showingPredict = true } label: {
+                        Label("Predict a Route", systemImage: "dollarsign.arrow.circlepath")
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button { showingNew = true } label: { Image(systemName: "plus") }
                 }
             }
             .sheet(isPresented: $showingNew) { NewScheduledDriveView() }
+            .sheet(isPresented: $showingPredict) { RoutePredictView() }
             .confirmationDialog("Delete this scheduled drive?",
                                 isPresented: Binding(get: { pendingDelete != nil },
                                                      set: { if !$0 { pendingDelete = nil } }),
@@ -94,9 +126,30 @@ struct ScheduleView: View {
                 }
                 header: { Text(dayLabel(group.day)) }
             }
+
+            if hasMoreToLoad {
+                // Infinite scroll: as this row scrolls into view it pages in the next batch of
+                // occurrences. `.id(horizonDays)` gives it a fresh identity per page so its
+                // `onAppear` fires again each time, keeping the bottom perpetually out of reach
+                // while a repeating series still has occurrences to show.
+                HStack {
+                    Spacer()
+                    ProgressView()
+                    Text("Loading more drives…").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.vertical, 8)
+                .listRowSeparator(.hidden)
+                .id(horizonDays)
+                .onAppear { loadMore() }
+            }
         }
         .listStyle(.plain)
-        .refreshable { await TripStore.syncPending(context: context) }
+        .refreshable {
+            await TripStore.syncPending(context: context)
+            await ScheduledDriveStore.sync(context: context)
+        }
+        .task { await ScheduledDriveStore.sync(context: context) }
     }
 
     private func dayLabel(_ day: Date) -> String {
@@ -111,6 +164,7 @@ struct ScheduleView: View {
             Haptics.selection()
             drive.isCanceled.toggle()
             try? drive.modelContext?.save()
+            Task { await ScheduledDriveStore.sync(context: context) }
         } label: {
             Label(drive.isCanceled ? "Restore" : "Cancel",
                   systemImage: drive.isCanceled ? "arrow.uturn.backward" : "xmark.octagon")
@@ -131,15 +185,22 @@ struct ScheduleView: View {
         Haptics.warning()
         occ.drive.skippedOccurrences.append(occ.departure)
         try? occ.drive.modelContext?.save()
+        Task { await ScheduledDriveStore.sync(context: context) }
         pendingDelete = nil
     }
 
     /// "All future": remove the drive template, which removes every occurrence.
     private func deleteSeries(_ drive: ScheduledDrive) {
         Haptics.warning()
+        // Capture the remote id before deleting so we can remove it server-side too.
+        let removedRemoteID = drive.remoteID
         let ctx = drive.modelContext
         ctx?.delete(drive)
         try? ctx?.save()
+        Task {
+            if let id = removedRemoteID { try? await APIClient.deleteScheduledDrive(id: id) }
+            await ScheduledDriveStore.sync(context: context)
+        }
         pendingDelete = nil
     }
 
@@ -187,12 +248,15 @@ struct DriveOccurrence: Identifiable {
         return Date() > departure ? .yellow : .green
     }
 
-    /// End dot = arrival status: green on schedule, yellow if projected late, red if canceled.
+    /// End dot = arrival status. A drive that hasn't departed yet is never "late to arrive" — the
+    /// arrival can only slip once the drive is actually running behind on departure. So this mirrors
+    /// the departure state (green until the departure time passes, yellow once it's overdue to
+    /// leave), instead of pre-judging the arrival from the raw predicted travel time. Fixes the bug
+    /// where the destination dot showed delayed on drives that hadn't started.
     var endColor: Color {
         if drive.isCanceled { return .red }
         if isDeparted { return .gray }
-        let estimated = max(departure, Date()).addingTimeInterval(TimeInterval(drive.estimatedTravelTime))
-        return estimated.timeIntervalSince(arrival) > 90 ? .yellow : .green
+        return Date() > departure ? .yellow : .green
     }
 }
 

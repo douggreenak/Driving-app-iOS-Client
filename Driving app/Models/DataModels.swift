@@ -338,6 +338,9 @@ final class ScheduledDrive {
     /// these specific departures are skipped. Matched by time when expanding occurrences.
     var skippedOccurrences: [Date] = []
     var createdAt: Date = Date()
+    /// Remote sync bookkeeping (best-effort mirror to the web DB).
+    var remoteID: String?
+    var synced: Bool = false
 
     init(
         title: String,
@@ -484,6 +487,26 @@ final class ScheduledDrive {
     /// The arrival-budget the user set between departure and scheduled arrival.
     var arrivalBudget: TimeInterval { scheduledArrival.timeIntervalSince(departure) }
 
+    /// Was the given occurrence already driven (a recorded start or completion inside its window)?
+    private func wasDriven(_ dep: Date) -> Bool {
+        let lo = dep.addingTimeInterval(-1800)
+        let hi = dep.addingTimeInterval(arrivalBudget + 6 * 3600)
+        if let s = lastStartedAt, s >= lo, s <= hi { return true }
+        if let c = lastCompletedAt, c >= lo, c <= hi { return true }
+        return false
+    }
+
+    /// The departure this drive is currently "at" for the dashboard's Up Next surface. A drive
+    /// that's overdue to leave but hasn't been started still counts (so a *late* drive isn't
+    /// skipped in favor of a later on-time one) — within a 6h grace window. Returns nil when
+    /// nothing is pending soon (already driven, or a one-time drive long past).
+    func upNextDeparture(now: Date = .now) -> Date? {
+        let ref = statusReferenceDeparture(now: now)
+        if !wasDriven(ref), ref >= now.addingTimeInterval(-6 * 3600) { return ref }
+        let next = nextDeparture(after: now)
+        return (next > now && !wasDriven(next)) ? next : nil
+    }
+
     /// True when the scheduled departure (start) time has passed for the reference occurrence —
     /// i.e. the start is running late, independent of the arrival.
     func departureIsLate(now: Date = .now) -> Bool {
@@ -506,7 +529,9 @@ final class ScheduledDrive {
         let firstDay = cal.startOfDay(for: departure)
         var day = cal.startOfDay(for: range.lowerBound)
         var result: [Date] = []
-        for _ in 0..<500 {
+        // Cap high enough (~11 years of days) that the infinite-scroll horizon never truncates a
+        // repeating series; the real bound is `day > range.upperBound` below.
+        for _ in 0..<4200 {
             if day > range.upperBound { break }
             if let occ = cal.date(bySettingHour: time.hour ?? 0, minute: time.minute ?? 0, second: 0, of: day),
                occ >= firstDay, range.contains(occ), matchesRule(occ, calendar: cal), !isSkipped(occ) {

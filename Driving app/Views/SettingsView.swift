@@ -59,10 +59,23 @@ struct SettingsView: View {
                             .onAppear { fuelPrice = String(format: "%.2f", currentSettings.fuelPricePerGallon) }
                         Text("/ gal").foregroundStyle(.secondary)
                     }
-                    Button("Save Price") {
+                    Button {
                         currentSettings.fuelPricePerGallon = Double(fuelPrice) ?? 3.75
                         try? modelContext.save()
                         Haptics.success()
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.6)) { savedFlash = true }
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .seconds(1.6))
+                            withAnimation(.easeOut(duration: 0.3)) { savedFlash = false }
+                        }
+                    } label: {
+                        if savedFlash {
+                            Label("Saved", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                                .transition(.scale.combined(with: .opacity))
+                        } else {
+                            Text("Save Price")
+                        }
                     }
                 } header: {
                     Text("Fuel Price")

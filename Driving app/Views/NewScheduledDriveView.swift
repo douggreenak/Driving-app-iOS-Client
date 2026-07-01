@@ -221,6 +221,8 @@ struct NewScheduledDriveView: View {
             context.insert(drive)
         }
         try? context.save()
+        // Best-effort mirror the new/edited drive to the web DB.
+        Task { await ScheduledDriveStore.sync(context: context) }
         dismiss()
     }
 

@@ -32,9 +32,11 @@ struct ScheduledDriveDetailView: View {
                     isCanceled: drive.isCanceled, startedAt: drive.lastStartedAt)
     }
 
-    // Start dot = departure status, end dot = arrival status (green / yellow / red).
+    // Start dot = departure status, end dot = arrival status (green / yellow / red). The arrival is
+    // only "late" once the drive is actually overdue to depart — a not-yet-started drive is never
+    // pre-judged as delayed from its raw predicted travel time.
     private var startColor: Color { drive.isCanceled ? .red : (drive.departureIsLate() ? .yellow : .green) }
-    private var endColor: Color { drive.isCanceled ? .red : (drive.arrivalIsLate() ? .yellow : .green) }
+    private var endColor: Color { drive.isCanceled ? .red : (drive.departureIsLate() ? .yellow : .green) }
 
     var body: some View {
         ScrollView {
@@ -232,6 +234,7 @@ struct ScheduledDriveDetailView: View {
                     Haptics.selection()
                     drive.isCanceled.toggle()
                     try? context.save()
+                    Task { await ScheduledDriveStore.sync(context: context) }
                 } label: {
                     Label(drive.isCanceled ? "Restore" : "Cancel",
                           systemImage: drive.isCanceled ? "arrow.uturn.backward" : "xmark.octagon")
@@ -255,8 +258,14 @@ struct ScheduledDriveDetailView: View {
                             isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete Drive", role: .destructive) {
                 Haptics.warning()
+                let removedRemoteID = drive.remoteID
                 context.delete(drive)
                 try? context.save()
+                let ctx = context
+                Task {
+                    if let id = removedRemoteID { try? await APIClient.deleteScheduledDrive(id: id) }
+                    await ScheduledDriveStore.sync(context: ctx)
+                }
                 dismiss()
             }
         } message: {
