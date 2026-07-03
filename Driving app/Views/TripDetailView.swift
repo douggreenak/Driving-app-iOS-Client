@@ -15,6 +15,7 @@ struct TripDetailView: View {
     @State private var showPlayback = false
     @State private var showEditSchedule = false
     @State private var showDeleteConfirm = false
+    @State private var showAddStop = false
     /// Heavy track-derived values (polyline decode, fuel model, chart, region) computed once
     /// per trip instead of on every re-render (e.g. when the favorite star is toggled).
     @State private var derived: TripDerived?
@@ -65,6 +66,7 @@ struct TripDetailView: View {
                 StatusBanner(status: .forTrip(delaySeconds: trip.delaySeconds))
                 scheduleCard
                 statsRow
+                stopsCard
                 if trip.usedRouteMatching { matchCard }
                 vehicleCard
                 paidByCard
@@ -76,6 +78,53 @@ struct TripDetailView: View {
             }
             .padding()
         }
+    }
+
+    /// Editable stops for a driven trip (multi-stop annotation): add the places you stopped along
+    /// the way; they show as numbered pins on the map above.
+    private var stopsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Stops", systemImage: "mappin.and.ellipse").font(.headline)
+                Spacer()
+                Button { showAddStop = true } label: {
+                    Image(systemName: "plus.circle.fill").font(.title3).foregroundStyle(.blue)
+                }
+            }
+            if trip.stops.isEmpty {
+                Text("No stops yet. Add the places you stopped along this drive.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(trip.stops.enumerated()), id: \.element.id) { i, stop in
+                    HStack(spacing: 10) {
+                        Text("\(i + 1)").font(.caption2.weight(.bold)).foregroundStyle(.white)
+                            .frame(width: 20, height: 20).background(.orange, in: .circle)
+                        Text(stop.address.isEmpty ? "Dropped pin" : stop.address)
+                            .font(.subheadline).lineLimit(1)
+                        Spacer()
+                        Button { removeStop(stop) } label: {
+                            Image(systemName: "minus.circle.fill").foregroundStyle(.red)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding().background(Color(.systemGray6), in: .rect(cornerRadius: 16))
+        .sheet(isPresented: $showAddStop) {
+            LocationSearchSheet(title: "Add Stop") { picked in
+                trip.stops.append(RouteStop(address: picked.address, coordinate: picked.coordinate))
+                try? context.save()
+                Task { await TripStore.syncStops(for: trip) }
+            }
+        }
+    }
+
+    private func removeStop(_ stop: RouteStop) {
+        trip.stops.removeAll { $0.id == stop.id }
+        try? context.save()
+        Task { await TripStore.syncStops(for: trip) }
     }
 
     private var deleteButton: some View {
@@ -130,7 +179,7 @@ struct TripDetailView: View {
         ZStack(alignment: .bottom) {
             TripRouteMap(coordinates: d.displayCoords, deviations: d.deviationCoords,
                          region: d.region, start: trip.startCoordinate, end: trip.endCoordinate,
-                         startColor: startTint, endColor: endTint)
+                         startColor: startTint, endColor: endTint, stops: trip.stops)
                 .frame(height: 280)
 
             LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .center, endPoint: .bottom)
@@ -610,6 +659,7 @@ struct TripRouteMap: View {
     let end: CLLocationCoordinate2D
     var startColor: Color = .green
     var endColor: Color = .red
+    var stops: [RouteStop] = []
 
     var body: some View {
         Map(initialPosition: .region(region)) {
@@ -623,6 +673,9 @@ struct TripRouteMap: View {
                     .foregroundStyle(.orange.opacity(0.7))
             }
             Annotation("Start", coordinate: start) { pin(startColor) }
+            ForEach(Array(stops.enumerated()), id: \.element.id) { i, stop in
+                Annotation("Stop \(i + 1)", coordinate: stop.coordinate) { stopPin(i + 1) }
+            }
             Annotation("End", coordinate: end) { pin(endColor) }
         }
         .mapStyle(.standard(elevation: .flat))
@@ -633,6 +686,14 @@ struct TripRouteMap: View {
             Circle().fill(color).frame(width: 16, height: 16)
             Circle().stroke(.white, lineWidth: 2).frame(width: 16, height: 16)
         }
+    }
+
+    private func stopPin(_ number: Int) -> some View {
+        Text("\(number)")
+            .font(.caption2.weight(.bold)).foregroundStyle(.white)
+            .frame(width: 18, height: 18)
+            .background(.orange, in: .circle)
+            .overlay(Circle().stroke(.white, lineWidth: 1.5))
     }
 }
 

@@ -32,6 +32,8 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     var plannedCategory: TripCategory = .other
     var plannedPaidBy: PaidBy = .myself
     var plannedVehicleName: String?
+    /// Intermediate stops carried from a scheduled drive so the recorded trip keeps them.
+    var plannedStops: [RouteStop] = []
 
     private(set) var startTime: Date?
     private var timer: Timer?
@@ -163,6 +165,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         plannedCategory = .other
         plannedPaidBy = .myself
         plannedVehicleName = nil
+        plannedStops = []
     }
 
     // MARK: - Derived values

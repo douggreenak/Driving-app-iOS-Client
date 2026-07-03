@@ -108,6 +108,38 @@ enum RepeatRule: String, Codable, CaseIterable {
     }
 }
 
+/// An intermediate stop on a route (between the start and the final destination). Stored as a
+/// Codable value on both scheduled drives and recorded trips so any route can be multi-stop.
+struct RouteStop: Codable, Hashable, Identifiable {
+    var id = UUID()
+    var address: String
+    var lat: Double
+    var lng: Double
+
+    var coordinate: CLLocationCoordinate2D { .init(latitude: lat, longitude: lng) }
+
+    // `id` is local-only (not sent to or required from the server) — encode/decode just the
+    // address + coordinate so a stop round-trips cleanly through the JSON API and SwiftData.
+    enum CodingKeys: String, CodingKey { case address, lat, lng }
+
+    init(id: UUID = UUID(), address: String, lat: Double, lng: Double) {
+        self.id = id
+        self.address = address
+        self.lat = lat
+        self.lng = lng
+    }
+    init(id: UUID = UUID(), address: String, coordinate: CLLocationCoordinate2D) {
+        self.init(id: id, address: address, lat: coordinate.latitude, lng: coordinate.longitude)
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = UUID()
+        self.address = try c.decode(String.self, forKey: .address)
+        self.lat = try c.decode(Double.self, forKey: .lat)
+        self.lng = try c.decode(Double.self, forKey: .lng)
+    }
+}
+
 // MARK: - Recorded drive (local source of truth)
 
 @Model
@@ -138,6 +170,9 @@ final class DriveTrip {
     var isFavorite: Bool
     /// Who covers this drive's fuel cost — the app's core concept.
     var paidByRaw: String = PaidBy.myself.rawValue
+
+    /// Intermediate stops on this trip (multi-stop), start → stops → end. Empty for a simple A→B.
+    var stops: [RouteStop] = []
 
     var vehicleName: String?
     var vehicleMpg: Double?
@@ -326,6 +361,8 @@ final class ScheduledDrive {
     var categoryRaw: String
     /// Default payer for drives started from this schedule.
     var paidByRaw: String = PaidBy.myself.rawValue
+    /// Intermediate stops on this scheduled route (multi-stop), start → stops → end.
+    var stops: [RouteStop] = []
     var vehicleName: String?
     var notes: String?
     var isEnabled: Bool
@@ -395,6 +432,11 @@ final class ScheduledDrive {
 
     var startCoordinate: CLLocationCoordinate2D { .init(latitude: startLat, longitude: startLng) }
     var endCoordinate: CLLocationCoordinate2D { .init(latitude: endLat, longitude: endLng) }
+
+    /// Ordered route waypoints: start → intermediate stops → destination.
+    var routeCoordinates: [CLLocationCoordinate2D] {
+        [startCoordinate] + stops.map(\.coordinate) + [endCoordinate]
+    }
 
     /// Next concrete departure at or after `reference`, honoring the repeat rule.
     func nextDeparture(after reference: Date = .now) -> Date {

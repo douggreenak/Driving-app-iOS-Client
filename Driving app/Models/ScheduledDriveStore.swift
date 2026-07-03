@@ -69,7 +69,8 @@ enum ScheduledDriveStore {
             isCanceled: drive.isCanceled,
             lastStartedAt: drive.lastStartedAt.map { iso.string(from: $0) },
             lastCompletedAt: drive.lastCompletedAt.map { iso.string(from: $0) },
-            skippedOccurrences: drive.skippedOccurrences.map { $0.timeIntervalSince1970 }
+            skippedOccurrences: drive.skippedOccurrences.map { $0.timeIntervalSince1970 },
+            stops: drive.stops
         )
     }
 }

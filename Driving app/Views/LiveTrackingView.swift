@@ -130,6 +130,7 @@ struct LiveTrackingView: View {
             tracker.plannedCategory = scheduled.category
             tracker.plannedPaidBy = scheduled.paidBy
             tracker.plannedVehicleName = scheduled.vehicleName
+            tracker.plannedStops = scheduled.stops
             // Mark this occurrence as departed for the departures board.
             scheduled.lastStartedAt = .now
             try? context.save()
@@ -489,6 +490,7 @@ struct LiveTrackingView: View {
         let schedStart = scheduled?.startAddress
         let vehName = selectedVehicle?.name
         let vehMpg = selectedVehicle?.avgMpg
+        let stops = tracker.plannedStops
         // Dismiss + clear the crash log *synchronously* so the trip can't be saved twice (a second
         // Save tap during the async save, or a stale crash-recovery) creating a duplicate.
         tracker.clearCrashLog()
@@ -509,7 +511,8 @@ struct LiveTrackingView: View {
                 points: pts, startAddress: startAddr, endAddress: endAddr,
                 category: category, paidBy: paidBy, notes: notes, name: tripName,
                 vehicleName: vehName, vehicleMpg: vehMpg,
-                scheduledDeparture: scheduledDeparture, scheduledArrival: scheduledArrival
+                scheduledDeparture: scheduledDeparture, scheduledArrival: scheduledArrival,
+                stops: stops
             )
             await TripStore.save(input, context: context)
         }

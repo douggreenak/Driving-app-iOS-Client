@@ -13,6 +13,14 @@ struct NewScheduledDriveView: View {
 
     /// When non-nil the form edits this existing drive in place rather than creating a new one.
     private let editing: ScheduledDrive?
+    /// The specific occurrence being edited (for a repeating drive), so "change only this one" can
+    /// target the right date.
+    private let occurrenceDate: Date?
+
+    @State private var showRepeatChoice = false
+
+    /// Which occurrences an edit to a repeating drive applies to.
+    private enum EditScope { case all, thisOccurrence }
 
     @State private var title = ""
     @State private var startAddress = ""
@@ -26,19 +34,27 @@ struct NewScheduledDriveView: View {
 
     @State private var startCoord: CLLocationCoordinate2D?
     @State private var endCoord: CLLocationCoordinate2D?
+    /// Intermediate stops (multi-stop): start → stops → destination.
+    @State private var stops: [RouteStop] = []
     @State private var travelSeconds: Int?
     @State private var arrivalOverride: Date?
     @State private var calculating = false
     @State private var routeError: String?
     @State private var didPrefill = false
 
-    init(editing: ScheduledDrive? = nil) {
+    init(editing: ScheduledDrive? = nil, occurrenceDate: Date? = nil) {
         self.editing = editing
+        self.occurrenceDate = occurrenceDate
         if let d = editing {
             _title = State(initialValue: d.title)
             _startAddress = State(initialValue: d.startAddress)
             _endAddress = State(initialValue: d.endAddress)
-            _departure = State(initialValue: d.departure)
+            // For a repeating drive opened on a specific occurrence, show THAT occurrence's
+            // departure/arrival (not the series anchor), so editing it reads naturally.
+            let budget = d.scheduledArrival.timeIntervalSince(d.departure)
+            let dep = (d.repeatRule != .none ? occurrenceDate : nil) ?? d.departure
+            _departure = State(initialValue: dep)
+            _arrivalOverride = State(initialValue: dep.addingTimeInterval(budget))
             _repeatRule = State(initialValue: d.repeatRule)
             _category = State(initialValue: d.category)
             _paidBy = State(initialValue: d.paidBy)
@@ -46,8 +62,8 @@ struct NewScheduledDriveView: View {
             _notes = State(initialValue: d.notes ?? "")
             _startCoord = State(initialValue: d.startCoordinate)
             _endCoord = State(initialValue: d.endCoordinate)
+            _stops = State(initialValue: d.stops)
             _travelSeconds = State(initialValue: d.estimatedTravelTime)
-            _arrivalOverride = State(initialValue: d.scheduledArrival)
         }
     }
 
@@ -75,6 +91,29 @@ struct NewScheduledDriveView: View {
                                      address: $startAddress, coordinate: $startCoord) {
                         Task { await recalcETA() }
                     }
+                    ForEach(Array(stops.enumerated()), id: \.element.id) { index, _ in
+                        HStack(spacing: 8) {
+                            AddressPickerRow(title: "Stop \(index + 1)",
+                                             systemImage: "\(index + 1).circle.fill",
+                                             address: stopBinding(index).address,
+                                             coordinate: stopBinding(index).coordinate) {
+                                Task { await recalcETA() }
+                            }
+                            Button {
+                                stops.remove(at: index)
+                                Task { await recalcETA() }
+                            } label: {
+                                Image(systemName: "minus.circle.fill").foregroundStyle(.red)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    Button {
+                        stops.append(RouteStop(address: "", lat: 0, lng: 0))
+                    } label: {
+                        Label("Add stop", systemImage: "plus.circle.fill").font(.subheadline.weight(.semibold))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.blue)
                     AddressPickerRow(title: "Destination", systemImage: "mappin",
                                      address: $endAddress, coordinate: $endCoord) {
                         Task { await recalcETA() }
@@ -149,28 +188,52 @@ struct NewScheduledDriveView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(editing == nil ? "Save" : "Done") { save() }.disabled(!canSave)
+                    Button(editing == nil ? "Save" : "Done") { attemptSave() }.disabled(!canSave)
                 }
+            }
+            .confirmationDialog("This drive repeats", isPresented: $showRepeatChoice, titleVisibility: .visible) {
+                Button("Change Only This Drive") { performSave(scope: .thisOccurrence) }
+                Button("Change All Future Drives") { performSave(scope: .all) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Apply your changes to just this one occurrence, or to the whole repeating series?")
             }
         }
     }
 
-    /// Recompute the predicted travel time whenever both endpoints are set.
+    /// Bindings into a specific stop, adapting `RouteStop`'s stored lat/lng to the address-picker's
+    /// optional-coordinate binding. Bounds-checked so a remove mid-render can't crash.
+    private func stopBinding(_ index: Int) -> (address: Binding<String>, coordinate: Binding<CLLocationCoordinate2D?>) {
+        let address = Binding<String>(
+            get: { index < stops.count ? stops[index].address : "" },
+            set: { if index < stops.count { stops[index].address = $0 } }
+        )
+        let coordinate = Binding<CLLocationCoordinate2D?>(
+            get: { index < stops.count && (stops[index].lat != 0 || stops[index].lng != 0) ? stops[index].coordinate : nil },
+            set: { newValue in
+                guard index < stops.count else { return }
+                if let c = newValue { stops[index].lat = c.latitude; stops[index].lng = c.longitude }
+                else { stops[index].lat = 0; stops[index].lng = 0 }
+            }
+        )
+        return (address, coordinate)
+    }
+
+    /// Stops that have actually been picked (have a coordinate), in order.
+    private var pickedStops: [RouteStop] { stops.filter { $0.lat != 0 || $0.lng != 0 } }
+
+    /// Recompute the predicted travel time across every leg (start → stops → destination).
     private func recalcETA() async {
         guard let s = startCoord, let e = endCoord else { return }
         calculating = true
         routeError = nil
         defer { calculating = false }
-        let request = MKDirections.Request()
-        request.source = MKMapItem(placemark: .init(coordinate: s))
-        request.destination = MKMapItem(placemark: .init(coordinate: e))
-        request.transportType = .automobile
-        do {
-            let eta = try await MKDirections(request: request).calculateETA()
-            travelSeconds = Int(eta.expectedTravelTime)
+        let waypoints = [s] + pickedStops.map(\.coordinate) + [e]
+        if let result = await RouteMatcher.multiLegRoute(through: waypoints) {
+            travelSeconds = result.seconds
             arrivalOverride = nil
-        } catch {
-            routeError = "Couldn't find a driving route between these two places. Check the addresses and your connection."
+        } else {
+            routeError = "Couldn't find a driving route through these places. Check the addresses and your connection."
         }
     }
 
@@ -186,44 +249,76 @@ struct NewScheduledDriveView: View {
         vehicleName = last.vehicleName
     }
 
-    private func save() {
+    /// True when we're editing an existing *repeating* drive — the case where the user must choose
+    /// whether the change applies to this one occurrence or the whole series.
+    private var editingRepeating: Bool { editing?.repeatRule ?? .none != .none }
+
+    /// Save tap: repeating edits ask "this one vs all"; everything else saves straight through.
+    private func attemptSave() {
+        guard canSave else { return }
+        if editingRepeating {
+            showRepeatChoice = true
+        } else {
+            performSave(scope: .all)
+        }
+    }
+
+    private func performSave(scope: EditScope) {
         guard let s = startCoord, let e = endCoord, let travel = travelSeconds else { return }
         Haptics.success()
-        if let drive = editing {
-            drive.title = title
-            drive.startAddress = startAddress
-            drive.endAddress = endAddress
-            drive.startLat = s.latitude; drive.startLng = s.longitude
-            drive.endLat = e.latitude; drive.endLng = e.longitude
-            drive.departure = departure
-            drive.estimatedTravelTime = travel
-            drive.scheduledArrival = arrival
-            drive.repeatRule = repeatRule
-            drive.category = category
-            drive.paidBy = paidBy
-            drive.vehicleName = vehicleName
-            drive.notes = notes.isEmpty ? nil : notes
+        if let drive = editing, scope == .all {
+            // Apply to the whole series (or a one-time drive) — edit in place.
+            apply(to: drive, s: s, e: e, travel: travel)
+        } else if let drive = editing, scope == .thisOccurrence {
+            // Change only this occurrence: skip it in the series and drop in a standalone one-time
+            // drive carrying the edits. No new data model needed — reuses the skip mechanism.
+            let original = (occurrenceDate ?? drive.statusReferenceDeparture())
+            drive.skippedOccurrences.append(original)
+            let one = makeDrive(s: s, e: e, travel: travel, repeatOverride: RepeatRule.none)
+            context.insert(one)
         } else {
-            let drive = ScheduledDrive(
-                title: title,
-                startAddress: startAddress, endAddress: endAddress,
-                startLat: s.latitude, startLng: s.longitude,
-                endLat: e.latitude, endLng: e.longitude,
-                departure: departure,
-                estimatedTravelTime: travel,
-                scheduledArrival: arrival,
-                repeatRule: repeatRule,
-                category: category,
-                paidBy: paidBy,
-                vehicleName: vehicleName,
-                notes: notes.isEmpty ? nil : notes
-            )
-            context.insert(drive)
+            context.insert(makeDrive(s: s, e: e, travel: travel, repeatOverride: nil))
         }
         try? context.save()
         // Best-effort mirror the new/edited drive to the web DB.
         Task { await ScheduledDriveStore.sync(context: context) }
         dismiss()
+    }
+
+    private func apply(to drive: ScheduledDrive, s: CLLocationCoordinate2D, e: CLLocationCoordinate2D, travel: Int) {
+        drive.title = title
+        drive.startAddress = startAddress
+        drive.endAddress = endAddress
+        drive.startLat = s.latitude; drive.startLng = s.longitude
+        drive.endLat = e.latitude; drive.endLng = e.longitude
+        drive.departure = departure
+        drive.estimatedTravelTime = travel
+        drive.scheduledArrival = arrival
+        drive.stops = pickedStops
+        drive.repeatRule = repeatRule
+        drive.category = category
+        drive.paidBy = paidBy
+        drive.vehicleName = vehicleName
+        drive.notes = notes.isEmpty ? nil : notes
+    }
+
+    private func makeDrive(s: CLLocationCoordinate2D, e: CLLocationCoordinate2D, travel: Int, repeatOverride: RepeatRule?) -> ScheduledDrive {
+        let drive = ScheduledDrive(
+            title: title,
+            startAddress: startAddress, endAddress: endAddress,
+            startLat: s.latitude, startLng: s.longitude,
+            endLat: e.latitude, endLng: e.longitude,
+            departure: departure,
+            estimatedTravelTime: travel,
+            scheduledArrival: arrival,
+            repeatRule: repeatOverride ?? repeatRule,
+            category: category,
+            paidBy: paidBy,
+            vehicleName: vehicleName,
+            notes: notes.isEmpty ? nil : notes
+        )
+        drive.stops = pickedStops
+        return drive
     }
 
     private func travelString(_ seconds: Int) -> String {

@@ -29,6 +29,13 @@ struct ScreenshotHarness: View {
                 }
             case "newschedule":
                 NewScheduledDriveView().onAppear { SampleData.seedPlaces(into: container.mainContext) }
+            case "predict":
+                RoutePredictView().onAppear { SampleData.seedPlaces(into: container.mainContext) }
+            case "dashboard":
+                DashboardView().onAppear {
+                    SampleData.seedTrips(into: container.mainContext)
+                    SampleData.seedSchedules(into: container.mainContext)
+                }
             case "settings":
                 SettingsView().onAppear { SampleData.seedPlaces(into: container.mainContext) }
             case "search":

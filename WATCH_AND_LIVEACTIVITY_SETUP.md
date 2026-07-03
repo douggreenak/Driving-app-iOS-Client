@@ -1,5 +1,11 @@
 # Apple Watch app + Live Activity — target setup
 
+> **UPDATE:** The **Live Activity widget-extension target (`DriveActivity`) has now been created**
+> in the Xcode project and builds — the `.appex` is embedded in the app and `NSSupportsLiveActivities`
+> is set. Starting a drive shows the Live Activity on the Lock Screen / Dynamic Island; no manual
+> step needed for it anymore. The **Apple Watch** target below still needs to be added.
+
+
 All the Swift source is written and the **iPhone side is fully wired and building**. The two pieces
 below each need a new Xcode target (target creation is a GUI action, so it isn't done for you — but
 it's a few clicks each, and no code changes are required).

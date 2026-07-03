@@ -61,7 +61,7 @@ struct ScheduledDriveDetailView: View {
         }
         .task { await loadRoute() }
         .fullScreenCover(isPresented: $showStart) { LiveTrackingView(scheduled: drive) }
-        .sheet(isPresented: $showEdit) { NewScheduledDriveView(editing: drive) }
+        .sheet(isPresented: $showEdit) { NewScheduledDriveView(editing: drive, occurrenceDate: departure) }
     }
 
     // MARK: - Map header (optimal route)
@@ -74,6 +74,9 @@ struct ScheduledDriveDetailView: View {
                         .stroke(.blue, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
                 }
                 Annotation("Departure", coordinate: drive.startCoordinate) { pin(startColor) }
+                ForEach(Array(drive.stops.enumerated()), id: \.element.id) { i, stop in
+                    Annotation("Stop \(i + 1)", coordinate: stop.coordinate) { stopPin(i + 1) }
+                }
                 Annotation("Arrival", coordinate: drive.endCoordinate) { pin(endColor) }
             }
             .mapStyle(.standard(elevation: .flat))
@@ -108,6 +111,15 @@ struct ScheduledDriveDetailView: View {
             Circle().fill(color).frame(width: 16, height: 16)
             Circle().stroke(.white, lineWidth: 2).frame(width: 16, height: 16)
         }
+    }
+
+    /// A numbered pin for an intermediate stop.
+    private func stopPin(_ number: Int) -> some View {
+        Text("\(number)")
+            .font(.caption2.weight(.bold)).foregroundStyle(.white)
+            .frame(width: 18, height: 18)
+            .background(.orange, in: .circle)
+            .overlay(Circle().stroke(.white, lineWidth: 1.5))
     }
 
     private func endpoint(_ title: String, _ time: Date, _ tint: Color, _ align: HorizontalAlignment) -> some View {
@@ -278,14 +290,14 @@ struct ScheduledDriveDetailView: View {
     // MARK: - Route fetch
 
     private func loadRoute() async {
-        let routes = await RouteMatcher.candidateRoutes(from: drive.startCoordinate, to: drive.endCoordinate)
-        if let best = routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) {
-            routeCoords = best.polyline.coordinates()
-            // Refresh the stored predicted travel time from the live optimal route.
-            drive.estimatedTravelTime = Int(best.expectedTravelTime)
+        // Route through every waypoint (start → stops → destination), summing the legs.
+        if let result = await RouteMatcher.multiLegRoute(through: drive.routeCoordinates) {
+            routeCoords = result.coordinates
+            // Refresh the stored predicted travel time from the live optimal multi-leg route.
+            drive.estimatedTravelTime = result.seconds
             try? context.save()
         }
-        let coords = routeCoords.isEmpty ? [drive.startCoordinate, drive.endCoordinate] : routeCoords
+        let coords = routeCoords.isEmpty ? drive.routeCoordinates : routeCoords
         cameraPosition = .region(.enclosing(coords))
         loadingRoute = false
     }

@@ -41,6 +41,13 @@ struct APIClient {
         _ = try await request("PATCH", "/api/trips", body: body)
     }
 
+    /// Update a synced trip's stops (multi-stop annotations added after the drive was recorded).
+    static func patchTripStops(id: String, stops: [RouteStop]) async throws {
+        struct Body: Codable { let id: String; let stops: [RouteStop] }
+        let body = try JSONEncoder.api.encode(Body(id: id, stops: stops))
+        _ = try await request("PATCH", "/api/trips", body: body)
+    }
+
     // MARK: - Gas
 
     static func fetchGasEntries() async throws -> [APIGasEntry] {
@@ -144,6 +151,7 @@ struct APITrip: Codable, Identifiable {
     let category: String
     let isFavorite: Bool
     let paidBy: String?
+    let stops: [RouteStop]?
     let gasEntries: [APIGasEntry]?
 
     var parsedDate: Date {
@@ -170,6 +178,7 @@ struct APITripCreate: Codable {
     let notes: String?
     let category: String
     let paidBy: String
+    var stops: [RouteStop] = []
     var routeEncoded: String? = nil
 }
 
@@ -198,6 +207,7 @@ struct APIScheduledDrive: Codable, Identifiable {
     let lastStartedAt: String?
     let lastCompletedAt: String?
     let skippedOccurrences: [Double]
+    let stops: [RouteStop]?
 }
 
 /// Payload for creating (id nil) or updating (id set) a scheduled drive.
@@ -223,6 +233,7 @@ struct APIScheduledDrivePayload: Codable {
     let lastStartedAt: String?
     let lastCompletedAt: String?
     let skippedOccurrences: [Double]
+    let stops: [RouteStop]
 }
 
 struct APIGasEntry: Codable, Identifiable {

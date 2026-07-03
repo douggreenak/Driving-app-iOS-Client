@@ -45,6 +45,29 @@ enum RouteMatcher {
         }
     }
 
+    /// Total expected travel seconds and the combined road polyline across an ordered list of
+    /// waypoints (start → stops → destination), summing the fastest route for each leg. Returns nil
+    /// if any leg has no available route (e.g. offline). Used for multi-stop scheduled drives and
+    /// route cost prediction.
+    static func multiLegRoute(through waypoints: [CLLocationCoordinate2D])
+        async -> (seconds: Int, coordinates: [CLLocationCoordinate2D])? {
+        guard waypoints.count >= 2 else { return nil }
+        var totalSeconds = 0
+        var coords: [CLLocationCoordinate2D] = []
+        for i in 1..<waypoints.count {
+            let request = MKDirections.Request()
+            request.source = MKMapItem(placemark: MKPlacemark(coordinate: waypoints[i - 1]))
+            request.destination = MKMapItem(placemark: MKPlacemark(coordinate: waypoints[i]))
+            request.transportType = .automobile
+            guard let response = try? await MKDirections(request: request).calculate(),
+                  let route = response.routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime })
+            else { return nil }
+            totalSeconds += Int(route.expectedTravelTime)
+            coords.append(contentsOf: route.polyline.coordinates())
+        }
+        return (totalSeconds, coords)
+    }
+
     /// Match a recorded track to roads. `points` must be in chronological order.
     static func match(points: [RecordedPoint]) async -> Result {
         let coords = points.map(\.coordinate)

@@ -20,6 +20,7 @@ enum TripStore {
         var vehicleMpg: Double?
         var scheduledDeparture: Date?
         var scheduledArrival: Date?
+        var stops: [RouteStop] = []
     }
 
     @discardableResult
@@ -72,6 +73,7 @@ enum TripStore {
             usedRouteMatching: match.usedRoute,
             matchedPolyline: matchedData
         )
+        trip.stops = input.stops
         context.insert(trip)
 
         // Attach the full track for playback / analysis.
@@ -138,6 +140,13 @@ enum TripStore {
         if allSucceeded { UserDefaults.standard.set(true, forKey: doneKey) }
     }
 
+    /// Push a trip's edited stops to its already-synced remote row (best-effort). No-op if the trip
+    /// hasn't synced yet — its stops go up with the initial create instead.
+    static func syncStops(for trip: DriveTrip) async {
+        guard let remoteID = trip.remoteID else { return }
+        try? await APIClient.patchTripStops(id: remoteID, stops: trip.stops)
+    }
+
     static func syncPending(context: ModelContext) async -> Int {
         let descriptor = FetchDescriptor<DriveTrip>(predicate: #Predicate { !$0.synced })
         guard let pending = try? context.fetch(descriptor), !pending.isEmpty else { return 0 }
@@ -155,6 +164,7 @@ enum TripStore {
                 notes: trip.notes,
                 category: trip.categoryRaw,
                 paidBy: trip.paidByRaw,
+                stops: trip.stops,
                 routeEncoded: Polyline.encode(trip.displayCoordinates)
             )
             if let remote = try? await APIClient.createTrip(create) {
