@@ -1,12 +1,18 @@
 import Foundation
 import SwiftData
 import CoreLocation
+import MapKit
 
 /// Turns a finished recording into a persisted `DriveTrip`: runs map-matching, computes the
 /// speed-aware fuel estimate, stores everything locally (source of truth), then best-effort
 /// syncs a summary to the web backend. Network failures never lose local data.
 @MainActor
 enum TripStore {
+
+    /// Trips currently being POSTed. Guards against the detached first-save upload racing a
+    /// concurrent `syncPending` (dashboard `.task`, pull-to-refresh) and creating a duplicate
+    /// remote row for the same drive.
+    private static var uploading: Set<UUID> = []
 
     struct Input {
         var points: [RecordedPoint]
@@ -95,6 +101,100 @@ enum TripStore {
         return trip
     }
 
+    /// Trim a recorded trip to the point range `keepStart...keepEnd`, discarding the track outside
+    /// it — for when you forget to stop tracking (a stationary tail) or start it late. Deletes the
+    /// removed `TrackPoint`s, recomputes every derived stat (distance, duration, speeds, moving time,
+    /// speed-aware fuel, start/end coords + times), re-snaps the display polyline, re-labels any
+    /// endpoint that moved, and best-effort pushes the new geometry to the web copy. Destructive.
+    @discardableResult
+    static func applyTrim(trip: DriveTrip, keepStart: Int, keepEnd: Int, context: ModelContext) async -> Bool {
+        let ordered = trip.orderedPoints
+        guard ordered.count >= 2 else { return false }
+        let lo = max(0, min(keepStart, ordered.count - 2))
+        let hi = max(lo + 1, min(keepEnd, ordered.count - 1))
+        let kept = Array(ordered[lo...hi])
+        guard kept.count >= 2 else { return false }
+        let trimmedStart = lo > 0
+        let trimmedEnd = hi < ordered.count - 1
+        guard trimmedStart || trimmedEnd else { return false }  // nothing to do
+
+        // Drop the removed points and reindex the survivors so `seq` stays contiguous.
+        for (idx, tp) in ordered.enumerated() where idx < lo || idx > hi { context.delete(tp) }
+        for (i, tp) in kept.enumerated() { tp.seq = i }
+
+        // Recompute stats from the kept track (mirrors the save-time math).
+        let recorded = kept.map {
+            RecordedPoint(t: $0.t, coordinate: $0.coordinate, speed: $0.speed,
+                          course: $0.course, accuracy: $0.accuracy, altitude: $0.altitude)
+        }
+        let first = recorded.first!, last = recorded.last!
+        var meters = 0.0
+        for i in 1..<recorded.count {
+            let step = recorded[i - 1].coordinate.distanceMeters(to: recorded[i].coordinate)
+            if step < 500 { meters += step }
+        }
+        let miles = meters / 1609.34
+        let secs = Int(last.t.timeIntervalSince(first.t))
+        trip.date = first.t
+        trip.endDate = last.t
+        trip.distance = miles
+        trip.duration = secs
+        trip.movingSeconds = movingSeconds(recorded)
+        trip.maxSpeed = recorded.map(\.speed).max() ?? 0
+        trip.avgSpeed = secs > 0 ? miles / (Double(secs) / 3600) : 0
+        trip.startLat = first.lat; trip.startLng = first.lng
+        trip.endLat = last.lat; trip.endLng = last.lng
+        let mpg = trip.vehicleMpg ?? 25
+        trip.estimatedGallons = FuelModel.gallons(segments: FuelModel.segments(from: recorded), ratedMpg: mpg)
+
+        // Re-snap the display polyline to the shorter track — but ONLY apply a successful match.
+        // A failed re-match (offline / directions error) returns a raw fallback; writing it would
+        // permanently wipe this trip's existing road-snapping, per the rule that a failed
+        // network-only step must never degrade local data. On failure, drop the now-stale snapped
+        // polyline (it still covered the trimmed-away tail) so the map shows the trimmed raw track,
+        // and keep the existing matchedFraction / usedRouteMatching / per-point onRoad flags.
+        let match = await RouteMatcher.match(points: recorded)
+        if match.usedRoute {
+            trip.matchedFraction = match.matchedFraction
+            trip.usedRouteMatching = true
+            trip.matchedPolyline = try? JSONEncoder().encode(match.coordinates.map { [$0.latitude, $0.longitude] })
+            for (i, tp) in kept.enumerated() {
+                tp.onRoad = i < match.onRoad.count ? match.onRoad[i] : false
+            }
+        } else {
+            trip.matchedPolyline = nil
+        }
+
+        // Re-label endpoints that moved (best-effort geocode).
+        if trimmedStart, let name = await reverseGeocode(first.coordinate) { trip.startAddress = name }
+        if trimmedEnd, let name = await reverseGeocode(last.coordinate) { trip.endAddress = name }
+
+        try? context.save()
+
+        // Best-effort: push the rewritten geometry/stats — including the new endpoints & addresses —
+        // to the web copy so its map markers and labels stay consistent with the trimmed route.
+        if let remoteID = trip.remoteID {
+            let f = ISO8601DateFormatter()
+            try? await APIClient.patchTripTrim(
+                id: remoteID,
+                date: f.string(from: trip.date),
+                distance: trip.distance,
+                duration: max(1, (trip.duration + 30) / 60),
+                startAddress: trip.startAddress, endAddress: trip.endAddress,
+                startLat: trip.startLat, startLng: trip.startLng,
+                endLat: trip.endLat, endLng: trip.endLng,
+                routeEncoded: Polyline.encode(trip.displayCoordinates))
+        }
+        return true
+    }
+
+    private static func reverseGeocode(_ coord: CLLocationCoordinate2D) async -> String? {
+        let loc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        guard let req = MKReverseGeocodingRequest(location: loc) else { return nil }
+        if let items = try? await req.mapItems, let name = items.first?.name, !name.isEmpty { return name }
+        return nil
+    }
+
     /// Retroactively update every past trip in a car when its name or MPG changes: re-point the
     /// trips to the (possibly new) name and recompute their speed-aware fuel estimate with the new
     /// MPG. This keeps the gas-used and paid-by-cost numbers consistent across the whole history.
@@ -151,7 +251,13 @@ enum TripStore {
         let descriptor = FetchDescriptor<DriveTrip>(predicate: #Predicate { !$0.synced })
         guard let pending = try? context.fetch(descriptor), !pending.isEmpty else { return 0 }
         var synced = 0
-        for trip in pending {
+        for trip in pending where !uploading.contains(trip.id) {
+            uploading.insert(trip.id)
+            defer { uploading.remove(trip.id) }
+            // Re-check freshness after taking the slot: the detached first-save `syncToBackend` for
+            // this same trip can complete (flipping `synced` and freeing the slot) during an earlier
+            // iteration's `await`, so without this a backlog would upload it a second time.
+            if trip.synced { continue }
             let f = ISO8601DateFormatter()
             let create = APITripCreate(
                 date: f.string(from: trip.date),
@@ -172,8 +278,8 @@ enum TripStore {
                 trip.synced = true
                 synced += 1
             }
+            try? context.save()  // persist each result immediately so a crash can't re-upload it
         }
-        try? context.save()
         return synced
     }
 
@@ -192,6 +298,10 @@ enum TripStore {
     }
 
     private static func syncToBackend(trip: DriveTrip, displayCoords: [CLLocationCoordinate2D]) async {
+        // Skip if this trip is already being uploaded (or has been) by another path.
+        guard !trip.synced, !uploading.contains(trip.id) else { return }
+        uploading.insert(trip.id)
+        defer { uploading.remove(trip.id) }
         let f = ISO8601DateFormatter()
         let create = APITripCreate(
             date: f.string(from: trip.date),
@@ -205,13 +315,17 @@ enum TripStore {
             notes: trip.notes,
             category: trip.categoryRaw,
             paidBy: trip.paidByRaw,
+            // Include the multi-stop stops on the primary sync path too — this trip is marked
+            // `synced` right after, so `syncPending` (which does send stops) never revisits it.
+            stops: trip.stops,
             routeEncoded: Polyline.encode(displayCoords)
         )
         if let remote = try? await APIClient.createTrip(create) {
-            await MainActor.run {
-                trip.remoteID = remote.id
-                trip.synced = true
-            }
+            trip.remoteID = remote.id
+            trip.synced = true
+            // Persist the synced flag now so an app kill before SwiftData's autosave can't
+            // re-upload this trip on next launch (a second duplicate remote row).
+            try? trip.modelContext?.save()
         }
     }
 }

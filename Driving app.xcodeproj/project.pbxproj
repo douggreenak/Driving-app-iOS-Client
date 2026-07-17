@@ -11,6 +11,7 @@
 		0000000000000000000002B1 /* DriveActivityLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000002A1 /* DriveActivityLiveActivity.swift */; };
 		0000000000000000000002B2 /* DriveActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000002A3 /* DriveActivityAttributes.swift */; };
 		0000000000000000000002B3 /* DriveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 000000000000000000000220 /* DriveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		0000000000000000000002B4 /* DriveWatch Watch App.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 000000000000000000000322 /* DriveWatch Watch App.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -21,36 +22,56 @@
 			remoteGlobalIDString = 000000000000000200000000;
 			remoteInfo = DriveActivity;
 		};
+		000000000000000280000000 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 000000000000000000000000 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 000000000000000300000000;
+			remoteInfo = "DriveWatch Watch App";
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
 		000000000000000150000000 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
 			dstPath = "";
-			dstSubfolderSpec = 13;
+			dstSubfolder = PlugIns;
 			files = (
 				0000000000000000000002B3 /* DriveActivity.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
+		};
+		000000000000000160000000 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				0000000000000000000002B4 /* DriveWatch Watch App.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
 		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		0000000000000000000000C0 /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 		000000000000000000000120 /* Driving app.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Driving app.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		000000000000000000000220 /* DriveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "DriveActivity.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
-		0000000000000000000002A0 /* DriveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DriveActivityBundle.swift"; sourceTree = "<group>"; };
-		0000000000000000000002A1 /* DriveActivityLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DriveActivityLiveActivity.swift"; sourceTree = "<group>"; };
-		0000000000000000000002A2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info.plist"; sourceTree = "<group>"; };
-		0000000000000000000002A3 /* DriveActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "DriveActivityAttributes.swift"; path = "Driving app/Models/DriveActivityAttributes.swift"; sourceTree = SOURCE_ROOT; };
+		000000000000000000000220 /* DriveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = DriveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		0000000000000000000002A0 /* DriveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DriveActivityBundle.swift; sourceTree = "<group>"; };
+		0000000000000000000002A1 /* DriveActivityLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DriveActivityLiveActivity.swift; sourceTree = "<group>"; };
+		0000000000000000000002A2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		0000000000000000000002A3 /* DriveActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DriveActivityAttributes.swift; path = "Driving app/Models/DriveActivityAttributes.swift"; sourceTree = SOURCE_ROOT; };
+		000000000000000000000322 /* DriveWatch Watch App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "DriveWatch Watch App.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		000000000000000000000010 /* Driving app */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "Driving app";
+			sourceTree = "<group>";
+		};
+		000000000000000000000315 /* DriveWatch Watch App */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "DriveWatch Watch App";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -63,10 +84,13 @@
 		};
 		000000000000000230000000 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
+		};
+		000000000000000330000000 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
 		};
 /* End PBXFrameworksBuildPhase section */
 
@@ -77,6 +101,7 @@
 				0000000000000000000000C0 /* Secrets.xcconfig */,
 				000000000000000000000010 /* Driving app */,
 				000000000000000000000210 /* DriveActivityExtension */,
+				000000000000000000000315 /* DriveWatch Watch App */,
 				000000000000000000000020 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -86,6 +111,7 @@
 			children = (
 				000000000000000000000120 /* Driving app.app */,
 				000000000000000000000220 /* DriveActivity.appex */,
+				000000000000000000000322 /* DriveWatch Watch App.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -112,11 +138,13 @@
 				000000000000000130000000 /* Frameworks */,
 				000000000000000140000000 /* Resources */,
 				000000000000000150000000 /* Embed Foundation Extensions */,
+				000000000000000160000000 /* Embed Watch Content */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				000000000000000260000000 /* PBXTargetDependency */,
+				000000000000000290000000 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				000000000000000000000010 /* Driving app */,
@@ -136,12 +164,30 @@
 			);
 			buildRules = (
 			);
-			dependencies = (
-			);
 			name = DriveActivity;
 			productName = DriveActivity;
 			productReference = 000000000000000000000220 /* DriveActivity.appex */;
 			productType = "com.apple.product-type.app-extension";
+		};
+		000000000000000300000000 /* DriveWatch Watch App */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 000000000000000310000000 /* Build configuration list for PBXNativeTarget "DriveWatch Watch App" */;
+			buildPhases = (
+				000000000000000320000000 /* Sources */,
+				000000000000000330000000 /* Frameworks */,
+				000000000000000340000000 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				000000000000000000000315 /* DriveWatch Watch App */,
+			);
+			name = "DriveWatch Watch App";
+			productName = "DriveWatch Watch App";
+			productReference = 000000000000000000000322 /* DriveWatch Watch App.app */;
+			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
 
@@ -157,6 +203,9 @@
 						CreatedOnToolsVersion = 26.3;
 					};
 					000000000000000200000000 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					000000000000000300000000 = {
 						CreatedOnToolsVersion = 26.3;
 					};
 				};
@@ -177,6 +226,7 @@
 			targets = (
 				000000000000000100000000 /* Driving app */,
 				000000000000000200000000 /* DriveActivity */,
+				000000000000000300000000 /* DriveWatch Watch App */,
 			);
 		};
 /* End PBXProject section */
@@ -189,10 +239,13 @@
 		};
 		000000000000000240000000 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
+		};
+		000000000000000340000000 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
 		};
 /* End PBXResourcesBuildPhase section */
 
@@ -204,13 +257,16 @@
 		};
 		000000000000000220000000 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				0000000000000000000002B0 /* DriveActivityBundle.swift in Sources */,
 				0000000000000000000002B1 /* DriveActivityLiveActivity.swift in Sources */,
 				0000000000000000000002B2 /* DriveActivityAttributes.swift in Sources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
+		};
+		000000000000000320000000 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
 		};
 /* End PBXSourcesBuildPhase section */
 
@@ -219,6 +275,11 @@
 			isa = PBXTargetDependency;
 			target = 000000000000000200000000 /* DriveActivity */;
 			targetProxy = 000000000000000270000000 /* PBXContainerItemProxy */;
+		};
+		000000000000000290000000 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 000000000000000300000000 /* DriveWatch Watch App */;
+			targetProxy = 000000000000000280000000 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -499,6 +560,67 @@
 			};
 			name = Release;
 		};
+		000000000000000311000000 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 85687ZHB37;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Drive Tracker";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_WKApplication = YES;
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.apexengineeringak.drivetracker;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.apexengineeringak.drivetracker.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 27.0;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		000000000000000312000000 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 85687ZHB37;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Drive Tracker";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_WKApplication = YES;
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.apexengineeringak.drivetracker;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.apexengineeringak.drivetracker.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 27.0;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -523,6 +645,14 @@
 			buildConfigurations = (
 				000000000000000211000000 /* Debug configuration for PBXNativeTarget "DriveActivity" */,
 				000000000000000212000000 /* Release configuration for PBXNativeTarget "DriveActivity" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		000000000000000310000000 /* Build configuration list for PBXNativeTarget "DriveWatch Watch App" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				000000000000000311000000 /* Debug */,
+				000000000000000312000000 /* Release */,
 			);
 			defaultConfigurationName = Release;
 		};

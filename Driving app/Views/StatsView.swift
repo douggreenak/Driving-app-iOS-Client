@@ -2,10 +2,12 @@ import SwiftUI
 import SwiftData
 import Charts
 
-struct DashboardView: View {
+/// The insights home (Flighty-for-cars). Pure, local-first stats computed from recorded `DriveTrip`s,
+/// plus the network-backed gas-spending summary (cached + stale-while-revalidate). Users can reorder
+/// and hide cards. Lives on its own tab, split out from the operational Drive tab.
+struct StatsView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \DriveTrip.date, order: .reverse) private var allTrips: [DriveTrip]
-    @Query private var scheduled: [ScheduledDrive]
     @Query private var settingsList: [UserSettings]
     @Query private var vehicles: [Vehicle]
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
@@ -15,91 +17,30 @@ struct DashboardView: View {
     @State private var gas: APIStats?
     @State private var lastUpdated: Date?
     @State private var isRefreshing = false
-    @State private var showingSettings = false
     @State private var showingEditLayout = false
 
-    // Persisted dashboard layout: the widget order and which widgets are hidden.
+    // Persisted layout: the card order and which cards are hidden.
     @AppStorage("dashboard.order") private var savedOrder = ""
     @AppStorage("dashboard.hidden") private var savedHidden = ""
 
-    private var orderedWidgets: [DashboardWidget] { DashboardWidget.parseOrder(savedOrder) }
-    private var hiddenWidgets: Set<DashboardWidget> { DashboardWidget.parseHidden(savedHidden) }
-
-    private var greeting: String {
-        let hour = Calendar.current.component(.hour, from: .now)
-        if hour < 12 { return "Good morning" }
-        if hour < 17 { return "Good afternoon" }
-        return "Good evening"
-    }
-
-    private var nextDrive: ScheduledDrive? {
-        let now = Date.now
-        // Surface whichever drive is most imminent by its Up Next occurrence — including a drive
-        // that's *overdue to leave* (delayed) but hasn't been started. Ranking by absolute distance
-        // to now means an overdue drive wins over a later on-time one, so a late drive is never
-        // hidden behind the next on-time trip.
-        return scheduled
-            .filter { $0.isEnabled && !$0.isCanceled }
-            .compactMap { drive in drive.upNextDeparture(now: now).map { (drive, $0) } }
-            .min { abs($0.1.timeIntervalSince(now)) < abs($1.1.timeIntervalSince(now)) }?
-            .0
-    }
+    private var orderedWidgets: [StatCard] { StatCard.parseOrder(savedOrder) }
+    private var hiddenWidgets: Set<StatCard> { StatCard.parseHidden(savedHidden) }
 
     var body: some View {
         NavigationStack {
             ScrollView { scrollContent }
                 .background(.black)
-                .navigationTitle(greeting)
+                .navigationTitle("Stats")
                 .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button { showingEditLayout = true } label: { Image(systemName: "slider.horizontal.3") }
-                            .accessibilityLabel("Edit dashboard layout")
-                    }
                     ToolbarItem(placement: .primaryAction) {
-                        Button { showingSettings = true } label: { Image(systemName: "gearshape.fill") }
+                        Button { showingEditLayout = true } label: { Image(systemName: "slider.horizontal.3") }
+                            .accessibilityLabel("Edit stats layout")
                     }
                 }
-                .sheet(isPresented: $showingSettings) { SettingsView() }
-                .sheet(isPresented: $showingEditLayout) { DashboardLayoutEditor() }
+                .sheet(isPresented: $showingEditLayout) { StatsLayoutEditor() }
                 .refreshable { await loadGas() }
                 .task { await loadGas() }
-                .task {
-                    // Push local trips up (incl. any unsynced) and backfill payer onto historical
-                    // trips so all current app data reaches the server.
-                    await TripStore.syncPending(context: context)
-                    await TripStore.backfillPaidBy(context: context)
-                }
-                .task(id: watchSyncKey) { broadcastToWatch() }
         }
-    }
-
-    /// Changes whenever the drives/trips the watch mirrors change, so we re-push then.
-    private var watchSyncKey: String { "\(scheduled.count)-\(allTrips.count)" }
-
-    /// Mirror upcoming drives + headline stats to the Apple Watch companion.
-    private func broadcastToWatch() {
-        #if canImport(WatchConnectivity) && os(iOS)
-        let now = Date.now
-        let fillUps = Dictionary(vehicles.compactMap { v in v.lastFilledUp.map { (v.name, $0) } },
-                                 uniquingKeysWith: { a, _ in a })
-        let stats = DrivingStats(trips: allTrips, fillUps: fillUps)
-        let drives = scheduled
-            .filter { $0.isEnabled && !$0.isCanceled }
-            .compactMap { d -> (WatchSyncPayload.Drive, Date)? in
-                guard let dep = d.upNextDeparture(now: now) else { return nil }
-                return (WatchSyncPayload.Drive(
-                    id: d.id.uuidString, title: d.title, departure: dep,
-                    endName: PlaceNamer.name(for: d.endCoordinate, fallback: d.endAddress, in: savedPlaces),
-                    paidByParents: d.paidBy == .parents), dep)
-            }
-            .sorted { abs($0.1.timeIntervalSince(now)) < abs($1.1.timeIntervalSince(now)) }
-            .prefix(10)
-            .map(\.0)
-        let payload = WatchSyncPayload(
-            drives: Array(drives),
-            stats: .init(totalMiles: stats.totalMiles, totalDrives: stats.driveCount, totalGallons: stats.totalGallons))
-        PhoneWatchConnectivity.shared.sync(payload)
-        #endif
     }
 
     private var scrollContent: some View {
@@ -109,7 +50,7 @@ struct DashboardView: View {
         let stats = DrivingStats(trips: allTrips, fillUps: fillUps)
         let widgets = orderedWidgets.filter { !hiddenWidgets.contains($0) && isAvailable($0, stats) }
         return VStack(spacing: 20) {
-            if allTrips.isEmpty && nextDrive == nil { emptyState }
+            if allTrips.isEmpty { emptyState }
             ForEach(widgets, id: \.self) { widget in
                 widgetView(widget, stats: stats)
             }
@@ -118,10 +59,9 @@ struct DashboardView: View {
         .padding(.horizontal).padding(.bottom, 20)
     }
 
-    /// Whether a widget has data to show right now (independent of the user hiding it).
-    private func isAvailable(_ widget: DashboardWidget, _ stats: DrivingStats) -> Bool {
+    /// Whether a card has data to show right now (independent of the user hiding it).
+    private func isAvailable(_ widget: StatCard, _ stats: DrivingStats) -> Bool {
         switch widget {
-        case .upNext:   return nextDrive != nil
         case .hero, .paidBy, .records: return !allTrips.isEmpty
         case .byCar:    return !stats.byCar.isEmpty
         case .monthly:  return stats.monthly.count > 1
@@ -133,9 +73,8 @@ struct DashboardView: View {
     }
 
     @ViewBuilder
-    private func widgetView(_ widget: DashboardWidget, stats: DrivingStats) -> some View {
+    private func widgetView(_ widget: StatCard, stats: DrivingStats) -> some View {
         switch widget {
-        case .upNext:   if let drive = nextDrive { upcomingCard(drive) }
         case .hero:     heroStats(stats)
         case .paidBy:   paidBySection(stats)
         case .records:  recordsStrip(stats)
@@ -340,37 +279,7 @@ struct DashboardView: View {
         .background(Color(.systemGray6), in: .rect(cornerRadius: 16))
     }
 
-    // MARK: - Upcoming / latest / empty
-
-    private func upcomingCard(_ drive: ScheduledDrive) -> some View {
-        NavigationLink {
-            ScheduledDriveDetailView(drive: drive)
-        } label: {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Label("Up Next", systemImage: "calendar").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-                    Spacer()
-                    StatusChip(status: .occurrence(departure: drive.statusReferenceDeparture(),
-                                                   scheduledArrival: drive.targetArrival(),
-                                                   travelSeconds: drive.estimatedTravelTime,
-                                                   isCanceled: drive.isCanceled,
-                                                   startedAt: drive.lastStartedAt), compact: true)
-                }
-                Text(drive.title).font(.title3.weight(.bold))
-                HStack(spacing: 6) {
-                    Image(systemName: "clock").foregroundStyle(.blue)
-                    Text(drive.statusReferenceDeparture(), format: .dateTime.weekday().hour().minute()).font(.subheadline.weight(.medium))
-                    Text(TripStatus.countdown(to: drive.statusReferenceDeparture())).font(.caption.weight(.semibold)).foregroundStyle(.blue)
-                }
-                Text("\(PlaceNamer.name(for: drive.startCoordinate, fallback: drive.startAddress, in: savedPlaces)) → \(PlaceNamer.name(for: drive.endCoordinate, fallback: drive.endAddress, in: savedPlaces))").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-            .background(.blue.opacity(0.12), in: .rect(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(.blue.opacity(0.25), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-    }
+    // MARK: - Latest trip / empty
 
     private var emptyState: some View {
         ContentUnavailableView("No drives yet", systemImage: "car.fill",
@@ -481,17 +390,16 @@ private struct BarRow: View {
     }
 }
 
-// MARK: - Editable dashboard layout
+// MARK: - Editable stats layout
 
-/// A rearrangeable/hideable section on the dashboard. Declaration order is the default layout.
-enum DashboardWidget: String, CaseIterable, Identifiable {
-    case upNext, hero, paidBy, records, byCar, monthly, category, onTime, gas, recent
+/// A rearrangeable/hideable card on the Stats tab. Declaration order is the default layout.
+enum StatCard: String, CaseIterable, Identifiable {
+    case hero, paidBy, records, byCar, monthly, category, onTime, gas, recent
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .upNext:   "Up Next"
         case .hero:     "Totals"
         case .paidBy:   "Who's Paying"
         case .records:  "Records"
@@ -506,7 +414,6 @@ enum DashboardWidget: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .upNext:   "calendar"
         case .hero:     "chart.bar.fill"
         case .paidBy:   "dollarsign.circle.fill"
         case .records:  "trophy.fill"
@@ -519,26 +426,26 @@ enum DashboardWidget: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Parse the saved order, appending any widgets missing from it (e.g. added in a newer build)
-    /// at the end so new sections still appear.
-    static func parseOrder(_ raw: String) -> [DashboardWidget] {
-        let saved = raw.split(separator: ",").compactMap { DashboardWidget(rawValue: String($0)) }
+    /// Parse the saved order, appending any cards missing from it (e.g. added in a newer build)
+    /// at the end so new cards still appear.
+    static func parseOrder(_ raw: String) -> [StatCard] {
+        let saved = raw.split(separator: ",").compactMap { StatCard(rawValue: String($0)) }
         return saved + allCases.filter { !saved.contains($0) }
     }
 
-    static func parseHidden(_ raw: String) -> Set<DashboardWidget> {
-        Set(raw.split(separator: ",").compactMap { DashboardWidget(rawValue: String($0)) })
+    static func parseHidden(_ raw: String) -> Set<StatCard> {
+        Set(raw.split(separator: ",").compactMap { StatCard(rawValue: String($0)) })
     }
 }
 
-/// Reorder (drag) and show/hide (eye) the dashboard's widgets. Changes persist immediately.
-struct DashboardLayoutEditor: View {
+/// Reorder (drag) and show/hide (eye) the Stats cards. Changes persist immediately.
+struct StatsLayoutEditor: View {
     @AppStorage("dashboard.order") private var savedOrder = ""
     @AppStorage("dashboard.hidden") private var savedHidden = ""
     @Environment(\.dismiss) private var dismiss
 
-    @State private var order: [DashboardWidget] = []
-    @State private var hidden: Set<DashboardWidget> = []
+    @State private var order: [StatCard] = []
+    @State private var hidden: Set<StatCard> = []
 
     var body: some View {
         NavigationStack {
@@ -555,20 +462,20 @@ struct DashboardLayoutEditor: View {
                 }
             }
             .environment(\.editMode, .constant(.active))
-            .navigationTitle("Edit Dashboard")
+            .navigationTitle("Edit Stats")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
             .onAppear {
-                order = DashboardWidget.parseOrder(savedOrder)
-                hidden = DashboardWidget.parseHidden(savedHidden)
+                order = StatCard.parseOrder(savedOrder)
+                hidden = StatCard.parseHidden(savedHidden)
             }
         }
     }
 
     @ViewBuilder
-    private func row(_ widget: DashboardWidget) -> some View {
+    private func row(_ widget: StatCard) -> some View {
         let isHidden = hidden.contains(widget)
         HStack(spacing: 12) {
             Image(systemName: widget.icon).foregroundStyle(.blue).frame(width: 24)

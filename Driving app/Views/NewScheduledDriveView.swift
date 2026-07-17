@@ -71,10 +71,11 @@ struct NewScheduledDriveView: View {
         arrivalOverride ?? departure.addingTimeInterval(TimeInterval(travelSeconds ?? 0))
     }
 
-    /// Start and destination must be meaningfully different (not the same pin).
+    /// Start and destination must be meaningfully different — UNLESS there are intermediate stops,
+    /// which makes it a valid round trip (Home → Grocery → Home).
     private var sameStartAndEnd: Bool {
         guard let s = startCoord, let e = endCoord else { return false }
-        return s.distanceMeters(to: e) < 50
+        return pickedStops.isEmpty && s.distanceMeters(to: e) < 50
     }
 
     private var canSave: Bool {

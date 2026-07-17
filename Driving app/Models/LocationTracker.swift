@@ -22,6 +22,10 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     var currentLocation: CLLocationCoordinate2D?
     var currentCourse: Double = -1
     var authorizationStatus: CLAuthorizationStatus = .notDetermined
+    /// Increments on every accepted GPS fix. Views observe this (instead of only the latitude) so
+    /// the follow camera, guide-route refresh, and Live Activity update once per fix — even when
+    /// the latitude is unchanged (stationary, or travelling due east/west).
+    var fixCount: Int = 0
 
     // Destination / schedule context (optional).
     var destination: CLLocationCoordinate2D?
@@ -34,6 +38,45 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     var plannedVehicleName: String?
     /// Intermediate stops carried from a scheduled drive so the recorded trip keeps them.
     var plannedStops: [RouteStop] = []
+
+    // MARK: - Multi-leg driving
+    //
+    // A multi-stop drive is broken into legs. `legTargets` is the ordered list of navigation
+    // targets *after* the start: [stop1, stop2, …, finalDestination]. The drive advances one leg
+    // at a time — arriving at an intermediate stop pauses recording (the car is parked while you
+    // run the errand) and the next "Start next leg" resumes toward the following target. Only the
+    // final leg ends the whole drive. A simple A→B drive has a single target (or none) and behaves
+    // exactly as before.
+
+    /// Ordered leg targets after the start: intermediate stops then the final destination.
+    var legTargets: [RouteStop] = []
+    /// Index into `legTargets` of the leg currently being driven (0 = start → legTargets[0]).
+    var currentLegIndex: Int = 0
+    /// True while parked at an intermediate stop, between finishing one leg and starting the next.
+    /// The session stays alive (`isTracking`) but point capture is suspended.
+    var isPausedBetweenLegs: Bool = false
+    /// Arrival timestamps recorded as each intermediate leg is completed (one per passed stop).
+    var legArrivals: [Date] = []
+    /// The ultimate endpoint's display name, kept separately from `destinationName` (which tracks
+    /// the *current* leg target) so the overall trip can always show where it ends.
+    var finalDestinationName: String?
+    /// Whether points are actively being captured right now. Distinct from `isTracking`: false while
+    /// paused between legs, so a parked errand isn't recorded as a stationary blob.
+    private(set) var isRecording = false
+
+    var isMultiLeg: Bool { legTargets.count > 1 }
+    var totalLegs: Int { max(legTargets.count, 1) }
+    /// The leg target we're currently driving toward, if any.
+    var currentLegTarget: RouteStop? {
+        legTargets.indices.contains(currentLegIndex) ? legTargets[currentLegIndex] : nil
+    }
+    /// True on the last leg (or a simple single-destination / open drive) — the leg whose end
+    /// finishes the whole drive.
+    var isOnFinalLeg: Bool { legTargets.count <= 1 || currentLegIndex >= legTargets.count - 1 }
+    /// Number of intermediate stops already reached.
+    var reachedStopCount: Int { min(currentLegIndex, max(legTargets.count - 1, 0)) }
+    /// Intermediate stops only (excludes the final destination) — what the saved trip stores.
+    var intermediateStops: [RouteStop] { legTargets.count > 1 ? Array(legTargets.dropLast()) : [] }
 
     private(set) var startTime: Date?
     private var timer: Timer?
@@ -100,6 +143,62 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         manager?.requestAlwaysAuthorization()
     }
 
+    // MARK: - Multi-leg route setup & progression
+
+    /// Configure a destination (and optional intermediate stops) before starting, so the drive
+    /// advances stop-by-stop. The current navigation target becomes the first leg's target.
+    func setRoute(stops: [RouteStop], finalDestination: CLLocationCoordinate2D, finalName: String?) {
+        var targets = stops.filter { $0.lat != 0 || $0.lng != 0 }
+        targets.append(RouteStop(address: finalName ?? "Destination", coordinate: finalDestination))
+        legTargets = targets
+        currentLegIndex = 0
+        legArrivals = []
+        isPausedBetweenLegs = false
+        finalDestinationName = finalName
+        destination = targets[0].coordinate
+        destinationName = targets[0].address
+    }
+
+    /// Add a stop while a drive is in progress. New stops are visited before the final destination
+    /// but after everything already passed. With no route yet, the stop becomes the destination.
+    func appendLiveStop(_ stop: RouteStop) {
+        if legTargets.isEmpty {
+            legTargets = [stop]
+            finalDestinationName = stop.address
+        } else {
+            legTargets.insert(stop, at: legTargets.count - 1)
+        }
+        if let t = currentLegTarget { destination = t.coordinate; destinationName = t.address }
+        persistLegState()
+    }
+
+    /// Mark arrival at the current intermediate stop and pause before the next leg. No-op on the
+    /// final leg (use `stopTracking()` there to end the drive).
+    func arriveAtCurrentStop() {
+        guard isMultiLeg, !isOnFinalLeg else { return }
+        legArrivals.append(Date())
+        currentLegIndex += 1
+        isPausedBetweenLegs = true
+        isRecording = false
+        currentSpeed = 0
+        applyPowerProfile(tracking: false)  // low-power idle while parked
+        if let t = currentLegTarget { destination = t.coordinate; destinationName = t.address }
+        persistLegState()
+    }
+
+    /// Resume recording toward the next leg's target after a pause at a stop.
+    func startNextLeg() {
+        guard isPausedBetweenLegs else { return }
+        isPausedBetweenLegs = false
+        isRecording = true
+        // Don't bridge the parked gap into distance/moving time or teleport the fuel estimate.
+        lastLocation = nil
+        lastMovingSample = nil
+        applyPowerProfile(tracking: true)
+        manager?.startUpdatingLocation()
+        persistLegState()
+    }
+
     func startTracking() {
         configureIfNeeded()
         points = []
@@ -114,30 +213,112 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         lastMovingSample = nil
         startTime = Date()
         isTracking = true
+        isRecording = true
+        isPausedBetweenLegs = false
 
-        logger.begin(start: startTime!,
-                     destinationName: destinationName,
-                     scheduledArrival: scheduledArrival,
-                     category: plannedCategory,
-                     vehicleName: plannedVehicleName)
+        logger.begin(meta: currentMeta())
 
         applyPowerProfile(tracking: true)
         manager?.startUpdatingLocation()
 
+        startElapsedTimer()
+    }
+
+    private func startElapsedTimer() {
+        timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self, let start = self.startTime else { return }
             self.elapsedSeconds = Int(Date().timeIntervalSince(start))
         }
     }
 
+    /// Snapshot of the drive's metadata for the crash-safe log (includes multi-leg progress so a
+    /// recovered or resumed drive keeps its stops and knows which leg it was on).
+    private func currentMeta() -> DriveLogger.Meta {
+        DriveLogger.Meta(
+            start: startTime ?? Date(),
+            destinationName: destinationName,
+            scheduledArrival: scheduledArrival,
+            scheduledDeparture: scheduledDeparture,
+            category: plannedCategory.rawValue,
+            vehicleName: plannedVehicleName,
+            tripName: tripName,
+            paidBy: plannedPaidBy.rawValue,
+            finalDestinationName: finalDestinationName,
+            legTargets: legTargets,
+            currentLegIndex: currentLegIndex,
+            legArrivals: legArrivals,
+            isPaused: isPausedBetweenLegs
+        )
+    }
+
+    /// Persist the current leg progress to the crash log so it survives a kill mid-drive.
+    private func persistLegState() {
+        guard isTracking else { return }
+        logger.updateMeta(currentMeta())
+    }
+
     func stopTracking() {
         isTracking = false
+        isRecording = false
+        isPausedBetweenLegs = false
         applyPowerProfile(tracking: false)  // back to low-power idle updates for the map
         manager?.startUpdatingLocation()
         timer?.invalidate()
         timer = nil
         currentSpeed = 0
-        logger.finish()
+        // NOTE: intentionally does NOT clear the crash log here. The summary sheet is shown next
+        // (swipe-dismiss disabled), so keeping the NDJSON alive until Save/Discard means a crash
+        // while the summary is open can still recover the drive. clearCrashLog() runs on Save/Discard.
+    }
+
+    /// Resume a drive that was interrupted (kill/force-quit) mid-route — replaying the recorded
+    /// points to rebuild distance/fuel and restoring which leg it was on, so a multi-stop drive can
+    /// be continued instead of restarted. Keeps appending to the same crash log.
+    func resume(from rec: DriveLogger.Recovered) {
+        configureIfNeeded()
+        points = rec.points
+        // Rebuild derived totals from the recovered track.
+        totalDistance = 0; maxSpeed = 0; accumulatedGallons = 0; movingSeconds = 0
+        recentSpeeds = []
+        for i in points.indices {
+            maxSpeed = max(maxSpeed, points[i].speed)
+            guard i > 0 else { continue }
+            let step = points[i - 1].coordinate.distanceMeters(to: points[i].coordinate)
+            if step < 500 {
+                totalDistance += step
+                let segMph = max(0, (points[i - 1].speed + points[i].speed) / 2)
+                accumulatedGallons += (step / 1609.34) / FuelModel.mpg(atMph: segMph, ratedMpg: ratedMpg ?? 25)
+            }
+            // Rebuild moving time with the same >3mph endpoint-average rule used at save time, so the
+            // live "moving" HUD doesn't under-report after a resume.
+            let segMph = (points[i].speed + points[i - 1].speed) / 2
+            if segMph > 3 { movingSeconds += Int(points[i].t.timeIntervalSince(points[i - 1].t)) }
+        }
+        let m = rec.meta
+        startTime = m.start
+        elapsedSeconds = Int(Date().timeIntervalSince(m.start))
+        destinationName = m.destinationName
+        scheduledArrival = m.scheduledArrival
+        scheduledDeparture = m.scheduledDeparture
+        tripName = m.tripName
+        plannedCategory = TripCategory(rawValue: m.category) ?? .other
+        plannedPaidBy = PaidBy(rawValue: m.paidBy) ?? .myself
+        plannedVehicleName = m.vehicleName
+        finalDestinationName = m.finalDestinationName
+        legTargets = m.legTargets
+        currentLegIndex = m.currentLegIndex
+        legArrivals = m.legArrivals
+        if let t = currentLegTarget { destination = t.coordinate }
+        isTracking = true
+        isPausedBetweenLegs = m.isPaused
+        isRecording = !m.isPaused
+        lastLocation = nil
+        lastMovingSample = nil
+        logger.reopen()
+        applyPowerProfile(tracking: isRecording)
+        manager?.startUpdatingLocation()
+        startElapsedTimer()
     }
 
     /// Discard a finished/recovered session's crash log (called once it's been saved).
@@ -166,6 +347,12 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         plannedPaidBy = .myself
         plannedVehicleName = nil
         plannedStops = []
+        legTargets = []
+        currentLegIndex = 0
+        isPausedBetweenLegs = false
+        isRecording = false
+        legArrivals = []
+        finalDestinationName = nil
     }
 
     // MARK: - Derived values
@@ -193,19 +380,43 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         FuelModel.gallons(segments: FuelModel.segments(from: points), ratedMpg: mpg)
     }
 
-    /// Straight-line miles remaining to the destination (inflated slightly to approximate roads).
+    /// Straight-line miles remaining to the final destination — for a multi-leg drive this sums
+    /// the remaining legs (here → current target → … → final), inflated slightly to approximate
+    /// roads. Drives the overall trip ETA and the scheduled-arrival delay.
     var remainingMiles: Double? {
-        guard let destination, let here = currentLocation else { return nil }
-        return here.distanceMeters(to: destination) / 1609.34 * 1.3
+        guard let here = currentLocation else { return nil }
+        if legTargets.isEmpty {
+            guard let destination else { return nil }
+            return here.distanceMeters(to: destination) / 1609.34 * 1.3
+        }
+        var meters = 0.0
+        var prev = here
+        for i in currentLegIndex..<legTargets.count {
+            let c = legTargets[i].coordinate
+            meters += prev.distanceMeters(to: c)
+            prev = c
+        }
+        return meters / 1609.34 * 1.3
     }
 
-    var etaDate: Date? {
-        guard let remainingMiles else { return nil }
-        let now = Date()
-        if remainingMiles < 0.05 { return now }
-        let hours = remainingMiles / max(recentAvgSpeedMph, 5)
-        return now.addingTimeInterval(hours * 3600)
+    /// Straight-line miles to just the *current* leg's target (the next stop).
+    var legRemainingMiles: Double? {
+        guard let here = currentLocation, let t = currentLegTarget else { return nil }
+        return here.distanceMeters(to: t.coordinate) / 1609.34 * 1.3
     }
+
+    private func eta(forMiles miles: Double?) -> Date? {
+        guard let miles else { return nil }
+        let now = Date()
+        if miles < 0.05 { return now }
+        return now.addingTimeInterval(miles / max(recentAvgSpeedMph, 5) * 3600)
+    }
+
+    /// Overall arrival at the final destination.
+    var etaDate: Date? { eta(forMiles: remainingMiles) }
+
+    /// Arrival at the current leg's target (the next stop).
+    var legEtaDate: Date? { eta(forMiles: legRemainingMiles) }
 
     /// Seconds late (positive) or early (negative) vs. the scheduled arrival.
     var delaySeconds: Int? {
@@ -244,14 +455,19 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
             // coverage (their accuracy is stored so quality is known). Only a negative
             // horizontalAccuracy (an invalid fix with no real coordinate) is skipped.
             guard location.horizontalAccuracy >= 0, CLLocationCoordinate2DIsValid(coord) else { continue }
+            fixCount &+= 1  // tick on every valid fix so views refresh regardless of heading
 
             let mph = location.speed >= 0 ? location.speed * 2.23694 : 0
             if location.speed >= 0 {
-                currentSpeed = mph
-                maxSpeed = max(maxSpeed, mph)
+                // Only reflect speed while actually recording — parked between legs (or idle before
+                // a drive) shouldn't show GPS-noise speed on the HUD or inflate the drive's max.
+                currentSpeed = isRecording ? mph : 0
+                if isRecording { maxSpeed = max(maxSpeed, mph) }
             }
 
-            guard isTracking else { continue }
+            // Capture points only while recording a leg. Paused (between legs) keeps the session
+            // alive for the map/ETA without recording a stationary blob at the stop.
+            guard isTracking, isRecording else { continue }
 
             let point = RecordedPoint(
                 t: location.timestamp,
@@ -310,8 +526,18 @@ final class DriveLogger {
         var start: Date
         var destinationName: String?
         var scheduledArrival: Date?
+        var scheduledDeparture: Date? = nil
         var category: String
         var vehicleName: String?
+        var tripName: String? = nil
+        /// Who pays for this drive's gas — the app's core concept — so recovery/resume keeps it.
+        var paidBy: String = PaidBy.myself.rawValue
+        // Multi-leg progress, so a recovered/resumed drive keeps its stops and current leg.
+        var finalDestinationName: String? = nil
+        var legTargets: [RouteStop] = []
+        var currentLegIndex: Int = 0
+        var legArrivals: [Date] = []
+        var isPaused: Bool = false
     }
 
     struct Recovered {
@@ -330,14 +556,26 @@ final class DriveLogger {
     private var handle: FileHandle?
     private let encoder = JSONEncoder()
 
-    func begin(start: Date, destinationName: String?, scheduledArrival: Date?, category: TripCategory, vehicleName: String?) {
+    func begin(meta: Meta) {
         let fm = FileManager.default
         try? fm.removeItem(at: Self.pointsURL)
         fm.createFile(atPath: Self.pointsURL.path, contents: nil)
-        let meta = Meta(start: start, destinationName: destinationName,
-                        scheduledArrival: scheduledArrival, category: category.rawValue,
-                        vehicleName: vehicleName)
         if let data = try? encoder.encode(meta) { try? data.write(to: Self.metaURL) }
+        handle = try? FileHandle(forWritingTo: Self.pointsURL)
+    }
+
+    /// Rewrite just the metadata sidecar (leg progress etc.) without touching the point stream.
+    func updateMeta(_ meta: Meta) {
+        if let data = try? encoder.encode(meta) { try? data.write(to: Self.metaURL) }
+    }
+
+    /// Re-open the existing point stream for appending (used when resuming an interrupted drive)
+    /// instead of truncating it the way `begin` does.
+    func reopen() {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: Self.pointsURL.path) {
+            fm.createFile(atPath: Self.pointsURL.path, contents: nil)
+        }
         handle = try? FileHandle(forWritingTo: Self.pointsURL)
     }
 

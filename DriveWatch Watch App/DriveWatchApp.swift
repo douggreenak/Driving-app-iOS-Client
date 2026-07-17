@@ -10,7 +10,18 @@ struct DriveWatchApp: App {
         WindowGroup {
             WatchContentView()
                 .environment(link)
-                .onAppear { link.activate() }
+                .onAppear {
+                    #if DEBUG
+                    // Headless screenshots: seed sample data instead of waiting on the phone link.
+                    let env = ProcessInfo.processInfo.environment
+                    if env["WATCH_PREVIEW"] != nil {
+                        link.payload = .sample
+                        if env["WATCH_PREVIEW_LIVE"] != nil { link.live = WatchSyncPayload.sampleLive }
+                        return
+                    }
+                    #endif
+                    link.activate()
+                }
         }
     }
 }

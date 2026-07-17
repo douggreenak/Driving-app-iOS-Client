@@ -366,7 +366,6 @@ final class ScheduledDrive {
     var vehicleName: String?
     var notes: String?
     var isEnabled: Bool
-    var isCanceled: Bool = false
     var lastStartedAt: Date?
     /// When the drive was last completed (tracking stopped). Used to drop a finished occurrence
     /// off the departures board.
@@ -374,6 +373,11 @@ final class ScheduledDrive {
     /// Individual occurrences the user deleted via "just this once" — the repeat keeps going, but
     /// these specific departures are skipped. Matched by time when expanding occurrences.
     var skippedOccurrences: [Date] = []
+    /// Individual occurrences the user canceled via "just this once". Unlike a skipped occurrence
+    /// (which is removed entirely), a canceled one stays visible on the departures board with a
+    /// CANCELED status — the repeat keeps going and every other occurrence is unaffected. Matched
+    /// by time, like `skippedOccurrences`.
+    var canceledOccurrences: [Date] = []
     var createdAt: Date = Date()
     /// Remote sync bookkeeping (best-effort mirror to the web DB).
     var remoteID: String?
@@ -446,9 +450,14 @@ final class ScheduledDrive {
         }
         // Compose a candidate today at the scheduled time-of-day, then advance per rule.
         let time = cal.dateComponents([.hour, .minute], from: departure)
+        // The series can't start before its own first departure day — otherwise a drive whose first
+        // departure is in the future would report phantom occurrences today (and read as LATE).
+        let firstDay = cal.startOfDay(for: departure)
         var candidate = cal.date(bySettingHour: time.hour ?? 0, minute: time.minute ?? 0, second: 0, of: reference) ?? departure
         for _ in 0..<400 {
-            if candidate >= reference && matchesRule(candidate, calendar: cal) && !isSkipped(candidate) {
+            if candidate >= reference && candidate >= firstDay
+                && matchesRule(candidate, calendar: cal)
+                && !isSkipped(candidate) && !isOccurrenceCanceled(candidate) {
                 return candidate
             }
             candidate = cal.date(byAdding: .day, value: 1, to: candidate) ?? candidate
@@ -460,6 +469,22 @@ final class ScheduledDrive {
     /// since occurrence times are recomputed (not stored byte-for-byte).
     func isSkipped(_ date: Date) -> Bool {
         skippedOccurrences.contains { abs($0.timeIntervalSince(date)) < 60 }
+    }
+
+    /// True if this exact occurrence was canceled "just this once". Matched with the same tolerance
+    /// as `isSkipped` since occurrence times are recomputed, not stored byte-for-byte.
+    func isOccurrenceCanceled(_ date: Date) -> Bool {
+        canceledOccurrences.contains { abs($0.timeIntervalSince(date)) < 60 }
+    }
+
+    /// Cancel or restore a single occurrence. Canceling affects only this one departure — the
+    /// repeat continues and every other occurrence stays scheduled.
+    func setOccurrenceCanceled(_ date: Date, _ canceled: Bool) {
+        if canceled {
+            if !isOccurrenceCanceled(date) { canceledOccurrences.append(date) }
+        } else {
+            canceledOccurrences.removeAll { abs($0.timeIntervalSince(date)) < 60 }
+        }
     }
 
     private func matchesRule(_ date: Date, calendar cal: Calendar) -> Bool {
@@ -491,7 +516,12 @@ final class ScheduledDrive {
         let firstDay = cal.startOfDay(for: departure)
         for _ in 0..<400 {
             if candidate < firstDay { return nil }
-            if candidate <= reference && matchesRule(candidate, calendar: cal) { return candidate }
+            // Ignore occurrences deleted or canceled "just this once" so that departure can't
+            // resurface as the status reference and read LATE / show in Up Next.
+            if candidate <= reference && matchesRule(candidate, calendar: cal)
+                && !isSkipped(candidate) && !isOccurrenceCanceled(candidate) {
+                return candidate
+            }
             candidate = cal.date(byAdding: .day, value: -1, to: candidate) ?? candidate
         }
         return nil
@@ -544,9 +574,9 @@ final class ScheduledDrive {
     /// nothing is pending soon (already driven, or a one-time drive long past).
     func upNextDeparture(now: Date = .now) -> Date? {
         let ref = statusReferenceDeparture(now: now)
-        if !wasDriven(ref), ref >= now.addingTimeInterval(-6 * 3600) { return ref }
+        if !wasDriven(ref), !isOccurrenceCanceled(ref), ref >= now.addingTimeInterval(-6 * 3600) { return ref }
         let next = nextDeparture(after: now)
-        return (next > now && !wasDriven(next)) ? next : nil
+        return (next > now && !wasDriven(next) && !isOccurrenceCanceled(next)) ? next : nil
     }
 
     /// True when the scheduled departure (start) time has passed for the reference occurrence —

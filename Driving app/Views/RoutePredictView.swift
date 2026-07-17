@@ -45,7 +45,12 @@ struct RoutePredictView: View {
     }
 
     private var readyWaypoints: [Waypoint] { waypoints.filter { $0.coordinate != nil } }
-    private var canCompute: Bool { readyWaypoints.count >= 2 }
+    /// A waypoint the user typed an address into but never selected a suggestion for (no coordinate).
+    /// Computing while one exists would silently drop it and estimate the wrong route.
+    private var hasUnresolvedWaypoint: Bool {
+        waypoints.contains { !$0.address.trimmingCharacters(in: .whitespaces).isEmpty && $0.coordinate == nil }
+    }
+    private var canCompute: Bool { readyWaypoints.count >= 2 && !hasUnresolvedWaypoint }
 
     private var totalMiles: Double { legs.reduce(0) { $0 + $1.miles } }
     private var totalSeconds: Int { legs.reduce(0) { $0 + $1.seconds } }
@@ -142,17 +147,25 @@ struct RoutePredictView: View {
     // MARK: - Compute
 
     private var computeButton: some View {
-        Button(action: { Task { await compute() } }) {
-            HStack(spacing: 10) {
-                if calculating { ProgressView().tint(.white) }
-                Text(calculating ? "Calculating…" : "Estimate cost")
-                    .font(.title3.weight(.semibold))
+        VStack(spacing: 8) {
+            if hasUnresolvedWaypoint {
+                Label("Pick a suggestion for every address so no stop is skipped.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity).padding(.vertical, 16)
-            .background((canCompute ? Color.blue : Color.gray).gradient, in: .capsule)
+            Button(action: { Task { await compute() } }) {
+                HStack(spacing: 10) {
+                    if calculating { ProgressView().tint(.white) }
+                    Text(calculating ? "Calculating…" : "Estimate cost")
+                        .font(.title3.weight(.semibold))
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity).padding(.vertical, 16)
+                .background((canCompute ? Color.blue : Color.gray).gradient, in: .capsule)
+            }
+            .disabled(!canCompute || calculating)
         }
-        .disabled(!canCompute || calculating)
     }
 
     private func compute() async {

@@ -22,8 +22,8 @@ struct ScreenshotHarness: View {
                 NavigationStack { TripDetailView(trip: seededTrip) }
             case "playback":
                 NavigationStack { RoutePlaybackView(trip: seededTrip) }
-            case "schedule":
-                ScheduleView().onAppear {
+            case "drive", "schedule", "drives", "home":
+                DriveHomeView().onAppear {
                     SampleData.seedSchedules(into: container.mainContext)
                     SampleData.seedPlaces(into: container.mainContext)
                 }
@@ -31,10 +31,11 @@ struct ScreenshotHarness: View {
                 NewScheduledDriveView().onAppear { SampleData.seedPlaces(into: container.mainContext) }
             case "predict":
                 RoutePredictView().onAppear { SampleData.seedPlaces(into: container.mainContext) }
-            case "dashboard":
-                DashboardView().onAppear {
+            case "stats", "dashboard":
+                StatsView().onAppear {
                     SampleData.seedTrips(into: container.mainContext)
                     SampleData.seedSchedules(into: container.mainContext)
+                    SampleData.seedPlaces(into: container.mainContext)
                 }
             case "settings":
                 SettingsView().onAppear { SampleData.seedPlaces(into: container.mainContext) }
@@ -45,18 +46,15 @@ struct ScreenshotHarness: View {
                 LocationSearchSheet(title: "Start") { _ in }
                     .onAppear { SampleData.seedPlaces(into: container.mainContext) }
             case "insights":
-                DashboardView().onAppear {
+                StatsView().onAppear {
                     SampleData.seedTrips(into: container.mainContext)
                     SampleData.seedSchedules(into: container.mainContext)
+                    SampleData.seedPlaces(into: container.mainContext)
                 }
             case "scheddetail":
                 NavigationStack {
                     ScheduledDriveDetailView(drive: SampleData.makeSchedule(into: container.mainContext))
                         .onAppear { SampleData.seedPlaces(into: container.mainContext) }
-                }
-            case "drives":
-                ScheduleView().onAppear {
-                    SampleData.seedSchedules(into: container.mainContext)
                 }
             case "trips":
                 TripsListView().onAppear { _ = SampleData.makeTrip(into: container.mainContext) }
@@ -66,6 +64,15 @@ struct ScreenshotHarness: View {
                 NavigationStack { EditVehicleView(vehicle: seededVehicle) }
             case "track":
                 LiveTrackingView(previewTracker: SampleData.inProgressTracker())
+            case "trackleg":
+                LiveTrackingView(previewTracker: SampleData.multiLegTracker(paused: false))
+            case "trackpaused":
+                LiveTrackingView(previewTracker: SampleData.multiLegTracker(paused: true))
+            case "applyschedule":
+                ApplyScheduleSheet(trip: seededTrip)
+                    .onAppear { SampleData.seedSchedules(into: container.mainContext) }
+            case "trim":
+                TripTrimView(trip: seededTrip)
             case "summary":
                 TripSummaryView(tracker: SampleData.inProgressTracker(),
                                 vehicle: seededVehicle,
@@ -242,7 +249,7 @@ enum SampleData {
             departure: evening, estimatedTravelTime: 14 * 60,
             scheduledArrival: evening.addingTimeInterval(14 * 60),
             repeatRule: .weekly, category: .leisure, vehicleName: "My Subaru")
-        s2.isCanceled = true   // demonstrate the CANCELED status
+        s2.setOccurrenceCanceled(s2.nextDeparture(), true)   // cancel just the next occurrence → CANCELED
 
         // A drive whose predicted travel (30 min) exceeds its scheduled budget (20 min) → LATE.
         let noon = cal.date(bySettingHour: 12, minute: 0, second: 0, of: Date()) ?? Date()
@@ -288,6 +295,26 @@ enum SampleData {
         t.destinationName = "Apex Engineering"
         t.scheduledArrival = Date().addingTimeInterval(8 * 60)  // tight — will show a small delay
         t.plannedCategory = .work
+        return t
+    }
+
+    /// An in-progress multi-stop drive (Downtown → Midtown stop → Airport). `paused` shows the
+    /// between-legs "parked at a stop" state; otherwise it's recording the second leg.
+    @MainActor
+    static func multiLegTracker(paused: Bool) -> LocationTracker {
+        let t = inProgressTracker()
+        t.finalDestinationName = "Ted Stevens Intl Airport"
+        // stop 1 (reached), stop 2 (upcoming), then the final destination target.
+        t.legTargets = [
+            RouteStop(address: "Midtown Costco", lat: 61.1900, lng: -149.9000),
+            RouteStop(address: "Spenard Post Office", lat: 61.1810, lng: -149.9400),
+            RouteStop(address: "Ted Stevens Intl Airport", lat: 61.1743, lng: -149.9982),
+        ]
+        t.currentLegIndex = 1          // reached stop 1; now on leg 2 (→ stop 2)
+        t.legArrivals = [Date().addingTimeInterval(-300)]
+        t.destination = t.legTargets[1].coordinate
+        t.destinationName = t.legTargets[1].address
+        t.isPausedBetweenLegs = paused
         return t
     }
 }

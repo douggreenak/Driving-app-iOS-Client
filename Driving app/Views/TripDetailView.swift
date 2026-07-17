@@ -10,10 +10,10 @@ struct TripDetailView: View {
     @Bindable var trip: DriveTrip
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
-    @Query private var schedules: [ScheduledDrive]
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
     @State private var showPlayback = false
-    @State private var showEditSchedule = false
+    @State private var showApplySchedule = false
+    @State private var showTrim = false
     @State private var showDeleteConfirm = false
     @State private var showAddStop = false
     /// Heavy track-derived values (polyline decode, fuel model, chart, region) computed once
@@ -48,8 +48,13 @@ struct TripDetailView: View {
         .fullScreenCover(isPresented: $showPlayback) {
             NavigationStack { RoutePlaybackView(trip: trip) }
         }
-        .sheet(isPresented: $showEditSchedule) {
-            EditTripScheduleView(trip: trip)
+        .fullScreenCover(isPresented: $showApplySchedule) {
+            ApplyScheduleSheet(trip: trip)
+        }
+        .fullScreenCover(isPresented: $showTrim) {
+            // Recompute the cached track-derived values once the trim is applied so the detail
+            // page immediately reflects the new geometry/stats.
+            TripTrimView(trip: trip) { derived = TripDerived(trip: trip) }
         }
         .confirmationDialog("Delete this trip?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete Trip", role: .destructive) { deleteTrip() }
@@ -74,6 +79,7 @@ struct TripDetailView: View {
                 fuelCard(d)
                 if !d.chart.isEmpty { speedChartCard(d) }
                 playButton(d)
+                trimButton
                 deleteButton
             }
             .padding()
@@ -125,6 +131,20 @@ struct TripDetailView: View {
         trip.stops.removeAll { $0.id == stop.id }
         try? context.save()
         Task { await TripStore.syncStops(for: trip) }
+    }
+
+    /// Trim the recorded track (cut off a forgotten stationary tail, or a late start).
+    private var trimButton: some View {
+        Button {
+            Haptics.tap()
+            showTrim = true
+        } label: {
+            Label("Trim Trip", systemImage: "scissors")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.blue)
+                .frame(maxWidth: .infinity).padding(.vertical, 12)
+                .background(Color(.systemGray6), in: .capsule)
+        }
     }
 
     private var deleteButton: some View {
@@ -403,25 +423,7 @@ struct TripDetailView: View {
                     .font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer(minLength: 6)
-            Menu {
-                Button { showEditSchedule = true } label: {
-                    Label("Edit times…", systemImage: "pencil")
-                }
-                if !schedules.isEmpty {
-                    Section("Apply a saved schedule") {
-                        ForEach(schedules) { s in
-                            Button { apply(s) } label: { Label(s.title, systemImage: s.category.icon) }
-                        }
-                    }
-                }
-                if trip.scheduledArrival != nil || trip.scheduledDeparture != nil {
-                    Button(role: .destructive) {
-                        trip.scheduledArrival = nil
-                        trip.scheduledDeparture = nil
-                        try? context.save()
-                    } label: { Label("Remove schedule", systemImage: "xmark.circle") }
-                }
-            } label: {
+            Button { showApplySchedule = true } label: {
                 Text(trip.scheduledArrival == nil ? "Apply" : "Change")
                     .font(.caption.weight(.semibold)).foregroundStyle(.white)
                     .padding(.horizontal, 14).padding(.vertical, 7)
@@ -430,24 +432,6 @@ struct TripDetailView: View {
         }
         .padding()
         .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
-    }
-
-    /// Apply a scheduled drive's arrival target to this past trip so it's graded on-time/delayed,
-    /// using the schedule's arrival time-of-day on the day this trip happened.
-    private func apply(_ schedule: ScheduledDrive) {
-        let cal = Calendar.current
-        let t = cal.dateComponents([.hour, .minute], from: schedule.scheduledArrival)
-        if let arrival = cal.date(bySettingHour: t.hour ?? 0, minute: t.minute ?? 0, second: 0, of: trip.date) {
-            trip.scheduledArrival = arrival
-        }
-        let d = cal.dateComponents([.hour, .minute], from: schedule.departure)
-        if let departure = cal.date(bySettingHour: d.hour ?? 0, minute: d.minute ?? 0, second: 0, of: trip.date) {
-            trip.scheduledDeparture = departure
-        }
-        trip.name = schedule.title
-        trip.category = schedule.category
-        trip.paidBy = schedule.paidBy
-        try? context.save()
     }
 
     // MARK: - Fuel (speed-aware)

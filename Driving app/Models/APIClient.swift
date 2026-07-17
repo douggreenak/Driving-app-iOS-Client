@@ -48,6 +48,26 @@ struct APIClient {
         _ = try await request("PATCH", "/api/trips", body: body)
     }
 
+    /// Push the rewritten geometry + stats after a trip is trimmed (start/end recomputed), including
+    /// the new endpoint coordinates & addresses so the web map/labels stay consistent.
+    static func patchTripTrim(id: String, date: String, distance: Double, duration: Int,
+                              startAddress: String, endAddress: String,
+                              startLat: Double, startLng: Double, endLat: Double, endLng: Double,
+                              routeEncoded: String) async throws {
+        struct Body: Codable {
+            let id: String; let date: String; let distance: Double; let duration: Int
+            let startAddress: String; let endAddress: String
+            let startLat: Double; let startLng: Double; let endLat: Double; let endLng: Double
+            let routeEncoded: String
+        }
+        let body = try JSONEncoder.api.encode(Body(
+            id: id, date: date, distance: distance, duration: duration,
+            startAddress: startAddress, endAddress: endAddress,
+            startLat: startLat, startLng: startLng, endLat: endLat, endLng: endLng,
+            routeEncoded: routeEncoded))
+        _ = try await request("PATCH", "/api/trips", body: body)
+    }
+
     // MARK: - Gas
 
     static func fetchGasEntries() async throws -> [APIGasEntry] {
@@ -233,6 +253,9 @@ struct APIScheduledDrivePayload: Codable {
     let lastStartedAt: String?
     let lastCompletedAt: String?
     let skippedOccurrences: [Double]
+    /// Occurrences canceled "just this once" (epoch seconds). The web schema doesn't persist these
+    /// yet, so the server ignores the field — cancellation is local-first for now.
+    let canceledOccurrences: [Double]
     let stops: [RouteStop]
 }
 

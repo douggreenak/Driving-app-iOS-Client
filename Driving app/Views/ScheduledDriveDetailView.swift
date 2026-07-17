@@ -6,6 +6,9 @@ import MapKit
 /// top, a prominent status banner, a flight-status schedule card, details, and Start / Cancel.
 struct ScheduledDriveDetailView: View {
     @Bindable var drive: ScheduledDrive
+    /// The specific occurrence this page was opened for (from the departures board). When nil (e.g.
+    /// opened from the dashboard Up Next), fall back to the drive's next/overdue occurrence.
+    var occurrence: Date? = nil
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
@@ -17,8 +20,12 @@ struct ScheduledDriveDetailView: View {
     @State private var showEdit = false
     @State private var showDeleteConfirm = false
 
-    private var departure: Date { drive.statusReferenceDeparture() }
-    private var arrival: Date { drive.targetArrival() }
+    // Anchor the page on the tapped occurrence when we have one, else the drive's Up Next occurrence
+    // — the next one still to make (or the current one if it's overdue and unstarted).
+    // statusReferenceDeparture() alone could point back at a just-completed past occurrence, showing
+    // a stale DEPARTED banner for a drive already finished.
+    private var departure: Date { occurrence ?? drive.upNextDeparture() ?? drive.statusReferenceDeparture() }
+    private var arrival: Date { departure.addingTimeInterval(drive.arrivalBudget) }
 
     // Show a bookmarked place's name ("Home") instead of the street address when one is nearby.
     private var startName: String {
@@ -27,16 +34,20 @@ struct ScheduledDriveDetailView: View {
     private var endName: String {
         PlaceNamer.name(for: drive.endCoordinate, fallback: drive.endAddress, in: savedPlaces)
     }
+    // Canceling only cancels the occurrence this page is showing — the repeat keeps going.
+    private var isCanceled: Bool { drive.isOccurrenceCanceled(departure) }
     private var status: TripStatus {
         .occurrence(departure: departure, scheduledArrival: arrival, travelSeconds: drive.estimatedTravelTime,
-                    isCanceled: drive.isCanceled, startedAt: drive.lastStartedAt)
+                    isCanceled: isCanceled, startedAt: drive.lastStartedAt)
     }
 
-    // Start dot = departure status, end dot = arrival status (green / yellow / red). The arrival is
-    // only "late" once the drive is actually overdue to depart — a not-yet-started drive is never
-    // pre-judged as delayed from its raw predicted travel time.
-    private var startColor: Color { drive.isCanceled ? .red : (drive.departureIsLate() ? .yellow : .green) }
-    private var endColor: Color { drive.isCanceled ? .red : (drive.departureIsLate() ? .yellow : .green) }
+    // Start dot = departure status, end dot = arrival status (green / yellow / red). Overdue is
+    // measured against the same anchored occurrence the banner uses, so the dots never disagree with
+    // the status (e.g. a green ON TIME banner next to yellow "late" dots). A not-yet-started drive is
+    // never pre-judged as delayed from its raw predicted travel time.
+    private var isOverdueToDepart: Bool { Date().timeIntervalSince(departure) > 90 }
+    private var startColor: Color { isCanceled ? .red : (isOverdueToDepart ? .yellow : .green) }
+    private var endColor: Color { isCanceled ? .red : (isOverdueToDepart ? .yellow : .green) }
 
     var body: some View {
         ScrollView {
@@ -162,7 +173,7 @@ struct ScheduledDriveDetailView: View {
                 Text(departure, format: .dateTime.weekday(.wide).month().day())
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if !drive.isCanceled {
+                if !isCanceled {
                     Text(TripStatus.countdown(to: departure)).font(.caption.weight(.semibold)).foregroundStyle(status.color)
                 }
             }
@@ -237,21 +248,21 @@ struct ScheduledDriveDetailView: View {
                 Label("Start Drive", systemImage: "play.fill")
                     .font(.headline).foregroundStyle(.white)
                     .frame(maxWidth: .infinity).padding(.vertical, 14)
-                    .background((drive.isCanceled ? Color.gray : .green).gradient, in: .capsule)
+                    .background((isCanceled ? Color.gray : .green).gradient, in: .capsule)
             }
-            .disabled(drive.isCanceled)
+            .disabled(isCanceled)
 
             HStack(spacing: 12) {
                 Button {
                     Haptics.selection()
-                    drive.isCanceled.toggle()
+                    drive.setOccurrenceCanceled(departure, !isCanceled)
                     try? context.save()
                     Task { await ScheduledDriveStore.sync(context: context) }
                 } label: {
-                    Label(drive.isCanceled ? "Restore" : "Cancel",
-                          systemImage: drive.isCanceled ? "arrow.uturn.backward" : "xmark.octagon")
+                    Label(isCanceled ? "Restore" : "Cancel",
+                          systemImage: isCanceled ? "arrow.uturn.backward" : "xmark.octagon")
                         .font(.subheadline.weight(.medium))
-                        .foregroundStyle(drive.isCanceled ? .blue : .orange)
+                        .foregroundStyle(isCanceled ? .blue : .orange)
                         .frame(maxWidth: .infinity).padding(.vertical, 12)
                         .background(Color(.systemGray6), in: .capsule)
                 }
@@ -271,14 +282,18 @@ struct ScheduledDriveDetailView: View {
             Button("Delete Drive", role: .destructive) {
                 Haptics.warning()
                 let removedRemoteID = drive.remoteID
-                context.delete(drive)
-                try? context.save()
+                let doomed = drive
                 let ctx = context
-                Task {
+                // Pop FIRST, then delete: `drive` is @Bindable and read all over this body, so
+                // deleting it while the view is still on screen risks a re-render dereferencing an
+                // invalidated SwiftData model. Deleting after the pop avoids that.
+                dismiss()
+                Task { @MainActor in
+                    ctx.delete(doomed)
+                    try? ctx.save()
                     if let id = removedRemoteID { try? await APIClient.deleteScheduledDrive(id: id) }
                     await ScheduledDriveStore.sync(context: ctx)
                 }
-                dismiss()
             }
         } message: {
             Text(drive.repeatRule == .none
