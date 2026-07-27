@@ -2,13 +2,33 @@ import SwiftUI
 import MapKit
 import SwiftData
 
+/// A lightweight ad-hoc destination for the "Go to" feature: navigate to a saved place with a
+/// computed ETA and on-time grading, recorded as a normal trip. This is a third way to start a
+/// drive — separate from ad-hoc "Start a Drive" and scheduled drives.
+struct QuickTrip: Identifiable {
+    let id = UUID()
+    var name: String
+    var coordinate: CLLocationCoordinate2D
+    /// Predicted travel seconds. Nil when no ETA could be fetched (offline / no location) — then the
+    /// drive still records, just without on-time grading. The scheduled departure/arrival are
+    /// anchored when tracking actually starts, so the ETA-fetch latency never skews the delay.
+    var travelSeconds: Int?
+    var category: TripCategory = .errand
+    var paidBy: PaidBy = .myself
+    var vehicleName: String?
+}
+
 struct LiveTrackingView: View {
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
     @Query private var vehicles: [Vehicle]
+    @Query private var settingsList: [UserSettings]
 
     /// When launched from a scheduled drive, the view runs modally and pre-loads the destination.
     let scheduled: ScheduledDrive?
+
+    /// When launched from a "Go to" saved place, auto-starts navigation to it with a computed ETA.
+    let goTo: QuickTrip?
 
     /// Presented as a full-screen cover from the Drive tab (ad-hoc "Start a Drive"). Adds a close
     /// button and dismisses on finish, exactly like a scheduled modal drive.
@@ -33,9 +53,10 @@ struct LiveTrackingView: View {
     @State private var efficientRoute: [CLLocationCoordinate2D] = []
     @State private var lastRouteFetchFrom: CLLocationCoordinate2D?
 
-    init(scheduled: ScheduledDrive? = nil, asModal: Bool = false, onFinish: (() -> Void)? = nil) {
+    init(scheduled: ScheduledDrive? = nil, asModal: Bool = false, goTo: QuickTrip? = nil, onFinish: (() -> Void)? = nil) {
         self.scheduled = scheduled
         self.asModal = asModal
+        self.goTo = goTo
         self.onFinish = onFinish
         _tracker = State(initialValue: LocationTracker())
     }
@@ -44,16 +65,17 @@ struct LiveTrackingView: View {
     init(previewTracker: LocationTracker) {
         self.scheduled = nil
         self.asModal = false
+        self.goTo = nil
         self.onFinish = nil
         _tracker = State(initialValue: previewTracker)
     }
     #endif
 
-    private var isModal: Bool { scheduled != nil || asModal }
+    private var isModal: Bool { scheduled != nil || asModal || goTo != nil }
 
     private var navTitle: String {
         if tracker.isTracking { return "Tracking" }
-        if isModal { return scheduled?.title ?? "Drive" }
+        if isModal { return scheduled?.title ?? goTo.map { "To \($0.name)" } ?? "Drive" }
         return "Track Drive"
     }
 
@@ -130,7 +152,7 @@ struct LiveTrackingView: View {
                     .presentationDetents([.medium])
             }
             .sheet(isPresented: $showingAddStop) {
-                LocationSearchSheet(title: "Add Stop") { picked in
+                LocationSearchSheet(title: addStopSheetTitle) { picked in
                     Haptics.tap()
                     tracker.appendLiveStop(RouteStop(address: picked.address, coordinate: picked.coordinate))
                     lastRouteFetchFrom = nil  // force the guide line to re-route to the new next stop
@@ -146,12 +168,32 @@ struct LiveTrackingView: View {
     private func setup() {
         // Permission + location startup happen in `.task` (activateIdle) to keep first render cheap.
         if selectedVehicle == nil {
-            selectedVehicle = vehicles.first(where: { $0.name == scheduled?.vehicleName }) ?? vehicles.first
+            let wantedVehicle = scheduled?.vehicleName ?? goTo?.vehicleName
+            selectedVehicle = vehicles.first(where: { $0.name == wantedVehicle }) ?? vehicles.first
         }
-        // A scheduled drive starts a fresh session; an ad-hoc drive (Track/Start a Drive) offers to
-        // recover any interrupted session first.
-        if scheduled == nil {
+        // A scheduled or "Go to" drive starts a fresh auto-started session; only an ad-hoc drive
+        // (Track / Start a Drive) offers to recover an interrupted session first.
+        if scheduled == nil, goTo == nil {
             recovered = LocationTracker.recoverableSession()
+            // Seed the payer from the user's default for non-scheduled drives (a recovered session
+            // overrides this with its own saved payer when resumed).
+            tracker.plannedPaidBy = settingsList.first?.defaultPaidBy ?? .myself
+        }
+        // Auto-start a "Go to" drive once, pre-loaded with its destination & computed ETA so it
+        // grades on-time exactly like a scheduled drive — but without touching the schedule.
+        if let goTo, !didAutoStart {
+            didAutoStart = true
+            tracker.setRoute(stops: [], finalDestination: goTo.coordinate, finalName: goTo.name)
+            tracker.tripName = "To \(goTo.name)"
+            // Anchor departure/arrival at the actual start instant so the ETA-fetch latency doesn't
+            // skew the recorded delay; arrival = start + predicted travel (nil ETA → ungraded).
+            let start = Date()
+            tracker.scheduledDeparture = start
+            tracker.scheduledArrival = goTo.travelSeconds.map { start.addingTimeInterval(TimeInterval($0)) }
+            tracker.plannedCategory = goTo.category
+            tracker.plannedPaidBy = goTo.paidBy
+            tracker.plannedVehicleName = goTo.vehicleName
+            startTracking()
         }
         // Auto-start a scheduled drive once, pre-loaded with its destination & schedule timing.
         if let scheduled, !didAutoStart {
@@ -448,7 +490,14 @@ struct LiveTrackingView: View {
                 Spacer()
             }
             if tracker.scheduledArrival != nil {
-                StatusChip(status: .live(delaySeconds: tracker.delaySeconds))
+                // A scheduled / "Go to" drive always has a target — so show its on-time verdict once
+                // an ETA exists, and a neutral "EN ROUTE" (never "NO SCHEDULE") until the first fix
+                // lets us compute one.
+                if let delay = tracker.delaySeconds {
+                    StatusChip(status: .live(delaySeconds: delay))
+                } else {
+                    StatusChip(status: .liveEnRoute)
+                }
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
@@ -492,6 +541,11 @@ struct LiveTrackingView: View {
 
     private var bottomControls: some View {
         VStack(spacing: 12) {
+            // Optional destination for an ad-hoc drive, set before starting: the drive then routes
+            // toward it with a live ETA — a destination on a non-scheduled route, no schedule needed.
+            if !tracker.isTracking, recovered == nil, scheduled == nil {
+                destinationRow
+            }
             if let vehicle = selectedVehicle, !tracker.isTracking {
                 vehicleChip(vehicle)
             }
@@ -514,6 +568,9 @@ struct LiveTrackingView: View {
                         arrivedButton
                         endDriveButton(prominent: false)
                     } else {
+                        // A plain open or single-destination drive can still gain a destination or a
+                        // stop on the fly — adding one turns it into a linked multi-stop journey.
+                        addStopButton
                         stopButton
                     }
                 }
@@ -531,20 +588,35 @@ struct LiveTrackingView: View {
         }
     }
 
-    /// Shown while parked between legs: which stop you reached, and the button to head to the next.
+    /// Shown while parked between legs. Frames the stretch you just finished as its own completed,
+    /// linked trip — with a mini recap — and the next leg as a new trip, so a multi-stop drive reads
+    /// as separate linked trips rather than one long drive with pauses.
     private var pausedControls: some View {
         VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                Image(systemName: "parkingsign.circle.fill").font(.title2).foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 2) {
-                    let reached = tracker.reachedStopCount
-                    Text("Stopped at Stop \(reached)").font(.subheadline.weight(.semibold))
-                    if let next = tracker.currentLegTarget {
-                        Text("Next: \(next.address.isEmpty ? "Destination" : next.address)")
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill").font(.title2).foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Leg \(tracker.reachedStopCount) complete").font(.subheadline.weight(.semibold))
+                        Text("Logged as a separate linked trip").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if let s = tracker.lastLegStats {
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text(String(format: "%.1f mi", s.miles))
+                                .font(.subheadline.weight(.bold)).fontDesign(.rounded)
+                            Text(legDurationString(s.seconds)).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if let next = tracker.currentLegTarget {
+                    Divider()
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.turn.down.right").font(.caption).foregroundStyle(.blue)
+                        Text("Next trip → \(next.address.isEmpty ? "Destination" : next.address)")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
-                Spacer()
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
             .background(.ultraThinMaterial, in: .rect(cornerRadius: 14))
@@ -557,7 +629,7 @@ struct LiveTrackingView: View {
                 refreshEfficientRoute()
                 updateLiveActivity()
             } label: {
-                controlLabel(tracker.isOnFinalLeg ? "Drive to Destination" : "Start Next Leg", "location.fill", .blue)
+                controlLabel(tracker.isOnFinalLeg ? "Start Final Leg" : "Start Next Trip", "location.fill", .blue)
             }
 
             HStack(spacing: 10) {
@@ -644,6 +716,51 @@ struct LiveTrackingView: View {
             // "End Drive" for a routed (destination/multi-leg) drive; plain "Stop" for an open drive.
             controlLabel(tracker.legTargets.isEmpty ? "Stop" : "End Drive", "stop.fill", .red)
         }
+    }
+
+    /// Pre-start destination picker for an ad-hoc drive. Setting one gives the drive a live ETA and
+    /// routes toward it, just like a "Go to" — the way to put a destination on a non-scheduled route.
+    private var destinationRow: some View {
+        Button { Haptics.tap(); showingAddStop = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: tracker.destination == nil ? "mappin.and.ellipse" : "mappin.circle.fill")
+                    .foregroundStyle(.blue).frame(width: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(tracker.destination == nil ? "Set destination" : (tracker.destinationName ?? "Destination"))
+                        .font(.subheadline).fontWeight(.medium).lineLimit(1)
+                    Text(tracker.destination == nil ? "Optional — adds a live ETA" : "Tap to change")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// While driving an open / single-destination drive: add a stop (or set the first destination)
+    /// on the fly. The route becomes a linked multi-stop journey the moment a stop is added.
+    private var addStopButton: some View {
+        Button { Haptics.tap(); showingAddStop = true } label: {
+            Label(tracker.legTargets.isEmpty ? "Set destination" : "Add a stop",
+                  systemImage: tracker.legTargets.isEmpty ? "mappin.and.ellipse" : "plus.circle.fill")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.blue)
+                .frame(maxWidth: .infinity).padding(.vertical, 13)
+                .background(Color(.systemGray6), in: .capsule)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Sheet title reflects whether we're setting the first destination or adding a later stop.
+    private var addStopSheetTitle: String { tracker.legTargets.isEmpty ? "Set Destination" : "Add Stop" }
+
+    /// Compact duration for a single leg's recap ("8m 12s" / "1h 4m").
+    private func legDurationString(_ seconds: Int) -> String {
+        let m = seconds / 60, s = seconds % 60
+        if m >= 60 { return "\(m / 60)h \(m % 60)m" }
+        return m > 0 ? "\(m)m \(s)s" : "\(s)s"
     }
 
     private func controlLabel(_ text: String, _ icon: String, _ color: Color) -> some View {
@@ -796,12 +913,11 @@ struct LiveTrackingView: View {
         let schedStart = scheduled?.startAddress
         let vehName = selectedVehicle?.name
         let vehMpg = selectedVehicle?.avgMpg
-        // Record only the intermediate stops actually reached (a drive ended early keeps just the
-        // stops it passed). Label the endpoint with the destination's name only when it was really
-        // reached: a simple A→B drive always adopts its destination name (unchanged behavior), but a
-        // multi-leg drive that ends early — parked at the last stop, or miles short of the endpoint —
-        // must reverse-geocode where it actually stopped instead of claiming the final destination.
-        let stops = Array(tracker.legTargets.prefix(tracker.reachedStopCount))
+        let legTargets = tracker.legTargets
+        let boundaries = tracker.legPointBoundaries
+        // A simple A→B drive always adopts its destination name; a multi-leg drive that ends early —
+        // parked at the last stop, or miles short of the endpoint — reverse-geocodes where it
+        // actually stopped instead of claiming the final destination.
         let reachedFinal: Bool
         if tracker.isMultiLeg {
             reachedFinal = tracker.isOnFinalLeg && !tracker.isPausedBetweenLegs
@@ -817,25 +933,118 @@ struct LiveTrackingView: View {
         // The scheduled occurrence is done — drop it off the departures board.
         scheduled?.lastCompletedAt = .now
         try? context.save()
-        guard let start = pts.first?.coordinate, let end = pts.last?.coordinate else {
+        guard pts.first?.coordinate != nil, pts.last?.coordinate != nil else {
             finishAndExit()
             return
         }
+        // Split the recording into legs at the stop boundaries. A multi-stop drive becomes several
+        // separate, linked trips (one per leg); a single-leg drive stays one standalone trip.
         Task { @MainActor in
-            let startAddr: String
-            if let schedStart { startAddr = schedStart } else { startAddr = await reverseGeocode(start) }
-            let endAddr: String
-            if reachedFinal, let finalName { endAddr = finalName } else { endAddr = await reverseGeocode(end) }
-            let input = TripStore.Input(
-                points: pts, startAddress: startAddr, endAddress: endAddr,
-                category: category, paidBy: paidBy, notes: notes, name: tripName,
-                vehicleName: vehName, vehicleMpg: vehMpg,
-                scheduledDeparture: scheduledDeparture, scheduledArrival: scheduledArrival,
-                stops: stops
-            )
-            await TripStore.save(input, context: context)
+            let inputs = await buildLegInputs(
+                pts: pts, legTargets: legTargets, boundaries: boundaries,
+                firstLegStart: schedStart, reachedFinal: reachedFinal, finalName: finalName,
+                category: category, paidBy: paidBy, notes: notes, tripName: tripName,
+                vehName: vehName, vehMpg: vehMpg,
+                scheduledDeparture: scheduledDeparture, scheduledArrival: scheduledArrival)
+            await saveInputs(inputs)
         }
         finishAndExit()
+    }
+
+    /// Persist the split result: >1 leg → a linked journey; exactly 1 → a standalone trip; 0 → the
+    /// drive had no leg with ≥2 points (not a recordable trip), so nothing is saved.
+    @MainActor
+    private func saveInputs(_ inputs: [TripStore.Input]) async {
+        switch inputs.count {
+        case 0: break
+        case 1: await TripStore.save(inputs[0], context: context)
+        default: await TripStore.saveJourney(inputs, context: context)
+        }
+    }
+
+    /// Segment a finished recording into one `TripStore.Input` per leg. Endpoint names are resolved
+    /// by POSITION (reached-stop names, reverse-geocoding where a name is missing) so filtering out a
+    /// degenerate <2-point leg can never misname the survivors; the journey-level schedule + notes
+    /// are then pinned to the SURVIVING first/last legs (never stranded on a dropped leg).
+    private func buildLegInputs(
+        pts: [RecordedPoint], legTargets: [RouteStop], boundaries: [Int],
+        firstLegStart: String?, reachedFinal: Bool, finalName: String?,
+        category: TripCategory, paidBy: PaidBy, notes: String?, tripName: String?,
+        vehName: String?, vehMpg: Double?,
+        scheduledDeparture: Date?, scheduledArrival: Date?
+    ) async -> [TripStore.Input] {
+        struct Seg { let legIndex: Int; let lo: Int; let hi: Int; let fromName: String?; let toName: String? }
+        func stopName(_ idx: Int) -> String? {
+            guard legTargets.indices.contains(idx) else { return nil }
+            let a = legTargets[idx].address
+            return a.isEmpty ? nil : a
+        }
+        // 1. Build a segment per leg with its endpoint names (nil = reverse-geocode the real point).
+        var segs: [Seg] = []
+        var prev = 0
+        for (i, b) in boundaries.enumerated() where b > prev && b <= pts.count {
+            segs.append(Seg(legIndex: i, lo: prev, hi: b, fromName: i == 0 ? firstLegStart : stopName(i - 1), toName: stopName(i)))
+            prev = b
+        }
+        if pts.count - prev >= 1 {  // final leg toward the destination (kept below only if ≥2 points)
+            let i = boundaries.count
+            let from = boundaries.isEmpty ? firstLegStart : stopName(boundaries.count - 1)
+            segs.append(Seg(legIndex: i, lo: prev, hi: pts.count, fromName: from, toName: reachedFinal ? finalName : nil))
+        }
+        // 2. Keep only legs long enough to form a trip.
+        let valid = segs.filter { $0.hi - $0.lo >= 2 }
+        guard !valid.isEmpty else { return [] }
+
+        // 3. Compute scheduled departure/arrival for each logical leg if we have per-leg times.
+        var logicalSchedules: [Int: (dep: Date, arr: Date)] = [:]
+        let hasLegTimes = legTargets.isEmpty || legTargets.contains { $0.legDriveSeconds > 0 }
+        if hasLegTimes, let baseDep = scheduledDeparture, let baseArr = scheduledArrival {
+            var currentDep = baseDep
+            for i in 0...legTargets.count {
+                let dep = currentDep
+                let arr: Date
+                if i < legTargets.count {
+                    let stop = legTargets[i]
+                    arr = dep.addingTimeInterval(TimeInterval(stop.legDriveSeconds))
+                    currentDep = arr.addingTimeInterval(TimeInterval(stop.dwellMinutes * 60))
+                } else {
+                    arr = baseArr
+                }
+                logicalSchedules[i] = (dep, arr)
+            }
+        }
+
+        // 4. Build the inputs, reverse-geocoding any endpoint with no known name.
+        var inputs: [TripStore.Input] = []
+        for seg in valid {
+            let legPts = Array(pts[seg.lo..<seg.hi])
+            guard let first = legPts.first, let last = legPts.last else { continue }
+            let startAddr: String
+            if let n = seg.fromName { startAddr = n } else { startAddr = await reverseGeocode(first.coordinate) }
+            let endAddr: String
+            if let n = seg.toName { endAddr = n } else { endAddr = await reverseGeocode(last.coordinate) }
+            
+            var input = TripStore.Input(
+                points: legPts, startAddress: startAddr, endAddress: endAddr,
+                category: category, paidBy: paidBy, notes: nil, name: tripName,
+                vehicleName: vehName, vehicleMpg: vehMpg)
+            
+            if let sched = logicalSchedules[seg.legIndex] {
+                input.scheduledDeparture = sched.dep
+                input.scheduledArrival = sched.arr
+            }
+            inputs.append(input)
+        }
+
+        // 5. Pin journey-level notes to the first leg, and handle legacy schedules.
+        if !inputs.isEmpty {
+            inputs[0].notes = notes
+            if !hasLegTimes {
+                inputs[0].scheduledDeparture = scheduledDeparture
+                inputs[inputs.count - 1].scheduledArrival = scheduledArrival
+            }
+        }
+        return inputs
     }
 
     private func discardTrip() {
@@ -879,24 +1088,20 @@ struct LiveTrackingView: View {
 
     private func saveRecovered(_ rec: DriveLogger.Recovered) async {
         let veh = vehicles.first(where: { $0.name == rec.meta.vehicleName })
-        guard let start = rec.points.first?.coordinate, let end = rec.points.last?.coordinate else { return }
-        let startAddr = await reverseGeocode(start)
-        // An interrupted drive almost never reached its destination, so label the endpoint by the
-        // actual last recorded point rather than a leg target it may not have reached.
-        let endAddr = await reverseGeocode(end)
-        // Keep the intermediate stops the recovered drive had already reached.
-        let reached = min(rec.meta.currentLegIndex, max(rec.meta.legTargets.count - 1, 0))
-        let stops = Array(rec.meta.legTargets.prefix(reached))
-        let input = TripStore.Input(
-            points: rec.points, startAddress: startAddr, endAddress: endAddr,
-            category: TripCategory(rawValue: rec.meta.category) ?? .other,
-            paidBy: PaidBy(rawValue: rec.meta.paidBy) ?? .myself,
-            notes: "Recovered drive", name: rec.meta.tripName,
-            vehicleName: rec.meta.vehicleName, vehicleMpg: veh?.avgMpg,
-            scheduledDeparture: rec.meta.scheduledDeparture, scheduledArrival: rec.meta.scheduledArrival,
-            stops: stops
-        )
-        await TripStore.save(input, context: context)
+        let pts = rec.points
+        guard pts.count >= 2 else { return }
+        let meta = rec.meta
+        let category = TripCategory(rawValue: meta.category) ?? .other
+        let paidBy = PaidBy(rawValue: meta.paidBy) ?? .myself
+        // Split a recovered multi-stop drive into per-leg linked trips too (an interrupted final leg
+        // reverse-geocodes where it actually stopped rather than claiming an unreached target).
+        let inputs = await buildLegInputs(
+            pts: pts, legTargets: meta.legTargets, boundaries: meta.legPointBoundaries,
+            firstLegStart: nil, reachedFinal: false, finalName: nil,
+            category: category, paidBy: paidBy, notes: "Recovered drive", tripName: meta.tripName,
+            vehName: meta.vehicleName, vehMpg: veh?.avgMpg,
+            scheduledDeparture: meta.scheduledDeparture, scheduledArrival: meta.scheduledArrival)
+        await saveInputs(inputs)
     }
 
     private func stopIfNeededAndDismiss() {

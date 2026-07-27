@@ -67,10 +67,14 @@ struct TripsListView: View {
 
     private func delete(_ trip: DriveTrip) {
         Haptics.warning()
+        let jid = trip.journeyID
         if let remoteID = trip.remoteID {
             Task { try? await APIClient.deleteTrip(id: remoteID) }
         }
         context.delete(trip)
+        try? context.save()
+        // Renumber the rest of the journey (or demote a lone survivor to a standalone trip).
+        TripStore.renumberJourney(jid, context: context)
     }
 }
 
@@ -80,6 +84,16 @@ private struct TripRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if trip.isJourneyLeg {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.triangle.branch").font(.caption2)
+                    Text("Journey · Leg \(trip.legIndex + 1) of \(trip.legTotal)")
+                        .font(.caption2.weight(.bold))
+                }
+                .foregroundStyle(.purple)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(.purple.opacity(0.18), in: .capsule)
+            }
             if let name = trip.name, !name.isEmpty {
                 Text(name)
                     .font(.headline).fontWeight(.semibold).foregroundStyle(.primary).lineLimit(1)

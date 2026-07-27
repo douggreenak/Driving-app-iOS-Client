@@ -86,7 +86,8 @@ struct ScheduledDriveDetailView: View {
                 }
                 Annotation("Departure", coordinate: drive.startCoordinate) { pin(startColor) }
                 ForEach(Array(drive.stops.enumerated()), id: \.element.id) { i, stop in
-                    Annotation("Stop \(i + 1)", coordinate: stop.coordinate) { stopPin(i + 1) }
+                    Annotation(stop.dwellMinutes > 0 ? "Stop \(i + 1) · \(stop.dwellMinutes) min" : "Stop \(i + 1)",
+                               coordinate: stop.coordinate) { stopPin(i + 1, dwell: stop.dwellMinutes) }
                 }
                 Annotation("Arrival", coordinate: drive.endCoordinate) { pin(endColor) }
             }
@@ -124,13 +125,21 @@ struct ScheduledDriveDetailView: View {
         }
     }
 
-    /// A numbered pin for an intermediate stop.
-    private func stopPin(_ number: Int) -> some View {
-        Text("\(number)")
-            .font(.caption2.weight(.bold)).foregroundStyle(.white)
-            .frame(width: 18, height: 18)
-            .background(.orange, in: .circle)
-            .overlay(Circle().stroke(.white, lineWidth: 1.5))
+    /// A numbered pin for an intermediate stop, optionally showing the dwell time.
+    private func stopPin(_ number: Int, dwell: Int = 0) -> some View {
+        VStack(spacing: 2) {
+            Text("\(number)")
+                .font(.caption2.weight(.bold)).foregroundStyle(.white)
+                .frame(width: 18, height: 18)
+                .background(.orange, in: .circle)
+                .overlay(Circle().stroke(.white, lineWidth: 1.5))
+            if dwell > 0 {
+                Text("+\(dwell)m")
+                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(.orange.opacity(0.85), in: .capsule)
+            }
+        }
     }
 
     private func endpoint(_ title: String, _ time: Date, _ tint: Color, _ align: HorizontalAlignment) -> some View {
@@ -215,6 +224,26 @@ struct ScheduledDriveDetailView: View {
             detailRow(drive.category.icon, "Category", drive.category.label)
             Divider()
             detailRow("clock.arrow.circlepath", "Predicted travel", travelString(drive.estimatedTravelTime))
+            // If any stop has dwell time, show a breakdown so the user can see drive vs. stop time.
+            let totalDwell = drive.stops.reduce(0) { $0 + $1.dwellMinutes }
+            if totalDwell > 0 {
+                Divider()
+                VStack(spacing: 0) {
+                    ForEach(drive.stops.filter { $0.dwellMinutes > 0 }.indices, id: \.self) { i in
+                        let stop = drive.stops.filter { $0.dwellMinutes > 0 }[i]
+                        let idx = drive.stops.firstIndex(where: { $0.id == stop.id }).map { $0 + 1 } ?? (i + 1)
+                        HStack(spacing: 12) {
+                            Image(systemName: "clock.badge.fill").foregroundStyle(.orange).frame(width: 24)
+                            Text("Stop \(idx) dwell").foregroundStyle(.secondary)
+                            Spacer()
+                            Text("+\(stop.dwellMinutes) min").fontWeight(.medium)
+                        }
+                        .font(.subheadline)
+                        .padding(.vertical, 10)
+                        if i < drive.stops.filter({ $0.dwellMinutes > 0 }).count - 1 { Divider() }
+                    }
+                }
+            }
             Divider()
             detailRow("repeat", "Repeats", drive.repeatRule.label)
             if let notes = drive.notes, !notes.isEmpty {

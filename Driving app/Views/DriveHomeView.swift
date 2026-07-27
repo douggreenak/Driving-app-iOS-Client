@@ -1,5 +1,7 @@
 import SwiftUI
 import SwiftData
+import CoreLocation
+import MapKit
 
 /// The app's home: a single unified surface that merges live tracking with the schedule. A warm
 /// greeting, the next drive promoted as a hero card, one prominent "Start a Drive" action that opens
@@ -9,13 +11,20 @@ struct DriveHomeView: View {
     @Environment(\.modelContext) private var context
     @Query private var drives: [ScheduledDrive]
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+    @Query private var settingsList: [UserSettings]
 
     @State private var showingLive = false
     @State private var showingNew = false
     @State private var showingPredict = false
     @State private var showingSettings = false
+    @State private var showingAddPlace = false
     @State private var pendingDelete: DriveOccurrence?
     @State private var recovered: DriveLogger.Recovered?
+
+    // "Go to" — one-tap ad-hoc navigation to a saved place with a computed ETA and on-time grading.
+    @State private var goToTarget: QuickTrip?
+    @State private var goToLoadingPlace: UUID?
+    @State private var goToLocator = CurrentLocationProvider()
 
     /// How many days of occurrences are currently materialized. Grows in batches as the user
     /// scrolls, so a repeating drive's series is effectively infinite instead of stopping early.
@@ -84,6 +93,7 @@ struct DriveHomeView: View {
         NavigationStack {
             List {
                 homeSection
+                goToSection
                 boardSections
             }
             .listStyle(.plain)
@@ -107,8 +117,14 @@ struct DriveHomeView: View {
             .sheet(isPresented: $showingNew) { NewScheduledDriveView() }
             .sheet(isPresented: $showingPredict) { RoutePredictView() }
             .sheet(isPresented: $showingSettings) { SettingsView() }
+            .sheet(isPresented: $showingAddPlace) {
+                AddBookmarkView(nextOrder: (savedPlaces.map(\.sortOrder).max() ?? -1) + 1)
+            }
             .fullScreenCover(isPresented: $showingLive) {
                 LiveTrackingView(asModal: true, onFinish: { showingLive = false })
+            }
+            .fullScreenCover(item: $goToTarget) { target in
+                LiveTrackingView(goTo: target, onFinish: { goToTarget = nil })
             }
             .confirmationDialog("Delete this scheduled drive?",
                                 isPresented: Binding(get: { pendingDelete != nil },
@@ -223,6 +239,115 @@ struct DriveHomeView: View {
         }
         .buttonStyle(.plain)
         .padding(.top, 2)
+    }
+
+    // MARK: - "Go to" (one-tap navigation to a saved place)
+
+    /// A row of saved-place cards under a "Go to" header. Tapping one computes an ETA from the
+    /// current location and starts a recorded drive to it — graded on-time against that ETA. Separate
+    /// from ad-hoc "Start a Drive" and from scheduling; the drive shows up in Trips like any other.
+    private var goToSection: some View {
+        Section {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(savedPlaces) { place in goToCard(place) }
+                    goToAddCard
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 2)
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        } header: {
+            HStack(spacing: 6) {
+                Text("Go to")
+                if goToLoadingPlace != nil {
+                    ProgressView().controlSize(.mini)
+                    Text("Finding ETA…").font(.caption2).foregroundStyle(.secondary).textCase(nil)
+                }
+            }
+        }
+    }
+
+    private func goToCard(_ place: SavedPlace) -> some View {
+        let loading = goToLoadingPlace == place.id
+        return Button {
+            Task { await startGoTo(place) }
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: place.icon)
+                        .font(.headline).foregroundStyle(.blue)
+                        .frame(width: 38, height: 38)
+                        .background(.blue.opacity(0.15), in: .circle)
+                    Spacer()
+                    if loading {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "location.fill").font(.caption).foregroundStyle(.green)
+                    }
+                }
+                Text(place.label).font(.subheadline.weight(.semibold)).lineLimit(1)
+                Text(place.address).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .frame(width: 150, height: 118, alignment: .leading)
+            .padding(12)
+            .background(Color(.systemGray6), in: .rect(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(.blue.opacity(loading ? 0.5 : 0), lineWidth: 1.5))
+        }
+        .buttonStyle(.plain)
+        .disabled(goToLoadingPlace != nil)
+    }
+
+    private var goToAddCard: some View {
+        Button { Haptics.tap(); showingAddPlace = true } label: {
+            VStack(spacing: 8) {
+                Image(systemName: "plus")
+                    .font(.title3.weight(.semibold)).foregroundStyle(.blue)
+                    .frame(width: 38, height: 38)
+                    .background(.blue.opacity(0.12), in: .circle)
+                Text("Add Place").font(.subheadline.weight(.semibold)).foregroundStyle(.blue)
+                Text(savedPlaces.isEmpty ? "Save a destination" : "Save an address")
+                    .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
+            .frame(width: 130, height: 118)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6]))
+                    .foregroundStyle(.blue.opacity(0.5))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(goToLoadingPlace != nil)
+    }
+
+    /// Fetch the current location + MapKit ETA to `place`, then start a recorded drive to it. If the
+    /// ETA can't be fetched (offline / no location), the drive still starts, just ungraded.
+    private func startGoTo(_ place: SavedPlace) async {
+        guard goToLoadingPlace == nil else { return }
+        // Never clobber an unsaved drive: a Go-to auto-starts (and the crash logger truncates the
+        // active log), so if a recoverable session is pending, surface it instead of starting.
+        if let rec = LocationTracker.recoverableSession() {
+            Haptics.warning()
+            recovered = rec
+            return
+        }
+        Haptics.tap()
+        goToLoadingPlace = place.id
+        defer { goToLoadingPlace = nil }
+        // Fetch the ETA as travel seconds; the departure/arrival are anchored at auto-start time so
+        // they stay consistent regardless of how long this fetch takes.
+        var travelSeconds: Int?
+        if let here = await goToLocator.current()?.coordinate {
+            let routes = await RouteMatcher.candidateRoutes(from: here, to: place.coordinate)
+            if let best = routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) {
+                travelSeconds = Int(best.expectedTravelTime)
+            }
+        }
+        goToTarget = QuickTrip(name: place.label, coordinate: place.coordinate, travelSeconds: travelSeconds,
+                               paidBy: settingsList.first?.defaultPaidBy ?? .myself)
     }
 
     // MARK: - Board

@@ -27,6 +27,11 @@ enum TripStore {
         var scheduledDeparture: Date?
         var scheduledArrival: Date?
         var stops: [RouteStop] = []
+        /// Journey linkage — set by `saveJourney` so a multi-stop drive's legs are separate but
+        /// linked trips. Nil `journeyID` (the default) marks a standalone trip.
+        var journeyID: UUID? = nil
+        var legIndex: Int = 0
+        var legTotal: Int = 1
     }
 
     @discardableResult
@@ -80,6 +85,9 @@ enum TripStore {
             matchedPolyline: matchedData
         )
         trip.stops = input.stops
+        trip.journeyID = input.journeyID
+        trip.legIndex = input.legIndex
+        trip.legTotal = input.legTotal
         context.insert(trip)
 
         // Attach the full track for playback / analysis.
@@ -99,6 +107,45 @@ enum TripStore {
             await syncToBackend(trip: trip, displayCoords: match.coordinates)
         }
         return trip
+    }
+
+    /// Persist a finished multi-stop drive as several separate, **linked** trips — one per leg —
+    /// sharing a `journeyID`. Each leg is a plain A→B trip: map-matched and synced independently
+    /// (the backend just sees N trips); the journey link is a local grouping so the drives read as
+    /// "separate trips that are linked" rather than one trip with pauses. Falls back to a single
+    /// standalone trip when there's only one leg.
+    @discardableResult
+    static func saveJourney(_ legs: [Input], context: ModelContext) async -> [DriveTrip] {
+        guard legs.count > 1 else {
+            if let only = legs.first, let t = await save(only, context: context) { return [t] }
+            return []
+        }
+        let journeyID = UUID()
+        var saved: [DriveTrip] = []
+        for (i, leg) in legs.enumerated() {
+            var input = leg
+            input.journeyID = journeyID
+            input.legIndex = i
+            input.legTotal = legs.count
+            if let trip = await save(input, context: context) { saved.append(trip) }
+        }
+        return saved
+    }
+
+    /// After a leg is deleted from a journey, renumber the surviving siblings so their `legIndex` /
+    /// `legTotal` stay correct (no "Leg 1 of 3" when only two remain). If only one leg is left it's
+    /// demoted to a standalone trip — a journey of one is not a journey. No-op for a nil id.
+    static func renumberJourney(_ journeyID: UUID?, context: ModelContext) {
+        guard let jid = journeyID else { return }
+        let desc = FetchDescriptor<DriveTrip>(predicate: #Predicate { $0.journeyID == jid },
+                                              sortBy: [SortDescriptor(\.legIndex)])
+        guard let legs = try? context.fetch(desc) else { return }
+        if legs.count <= 1 {
+            for t in legs { t.journeyID = nil; t.legIndex = 0; t.legTotal = 1 }
+        } else {
+            for (i, t) in legs.enumerated() { t.legIndex = i; t.legTotal = legs.count }
+        }
+        try? context.save()
     }
 
     /// Trim a recorded trip to the point range `keepStart...keepEnd`, discarding the track outside

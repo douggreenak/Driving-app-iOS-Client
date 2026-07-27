@@ -44,7 +44,7 @@
 		000000000000000160000000 /* Embed Watch Content */ = {
 			isa = PBXCopyFilesBuildPhase;
 			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
-			dstSubfolderSpec = 16;
+			dstSubfolder = Product;
 			files = (
 				0000000000000000000002B4 /* DriveWatch Watch App.app in Embed Watch Content */,
 			);
@@ -178,8 +178,6 @@
 				000000000000000340000000 /* Resources */,
 			);
 			buildRules = (
-			);
-			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
 				000000000000000000000315 /* DriveWatch Watch App */,
@@ -420,6 +418,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 0000000000000000000000C0 /* Secrets.xcconfig */;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 85687ZHB37;
@@ -463,6 +462,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 0000000000000000000000C0 /* Secrets.xcconfig */;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 85687ZHB37;
@@ -560,7 +560,7 @@
 			};
 			name = Release;
 		};
-		000000000000000311000000 /* Debug */ = {
+		000000000000000311000000 /* Debug configuration for PBXNativeTarget "DriveWatch Watch App" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
@@ -572,26 +572,24 @@
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKApplication = YES;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.apexengineeringak.drivetracker;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"@executable_path/Frameworks",
-				);
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.apexengineeringak.drivetracker.watchkitapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 4;
 				WATCHOS_DEPLOYMENT_TARGET = 27.0;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
-				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
 			name = Debug;
 		};
-		000000000000000312000000 /* Release */ = {
+		000000000000000312000000 /* Release configuration for PBXNativeTarget "DriveWatch Watch App" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
@@ -603,9 +601,7 @@
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKApplication = YES;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.apexengineeringak.drivetracker;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"@executable_path/Frameworks",
-				);
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.apexengineeringak.drivetracker.watchkitapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -613,11 +609,11 @@
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "watchos watchsimulator";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 4;
 				WATCHOS_DEPLOYMENT_TARGET = 27.0;
-				SWIFT_COMPILATION_MODE = wholemodule;
 			};
 			name = Release;
 		};
@@ -651,8 +647,8 @@
 		000000000000000310000000 /* Build configuration list for PBXNativeTarget "DriveWatch Watch App" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				000000000000000311000000 /* Debug */,
-				000000000000000312000000 /* Release */,
+				000000000000000311000000 /* Debug configuration for PBXNativeTarget "DriveWatch Watch App" */,
+				000000000000000312000000 /* Release configuration for PBXNativeTarget "DriveWatch Watch App" */,
 			);
 			defaultConfigurationName = Release;
 		};

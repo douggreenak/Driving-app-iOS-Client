@@ -50,10 +50,11 @@ enum RouteMatcher {
     /// if any leg has no available route (e.g. offline). Used for multi-stop scheduled drives and
     /// route cost prediction.
     static func multiLegRoute(through waypoints: [CLLocationCoordinate2D])
-        async -> (seconds: Int, coordinates: [CLLocationCoordinate2D])? {
+        async -> (seconds: Int, coordinates: [CLLocationCoordinate2D], legSeconds: [Int])? {
         guard waypoints.count >= 2 else { return nil }
         var totalSeconds = 0
         var coords: [CLLocationCoordinate2D] = []
+        var legSeconds: [Int] = []
         for i in 1..<waypoints.count {
             let request = MKDirections.Request()
             request.source = MKMapItem(placemark: MKPlacemark(coordinate: waypoints[i - 1]))
@@ -62,10 +63,12 @@ enum RouteMatcher {
             guard let response = try? await MKDirections(request: request).calculate(),
                   let route = response.routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime })
             else { return nil }
-            totalSeconds += Int(route.expectedTravelTime)
+            let s = Int(route.expectedTravelTime)
+            totalSeconds += s
+            legSeconds.append(s)
             coords.append(contentsOf: route.polyline.coordinates())
         }
-        return (totalSeconds, coords)
+        return (totalSeconds, coords, legSeconds)
     }
 
     /// Match a recorded track to roads. `points` must be in chronological order.

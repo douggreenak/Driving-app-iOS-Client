@@ -119,6 +119,13 @@ struct TripStatus {
         .init(kind: .onTime, headline: "DEPARTED", detail: nil, color: .gray, icon: "checkmark.circle.fill")
     }
 
+    /// Driving toward a scheduled arrival, but no ETA yet (e.g. still waiting on the first GPS fix).
+    /// We have a target — so this must NOT read "NO SCHEDULE" — but no delay estimate to grade
+    /// on-time/early/late against yet, so show a neutral "EN ROUTE" until the ETA resolves.
+    static var liveEnRoute: TripStatus {
+        .init(kind: .scheduled, headline: "EN ROUTE", detail: nil, color: .blue, icon: "location.fill")
+    }
+
     /// Status for a single departures-board occurrence (also used by the scheduled-detail page).
     /// Follows the product spec: an upcoming drive is ON TIME (green) until its departure time;
     /// once departure passes with no recorded start it becomes LATE (orange); a start in the

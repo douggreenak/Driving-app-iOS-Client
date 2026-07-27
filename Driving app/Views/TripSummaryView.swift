@@ -27,6 +27,7 @@ struct TripSummaryView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     routeMap
+                    if tracker.recordedLegCount > 1 { linkedTripsBanner }
                     statsGrid
                     gasEstimate
                     if !roadNames.isEmpty {
@@ -64,6 +65,20 @@ struct TripSummaryView: View {
             .onAppear { if !didInit { paidBy = initialPaidBy; didInit = true } }
             .task { await resolveDetails() }
         }
+    }
+
+    // MARK: - Linked-trips banner (multi-stop)
+
+    /// A multi-stop drive is saved as one linked trip per leg, not a single trip with pauses.
+    private var linkedTripsBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.triangle.branch").foregroundStyle(.purple)
+            Text("Saved as \(tracker.recordedLegCount) linked trips — one per stop.")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(.purple.opacity(0.14), in: .rect(cornerRadius: 12))
     }
 
     // MARK: - Route Map

@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var budget = ""
     @State private var fuelPrice = ""
     @State private var unit = "miles"
+    @State private var defaultPayer: PaidBy = .myself
     @State private var showingVehicleForm = false
     @State private var vehicleName = ""
     @State private var vehicleMake = ""
@@ -81,6 +82,29 @@ struct SettingsView: View {
                     Text("Fuel Price")
                 } footer: {
                     Text("Used to estimate how much each drive's gas costs — and who's paying — on the dashboard.")
+                }
+
+                Section {
+                    Picker("Paid by", selection: $defaultPayer) {
+                        ForEach(PaidBy.allCases, id: \.self) { payer in
+                            Label(payer.label, systemImage: payer.icon).tag(payer)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onAppear { defaultPayer = currentSettings.defaultPaidBy }
+                    .onChange(of: defaultPayer) { _, newValue in
+                        // Guard against the load-on-appear flip firing a spurious save + haptic:
+                        // onAppear can change defaultPayer (e.g. .myself → .parents), which trips
+                        // onChange even though nothing was persisted yet. Only write real edits.
+                        guard newValue != currentSettings.defaultPaidBy else { return }
+                        currentSettings.defaultPaidBy = newValue
+                        try? modelContext.save()
+                        Haptics.tap()
+                    }
+                } header: {
+                    Text("Who Pays for Gas")
+                } footer: {
+                    Text("The default payer for drives you start ad-hoc (Start a Drive or Go to). Scheduled drives use the payer set on the schedule, and you can still change any drive's payer afterward.")
                 }
 
                 Section("Distance Unit") {

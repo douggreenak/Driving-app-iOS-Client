@@ -56,18 +56,51 @@ struct ScreenshotHarness: View {
                     ScheduledDriveDetailView(drive: SampleData.makeSchedule(into: container.mainContext))
                         .onAppear { SampleData.seedPlaces(into: container.mainContext) }
                 }
+            case "cancelbug":
+                DriveHomeView().onAppear {
+                    SampleData.seedCanceledUpNext(into: container.mainContext)
+                    SampleData.seedPlaces(into: container.mainContext)
+                }
+            case "cancelrollforward":
+                DriveHomeView().onAppear {
+                    SampleData.seedCanceledPastWindow(into: container.mainContext)
+                    SampleData.seedPlaces(into: container.mainContext)
+                }
             case "trips":
                 TripsListView().onAppear { _ = SampleData.makeTrip(into: container.mainContext) }
+            case "journey":
+                TripsListView().onAppear {
+                    _ = SampleData.makeJourney(into: container.mainContext)
+                    SampleData.seedPlaces(into: container.mainContext)
+                }
+            case "journeydetail":
+                NavigationStack { TripDetailView(trip: seededJourneyLeg) }
+                    .onAppear { SampleData.seedPlaces(into: container.mainContext) }
             case "gas":
                 GasListView()
             case "editvehicle":
                 NavigationStack { EditVehicleView(vehicle: seededVehicle) }
             case "track":
                 LiveTrackingView(previewTracker: SampleData.inProgressTracker())
+            case "gototrack":
+                LiveTrackingView(goTo: QuickTrip(
+                    name: "Home",
+                    coordinate: CLLocationCoordinate2D(latitude: 61.2181, longitude: -149.9003),
+                    travelSeconds: 15 * 60))
             case "trackleg":
                 LiveTrackingView(previewTracker: SampleData.multiLegTracker(paused: false))
             case "trackpaused":
                 LiveTrackingView(previewTracker: SampleData.multiLegTracker(paused: true))
+            case "trackstart":
+                LiveTrackingView(previewTracker: SampleData.idleTracker(withDestination: false))
+            case "trackdest":
+                LiveTrackingView(previewTracker: SampleData.idleTracker(withDestination: true))
+            case "trackopen":
+                LiveTrackingView(previewTracker: SampleData.openDriveTracker())
+            case "gotostatus":
+                LiveTrackingView(previewTracker: SampleData.goToStatusTracker())
+            case "statuschips":
+                StatusChipGallery()
             case "applyschedule":
                 ApplyScheduleSheet(trip: seededTrip)
                     .onAppear { SampleData.seedSchedules(into: container.mainContext) }
@@ -95,6 +128,44 @@ struct ScreenshotHarness: View {
         // Seed a scheduled drive set too, so the schedule screen has content if navigated.
         SampleData.seedSchedules(into: container.mainContext)
         return SampleData.makeTrip(into: container.mainContext)
+    }
+
+    /// The middle leg of a seeded linked journey, for the journey-card detail screenshot.
+    private var seededJourneyLeg: DriveTrip {
+        let legs = SampleData.makeJourney(into: container.mainContext)
+        return legs.count >= 2 ? legs[1] : (legs.first ?? SampleData.makeTrip(into: container.mainContext))
+    }
+}
+
+/// A location-free gallery of the live driving status chips, for verifying that a "Go to" / scheduled
+/// drive shows a real on-time verdict (and a neutral EN ROUTE while awaiting the first fix) instead of
+/// the old misleading "NO SCHEDULE".
+private struct StatusChipGallery: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Live drive status").font(.title2.bold())
+            row("Go to · awaiting ETA", StatusChip(status: .liveEnRoute))
+            row("Go to · on time", StatusChip(status: .live(delaySeconds: 0)))
+            row("Go to · early", StatusChip(status: .live(delaySeconds: -9 * 60)))
+            row("Go to · delayed", StatusChip(status: .live(delaySeconds: 12 * 60)))
+            Divider().overlay(.secondary)
+            Text("Saved trip status").font(.headline)
+            row("Arrived on time", StatusChip(status: .forTrip(delaySeconds: 30)))
+            row("Arrived early", StatusChip(status: .forTrip(delaySeconds: -7 * 60)))
+            row("Arrived late", StatusChip(status: .forTrip(delaySeconds: 22 * 60)))
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(24)
+        .background(.black)
+    }
+
+    private func row(_ label: String, _ chip: StatusChip) -> some View {
+        HStack {
+            Text(label).font(.subheadline).foregroundStyle(.white)
+            Spacer()
+            chip
+        }
     }
 }
 
@@ -180,6 +251,53 @@ enum SampleData {
         return trip
     }
 
+    /// A recorded multi-stop drive saved as three separate, *linked* trips (one per leg) sharing a
+    /// journey id — for verifying the linked-legs list rows and the journey card. Idempotent.
+    @discardableResult
+    static func makeJourney(into context: ModelContext) -> [DriveTrip] {
+        if let existing = try? context.fetch(FetchDescriptor<DriveTrip>()),
+           existing.contains(where: { $0.journeyID != nil }) {
+            return existing.filter { $0.journeyID != nil }.sorted { $0.legIndex < $1.legIndex }
+        }
+        let jid = UUID()
+        let allPts = recordedPoints(base: Date().addingTimeInterval(-3600))
+        let n = allPts.count
+        let cuts = [0, n / 3, 2 * n / 3, n]
+        let names = [("Home", "Midtown Costco"),
+                     ("Midtown Costco", "Spenard Post Office"),
+                     ("Spenard Post Office", "Ted Stevens Intl Airport")]
+        var trips: [DriveTrip] = []
+        for i in 0..<3 {
+            let seg = Array(allPts[cuts[i]..<cuts[i + 1]])
+            guard seg.count >= 2, let first = seg.first, let last = seg.last else { continue }
+            var meters = 0.0
+            for k in 1..<seg.count { meters += seg[k - 1].coordinate.distanceMeters(to: seg[k].coordinate) }
+            let miles = meters / 1609.34
+            let secs = Int(last.t.timeIntervalSince(first.t))
+            let gallons = FuelModel.gallons(segments: FuelModel.segments(from: seg), ratedMpg: 28)
+            let trip = DriveTrip(
+                date: first.t, endDate: last.t,
+                startAddress: names[i].0, endAddress: names[i].1,
+                startLat: first.lat, startLng: first.lng, endLat: last.lat, endLng: last.lng,
+                distance: miles, duration: secs, movingSeconds: Int(Double(secs) * 0.85),
+                maxSpeed: seg.map(\.speed).max() ?? 0, avgSpeed: secs > 0 ? miles / (Double(secs) / 3600) : 0,
+                name: "Errand Run", category: .errand, paidBy: .parents,
+                vehicleName: "My Subaru", vehicleMpg: 28, estimatedGallons: gallons)
+            trip.journeyID = jid
+            trip.legIndex = i
+            trip.legTotal = 3
+            context.insert(trip)
+            for (k, p) in seg.enumerated() {
+                let tp = TrackPoint(seq: k, t: p.t, lat: p.lat, lng: p.lng, speed: p.speed,
+                                    course: p.course, accuracy: p.accuracy, altitude: p.altitude, onRoad: true)
+                tp.trip = trip
+                context.insert(tp)
+            }
+            trips.append(trip)
+        }
+        return trips
+    }
+
     static func seedTrips(into context: ModelContext) {
         let existing = (try? context.fetch(FetchDescriptor<DriveTrip>())) ?? []
         guard existing.isEmpty else { return }
@@ -231,6 +349,42 @@ enum SampleData {
             SavedPlace(label: "School", address: "University of Alaska Anchorage", lat: 61.19, lng: -149.82, icon: "graduationcap.fill", sortOrder: 2),
         ]
         for p in places { context.insert(p) }
+    }
+
+    /// Seed for the cancel-bug repro: a single daily drive whose *currently up-next* occurrence is
+    /// canceled. A correct "Up Next" must NOT show this canceled occurrence.
+    static func seedCanceledUpNext(into context: ModelContext) {
+        // Departs 40 minutes from now (so its own occurrence today is the imminent one).
+        let dep = Date().addingTimeInterval(40 * 60)
+        let d = ScheduledDrive(
+            title: "Grocery Run", startAddress: "Home", endAddress: "Fred Meyer",
+            startLat: 61.2181, startLng: -149.9003, endLat: 61.19, endLng: -149.88,
+            departure: dep, estimatedTravelTime: 12 * 60,
+            scheduledArrival: dep.addingTimeInterval(12 * 60),
+            repeatRule: .daily, category: .errand, paidBy: .parents, vehicleName: "My Subaru")
+        context.insert(d)
+        // Cancel the exact occurrence that would otherwise be promoted to Up Next.
+        if let up = d.upNextDeparture() { d.setOccurrenceCanceled(up, true) }
+    }
+
+    /// Regression seed for the narrowed cancel guard: a daily drive whose occurrence EARLIER TODAY
+    /// (well past its window) was canceled. Up Next must roll forward to the next occurrence rather
+    /// than staying hidden for the rest of the interval.
+    static func seedCanceledPastWindow(into context: ModelContext) {
+        let dep = Date().addingTimeInterval(-8 * 3600)   // 8h ago → past its ~6h window
+        let d = ScheduledDrive(
+            title: "School Run", startAddress: "Home", endAddress: "UAA",
+            startLat: 61.2181, startLng: -149.9003, endLat: 61.19, endLng: -149.82,
+            departure: dep, estimatedTravelTime: 12 * 60,
+            scheduledArrival: dep.addingTimeInterval(12 * 60),
+            repeatRule: .daily, category: .school, paidBy: .parents, vehicleName: "My Subaru")
+        context.insert(d)
+        // Cancel the earlier-today occurrence (now clearly past its window).
+        let cal = Calendar.current
+        let time = cal.dateComponents([.hour, .minute], from: dep)
+        if let todayOcc = cal.date(bySettingHour: time.hour ?? 0, minute: time.minute ?? 0, second: 0, of: Date()) {
+            d.setOccurrenceCanceled(todayOcc, true)
+        }
     }
 
     static func seedSchedules(into context: ModelContext) {
@@ -312,9 +466,48 @@ enum SampleData {
         ]
         t.currentLegIndex = 1          // reached stop 1; now on leg 2 (→ stop 2)
         t.legArrivals = [Date().addingTimeInterval(-300)]
+        // Boundary at stop 1 so the paused recap can report the just-finished leg's distance/time.
+        t.legPointBoundaries = [max(2, t.points.count / 2)]
         t.destination = t.legTargets[1].coordinate
         t.destinationName = t.legTargets[1].address
         t.isPausedBetweenLegs = paused
+        return t
+    }
+
+    /// A fresh, not-yet-started ad-hoc drive (optionally with a pre-set destination) for verifying
+    /// the pre-start controls — the "Set destination" row and the Start button.
+    @MainActor
+    static func idleTracker(withDestination: Bool) -> LocationTracker {
+        let t = LocationTracker()
+        t.currentLocation = .init(latitude: 61.2181, longitude: -149.9003)
+        if withDestination {
+            t.setRoute(stops: [],
+                       finalDestination: .init(latitude: 61.1743, longitude: -149.9982),
+                       finalName: "Ted Stevens Intl Airport")
+        }
+        return t
+    }
+
+    /// An in-progress OPEN drive (no destination) for verifying the on-the-fly "Set destination" /
+    /// "Add stop" control a plain ad-hoc drive now offers mid-drive.
+    @MainActor
+    static func openDriveTracker() -> LocationTracker {
+        let t = inProgressTracker()
+        t.destination = nil
+        t.destinationName = nil
+        t.legTargets = []
+        t.scheduledArrival = nil
+        return t
+    }
+
+    /// A "Go to" drive with a live location + a computed schedule, so the ETA HUD resolves to a real
+    /// on-time verdict — verifying that a scheduled/Go-to drive never falls back to "NO SCHEDULE".
+    @MainActor
+    static func goToStatusTracker() -> LocationTracker {
+        let t = inProgressTracker()
+        t.finalDestinationName = "Home"
+        t.destinationName = "Home"
+        t.scheduledArrival = Date().addingTimeInterval(30 * 60)  // ample budget → ON TIME / EARLY
         return t
     }
 }

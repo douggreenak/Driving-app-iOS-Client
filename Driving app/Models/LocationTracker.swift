@@ -57,6 +57,10 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     var isPausedBetweenLegs: Bool = false
     /// Arrival timestamps recorded as each intermediate leg is completed (one per passed stop).
     var legArrivals: [Date] = []
+    /// `points.count` captured at the moment each intermediate stop is reached — the boundary index
+    /// that ends one leg and starts the next. Lets a finished multi-stop drive be split into one
+    /// recorded trip per leg (separate, linked trips) instead of a single trip with pauses.
+    var legPointBoundaries: [Int] = []
     /// The ultimate endpoint's display name, kept separately from `destinationName` (which tracks
     /// the *current* leg target) so the overall trip can always show where it ends.
     var finalDestinationName: String?
@@ -77,6 +81,36 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     var reachedStopCount: Int { min(currentLegIndex, max(legTargets.count - 1, 0)) }
     /// Intermediate stops only (excludes the final destination) — what the saved trip stores.
     var intermediateStops: [RouteStop] { legTargets.count > 1 ? Array(legTargets.dropLast()) : [] }
+    /// How many separate leg-trips this finished recording will be split into on save (1 for a
+    /// simple A→B drive). Mirrors the boundary→segment split used at save time, INCLUDING the
+    /// ≥2-points-per-leg rule, so the "Saved as N linked trips" banner matches what's persisted.
+    var recordedLegCount: Int {
+        var count = 0, prev = 0
+        for b in legPointBoundaries where b > prev && b <= points.count {
+            if b - prev >= 2 { count += 1 }
+            prev = b
+        }
+        if points.count - prev >= 2 { count += 1 }
+        return max(count, 1)
+    }
+
+    /// Distance (miles) and elapsed seconds of the most recently completed leg — the stretch between
+    /// the last two recorded stop boundaries. Powers the "leg complete" recap shown while parked
+    /// between legs, so each stop reads as its own finished trip rather than a pause. Nil until at
+    /// least one intermediate stop has been reached.
+    var lastLegStats: (miles: Double, seconds: Int)? {
+        guard let end = legPointBoundaries.last, end >= 1, end <= points.count else { return nil }
+        let start = legPointBoundaries.count >= 2 ? legPointBoundaries[legPointBoundaries.count - 2] : 0
+        guard end - start >= 2 else { return nil }
+        let leg = Array(points[start..<end])
+        guard let first = leg.first, let last = leg.last else { return nil }
+        var meters = 0.0
+        for i in 1..<leg.count {
+            let step = leg[i - 1].coordinate.distanceMeters(to: leg[i].coordinate)
+            if step < 500 { meters += step }
+        }
+        return (meters / 1609.34, Int(last.t.timeIntervalSince(first.t)))
+    }
 
     private(set) var startTime: Date?
     private var timer: Timer?
@@ -177,6 +211,8 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     func arriveAtCurrentStop() {
         guard isMultiLeg, !isOnFinalLeg else { return }
         legArrivals.append(Date())
+        // Close off this leg's recorded points so the finished drive can be split into per-leg trips.
+        legPointBoundaries.append(points.count)
         currentLegIndex += 1
         isPausedBetweenLegs = true
         isRecording = false
@@ -215,6 +251,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         isTracking = true
         isRecording = true
         isPausedBetweenLegs = false
+        legPointBoundaries = []
 
         logger.begin(meta: currentMeta())
 
@@ -248,7 +285,8 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
             legTargets: legTargets,
             currentLegIndex: currentLegIndex,
             legArrivals: legArrivals,
-            isPaused: isPausedBetweenLegs
+            isPaused: isPausedBetweenLegs,
+            legPointBoundaries: legPointBoundaries
         )
     }
 
@@ -309,6 +347,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         legTargets = m.legTargets
         currentLegIndex = m.currentLegIndex
         legArrivals = m.legArrivals
+        legPointBoundaries = m.legPointBoundaries
         if let t = currentLegTarget { destination = t.coordinate }
         isTracking = true
         isPausedBetweenLegs = m.isPaused
@@ -352,6 +391,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         isPausedBetweenLegs = false
         isRecording = false
         legArrivals = []
+        legPointBoundaries = []
         finalDestinationName = nil
     }
 
@@ -365,12 +405,25 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         return distanceMiles / (Double(elapsedSeconds) / 3600)
     }
 
-    /// Average speed over roughly the last minute, for a responsive live ETA. Reads a small
-    /// rolling window instead of scanning the whole (growing) track on every access.
-    var recentAvgSpeedMph: Double {
-        let recent = recentSpeeds.map(\.mph).filter { $0 > 0 }
-        if !recent.isEmpty { return recent.reduce(0, +) / Double(recent.count) }
-        return avgSpeedMph > 1 ? avgSpeedMph : 25
+    /// Average speed *while moving* — total distance over the time actually spent driving (excluding
+    /// stops). Unlike `avgSpeedMph` (total-time average), this does NOT collapse toward zero the
+    /// longer the car sits at a stop, so it's a stable basis for the live ETA.
+    var movingAvgSpeedMph: Double {
+        guard movingSeconds > 0, distanceMiles > 0 else { return 0 }
+        return distanceMiles / (Double(movingSeconds) / 3600)
+    }
+
+    /// Speed used to project the live ETA. Deliberately NOT the instantaneous/current speed: at a
+    /// stop the current speed falls to ~0, and dividing the remaining distance by it makes the
+    /// projected arrival balloon a little more every second the car sits still. Instead we average
+    /// only the recent *moving* samples (>3 mph — so idling GPS noise is ignored), and once the car
+    /// has been stopped or crawling for the whole recent window we fall back to the trip's moving
+    /// average, which stays put while parked. Before any driving has happened, assume 25 mph.
+    var etaSpeedMph: Double {
+        let recentMoving = recentSpeeds.map(\.mph).filter { $0 > 3 }
+        if !recentMoving.isEmpty { return recentMoving.reduce(0, +) / Double(recentMoving.count) }
+        let moving = movingAvgSpeedMph
+        return moving > 3 ? moving : 25
     }
 
     var startCoordinate: CLLocationCoordinate2D? { points.first?.coordinate }
@@ -409,7 +462,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         guard let miles else { return nil }
         let now = Date()
         if miles < 0.05 { return now }
-        return now.addingTimeInterval(miles / max(recentAvgSpeedMph, 5) * 3600)
+        return now.addingTimeInterval(miles / max(etaSpeedMph, 5) * 3600)
     }
 
     /// Overall arrival at the final destination.
@@ -538,6 +591,8 @@ final class DriveLogger {
         var currentLegIndex: Int = 0
         var legArrivals: [Date] = []
         var isPaused: Bool = false
+        /// Per-leg point-count boundaries so a recovered multi-stop drive still splits into legs.
+        var legPointBoundaries: [Int] = []
     }
 
     struct Recovered {
@@ -605,5 +660,36 @@ final class DriveLogger {
         }
         guard points.count >= 2 else { return nil }
         return Recovered(meta: meta, points: points)
+    }
+}
+
+extension DriveLogger.Meta {
+    enum CodingKeys: String, CodingKey {
+        case start, destinationName, scheduledArrival, scheduledDeparture, category, vehicleName,
+             tripName, paidBy, finalDestinationName, legTargets, currentLegIndex, legArrivals,
+             isPaused, legPointBoundaries
+    }
+
+    /// Tolerant decode: synthesized `Decodable` throws `keyNotFound` for any missing key regardless
+    /// of the property's default, so a crash log written by an *older* build (lacking newer fields
+    /// like `legPointBoundaries`) would fail to decode — silently losing an in-progress drive on
+    /// update. Decode every evolvable field with `decodeIfPresent` + a fallback so recovery is
+    /// robust across versions (goal: crash-/coverage-proof logging).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        start = try c.decode(Date.self, forKey: .start)
+        destinationName = try c.decodeIfPresent(String.self, forKey: .destinationName)
+        scheduledArrival = try c.decodeIfPresent(Date.self, forKey: .scheduledArrival)
+        scheduledDeparture = try c.decodeIfPresent(Date.self, forKey: .scheduledDeparture)
+        category = try c.decodeIfPresent(String.self, forKey: .category) ?? TripCategory.other.rawValue
+        vehicleName = try c.decodeIfPresent(String.self, forKey: .vehicleName)
+        tripName = try c.decodeIfPresent(String.self, forKey: .tripName)
+        paidBy = try c.decodeIfPresent(String.self, forKey: .paidBy) ?? PaidBy.myself.rawValue
+        finalDestinationName = try c.decodeIfPresent(String.self, forKey: .finalDestinationName)
+        legTargets = try c.decodeIfPresent([RouteStop].self, forKey: .legTargets) ?? []
+        currentLegIndex = try c.decodeIfPresent(Int.self, forKey: .currentLegIndex) ?? 0
+        legArrivals = try c.decodeIfPresent([Date].self, forKey: .legArrivals) ?? []
+        isPaused = try c.decodeIfPresent(Bool.self, forKey: .isPaused) ?? false
+        legPointBoundaries = try c.decodeIfPresent([Int].self, forKey: .legPointBoundaries) ?? []
     }
 }

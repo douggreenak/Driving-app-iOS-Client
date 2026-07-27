@@ -37,6 +37,9 @@ struct NewScheduledDriveView: View {
     /// Intermediate stops (multi-stop): start → stops → destination.
     @State private var stops: [RouteStop] = []
     @State private var travelSeconds: Int?
+    /// The raw MapKit driving-only ETA (seconds), without any dwell time added. Used so the
+    /// dwell stepper can adjust the total in real-time without re-fetching from MapKit.
+    @State private var drivingSeconds: Int?
     @State private var arrivalOverride: Date?
     @State private var calculating = false
     @State private var routeError: String?
@@ -64,6 +67,10 @@ struct NewScheduledDriveView: View {
             _endCoord = State(initialValue: d.endCoordinate)
             _stops = State(initialValue: d.stops)
             _travelSeconds = State(initialValue: d.estimatedTravelTime)
+            // Seed the driving-only baseline by subtracting any previously-saved dwell so the
+            // stepper can adjust totals without a round-trip to MapKit.
+            let savedDwell = d.stops.reduce(0) { $0 + $1.dwellMinutes * 60 }
+            _drivingSeconds = State(initialValue: max(0, d.estimatedTravelTime - savedDwell))
         }
     }
 
@@ -108,6 +115,16 @@ struct NewScheduledDriveView: View {
                             }
                             .buttonStyle(.plain)
                         }
+                        // Clock-style dwell picker: collapses to a row, expands to a wheel on tap.
+                        DwellTimePicker(
+                            minutes: dwellBinding(index),
+                            stopLabel: "at stop \(index + 1)"
+                        )
+                        .onChange(of: index < stops.count ? stops[index].dwellMinutes : 0) { _, _ in
+                            arrivalOverride = nil
+                            if let base = drivingSeconds { travelSeconds = base + totalDwellSeconds }
+                        }
+                        .padding(.leading, 28)
                     }
                     Button {
                         stops.append(RouteStop(address: "", lat: 0, lng: 0))
@@ -152,7 +169,10 @@ struct NewScheduledDriveView: View {
                     ))
                     .disabled(travelSeconds == nil)
                     if travelSeconds != nil {
-                        Text("Auto-filled from the predicted drive time. Adjust if you like.")
+                        let dwellTotal = totalDwellSeconds
+                        Text(dwellTotal > 0
+                             ? "Drive time + \(dwellTotal / 60) min at stops. Adjust if you like."
+                             : "Auto-filled from the predicted drive time. Adjust if you like.")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
 
@@ -223,7 +243,22 @@ struct NewScheduledDriveView: View {
     /// Stops that have actually been picked (have a coordinate), in order.
     private var pickedStops: [RouteStop] { stops.filter { $0.lat != 0 || $0.lng != 0 } }
 
+    /// Sum of dwell minutes across all stops that have been filled in, converted to seconds.
+    private var totalDwellSeconds: Int {
+        pickedStops.reduce(0) { $0 + $1.dwellMinutes * 60 }
+    }
+
+    /// A binding into `stops[index].dwellMinutes`, bounds-checked so a mid-render remove can't crash.
+    private func dwellBinding(_ index: Int) -> Binding<Int> {
+        Binding(
+            get: { index < stops.count ? stops[index].dwellMinutes : 0 },
+            set: { if index < stops.count { stops[index].dwellMinutes = $0 } }
+        )
+    }
+
     /// Recompute the predicted travel time across every leg (start → stops → destination).
+    /// Driving ETA is stored separately in `drivingSeconds`; dwell time is added on top so the
+    /// stepper can adjust totals instantly without hitting MapKit again.
     private func recalcETA() async {
         guard let s = startCoord, let e = endCoord else { return }
         calculating = true
@@ -231,7 +266,15 @@ struct NewScheduledDriveView: View {
         defer { calculating = false }
         let waypoints = [s] + pickedStops.map(\.coordinate) + [e]
         if let result = await RouteMatcher.multiLegRoute(through: waypoints) {
-            travelSeconds = result.seconds
+            var legIdx = 0
+            for i in stops.indices {
+                if stops[i].lat != 0 || stops[i].lng != 0 {
+                    stops[i].legDriveSeconds = result.legSeconds[legIdx]
+                    legIdx += 1
+                }
+            }
+            drivingSeconds = result.seconds
+            travelSeconds = result.seconds + totalDwellSeconds
             arrivalOverride = nil
         } else {
             routeError = "Couldn't find a driving route through these places. Check the addresses and your connection."

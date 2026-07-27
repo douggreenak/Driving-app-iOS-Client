@@ -11,6 +11,17 @@ struct TripDetailView: View {
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+
+    /// The sibling legs of this trip's journey (including itself), in leg order. Fetched on demand
+    /// only when this trip is a journey leg — never loading the whole trip history for a standalone.
+    @State private var journeyLegs: [DriveTrip] = []
+
+    private func loadJourneyLegs() {
+        guard let jid = trip.journeyID else { journeyLegs = []; return }
+        let desc = FetchDescriptor<DriveTrip>(predicate: #Predicate { $0.journeyID == jid },
+                                              sortBy: [SortDescriptor(\.legIndex)])
+        journeyLegs = (try? context.fetch(desc)) ?? []
+    }
     @State private var showPlayback = false
     @State private var showApplySchedule = false
     @State private var showTrim = false
@@ -44,7 +55,7 @@ struct TripDetailView: View {
                 .accessibilityLabel(trip.isFavorite ? "Remove from favorites" : "Add to favorites")
             }
         }
-        .task(id: trip.persistentModelID) { derived = TripDerived(trip: trip) }
+        .task(id: trip.persistentModelID) { derived = TripDerived(trip: trip); loadJourneyLegs() }
         .fullScreenCover(isPresented: $showPlayback) {
             NavigationStack { RoutePlaybackView(trip: trip) }
         }
@@ -71,7 +82,7 @@ struct TripDetailView: View {
                 StatusBanner(status: .forTrip(delaySeconds: trip.delaySeconds))
                 scheduleCard
                 statsRow
-                stopsCard
+                if trip.isJourneyLeg { journeyCard } else { stopsCard }
                 if trip.usedRouteMatching { matchCard }
                 vehicleCard
                 paidByCard
@@ -133,6 +144,61 @@ struct TripDetailView: View {
         Task { await TripStore.syncStops(for: trip) }
     }
 
+    /// Shows every leg of the linked multi-stop journey this trip belongs to — the current leg
+    /// highlighted, the others tappable — plus the journey totals. This is what makes the stops read
+    /// as "separate trips that are linked" rather than one trip with pauses.
+    private var journeyCard: some View {
+        let legs = journeyLegs
+        let totalMiles = legs.reduce(0) { $0 + $1.distance }
+        let totalSecs = legs.reduce(0) { $0 + $1.duration }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Journey", systemImage: "arrow.triangle.branch").font(.headline)
+                Spacer()
+                Text("\(legs.count) legs · \(String(format: "%.1f mi", totalMiles)) · \(durationString(totalSecs))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("One leg of a linked multi-stop trip. Each stop is recorded as its own trip.")
+                .font(.caption2).foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                ForEach(Array(legs.enumerated()), id: \.element.id) { i, leg in
+                    let isCurrent = leg.id == trip.id
+                    NavigationLink { TripDetailView(trip: leg) } label: {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                Circle().fill(isCurrent ? Color.purple : Color.purple.opacity(0.28))
+                                    .frame(width: 24, height: 24)
+                                Text("\(i + 1)").font(.caption2.weight(.bold)).foregroundStyle(.white)
+                            }
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("\(legName(leg.startCoordinate, leg.startAddress)) → \(legName(leg.endCoordinate, leg.endAddress))")
+                                    .font(.subheadline.weight(isCurrent ? .semibold : .regular)).lineLimit(1)
+                                Text("\(String(format: "%.1f mi", leg.distance)) · \(durationString(leg.duration))")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 6)
+                            if isCurrent {
+                                Text("This leg").font(.caption2.weight(.semibold)).foregroundStyle(.purple)
+                            } else {
+                                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 9)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isCurrent)
+                    if i < legs.count - 1 { Divider() }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding().background(Color(.systemGray6), in: .rect(cornerRadius: 16))
+    }
+
+    private func legName(_ coord: CLLocationCoordinate2D, _ fallback: String) -> String {
+        PlaceNamer.name(for: coord, fallback: fallback, in: savedPlaces)
+    }
+
     /// Trim the recorded track (cut off a forgotten stationary tail, or a late start).
     private var trimButton: some View {
         Button {
@@ -165,11 +231,14 @@ struct TripDetailView: View {
     /// cascade rules also delete its track points and fuel entries — and return to the list.
     private func deleteTrip() {
         Haptics.warning()
+        let jid = trip.journeyID
         if let remoteID = trip.remoteID {
             Task { try? await APIClient.deleteTrip(id: remoteID) }
         }
         context.delete(trip)
         try? context.save()
+        // Keep the rest of the journey consistent (renumber, or demote a lone survivor).
+        TripStore.renumberJourney(jid, context: context)
         dismiss()
     }
 

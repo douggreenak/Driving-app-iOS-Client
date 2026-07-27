@@ -115,21 +115,30 @@ struct RouteStop: Codable, Hashable, Identifiable {
     var address: String
     var lat: Double
     var lng: Double
+    /// How many minutes the driver plans to spend at this stop before continuing.
+    /// Factored into the scheduled drive's estimated arrival time. Defaults to 0 (pass-through).
+    var dwellMinutes: Int = 0
+    /// The expected driving time (seconds) for the leg that ends at this stop.
+    /// e.g. for stop 1, this is the driving time from start → stop 1.
+    var legDriveSeconds: Int = 0
 
     var coordinate: CLLocationCoordinate2D { .init(latitude: lat, longitude: lng) }
 
-    // `id` is local-only (not sent to or required from the server) — encode/decode just the
-    // address + coordinate so a stop round-trips cleanly through the JSON API and SwiftData.
-    enum CodingKeys: String, CodingKey { case address, lat, lng }
+    // `id` is local-only (not sent to or required from the server) — encode/decode address,
+    // coordinate, dwellMinutes, and legDriveSeconds so a stop round-trips cleanly through the JSON API and SwiftData.
+    // `dwellMinutes` and `legDriveSeconds` decode with a fallback of 0 so existing records load without error.
+    enum CodingKeys: String, CodingKey { case address, lat, lng, dwellMinutes, legDriveSeconds }
 
-    init(id: UUID = UUID(), address: String, lat: Double, lng: Double) {
+    init(id: UUID = UUID(), address: String, lat: Double, lng: Double, dwellMinutes: Int = 0, legDriveSeconds: Int = 0) {
         self.id = id
         self.address = address
         self.lat = lat
         self.lng = lng
+        self.dwellMinutes = dwellMinutes
+        self.legDriveSeconds = legDriveSeconds
     }
-    init(id: UUID = UUID(), address: String, coordinate: CLLocationCoordinate2D) {
-        self.init(id: id, address: address, lat: coordinate.latitude, lng: coordinate.longitude)
+    init(id: UUID = UUID(), address: String, coordinate: CLLocationCoordinate2D, dwellMinutes: Int = 0, legDriveSeconds: Int = 0) {
+        self.init(id: id, address: address, lat: coordinate.latitude, lng: coordinate.longitude, dwellMinutes: dwellMinutes, legDriveSeconds: legDriveSeconds)
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -137,6 +146,8 @@ struct RouteStop: Codable, Hashable, Identifiable {
         self.address = try c.decode(String.self, forKey: .address)
         self.lat = try c.decode(Double.self, forKey: .lat)
         self.lng = try c.decode(Double.self, forKey: .lng)
+        self.dwellMinutes = (try? c.decode(Int.self, forKey: .dwellMinutes)) ?? 0
+        self.legDriveSeconds = (try? c.decode(Int.self, forKey: .legDriveSeconds)) ?? 0
     }
 }
 
@@ -174,6 +185,13 @@ final class DriveTrip {
     /// Intermediate stops on this trip (multi-stop), start → stops → end. Empty for a simple A→B.
     var stops: [RouteStop] = []
 
+    /// Legs of one multi-stop journey share a `journeyID` (nil for a standalone trip). `legIndex`
+    /// orders them (0-based) and `legTotal` is the journey's leg count. This lets a multi-stop
+    /// drive be recorded as separate, *linked* trips instead of one trip with pauses.
+    var journeyID: UUID?
+    var legIndex: Int = 0
+    var legTotal: Int = 1
+
     var vehicleName: String?
     var vehicleMpg: Double?
     /// Speed-aware fuel estimate (gallons).
@@ -207,6 +225,9 @@ final class DriveTrip {
         get { PaidBy(rawValue: paidByRaw) ?? .myself }
         set { paidByRaw = newValue.rawValue }
     }
+
+    /// True when this trip is one leg of a linked multi-stop journey.
+    var isJourneyLeg: Bool { journeyID != nil && legTotal > 1 }
 
     init(
         date: Date,
@@ -479,12 +500,19 @@ final class ScheduledDrive {
 
     /// Cancel or restore a single occurrence. Canceling affects only this one departure — the
     /// repeat continues and every other occurrence stays scheduled.
+    ///
+    /// The array is rebuilt and reassigned as a whole (rather than mutated in place) so SwiftData
+    /// reliably registers the change and every `@Query` observing this drive — the dashboard's
+    /// "Up Next" hero in particular — re-evaluates immediately. Without the reassignment a canceled
+    /// occurrence could linger in Up Next until an unrelated refresh.
     func setOccurrenceCanceled(_ date: Date, _ canceled: Bool) {
+        var updated = canceledOccurrences
         if canceled {
-            if !isOccurrenceCanceled(date) { canceledOccurrences.append(date) }
+            if !isOccurrenceCanceled(date) { updated.append(date) }
         } else {
-            canceledOccurrences.removeAll { abs($0.timeIntervalSince(date)) < 60 }
+            updated.removeAll { abs($0.timeIntervalSince(date)) < 60 }
         }
+        canceledOccurrences = updated
     }
 
     private func matchesRule(_ date: Date, calendar cal: Calendar) -> Bool {
@@ -568,11 +596,52 @@ final class ScheduledDrive {
         return false
     }
 
+    /// The occurrence nearest to `now` **including canceled ones** — the slot the user is currently
+    /// "in". Unlike `statusReferenceDeparture` (which skips canceled occurrences), this is used to
+    /// detect when the imminent occurrence has been canceled, so the drive isn't rolled forward and
+    /// re-promoted into Up Next behind the user's back.
+    private func rawNearestOccurrence(now: Date) -> Date? {
+        let cal = Calendar.current
+        if repeatRule == .none { return departure }
+        let time = cal.dateComponents([.hour, .minute], from: departure)
+        let firstDay = cal.startOfDay(for: departure)
+        let anchor = cal.date(bySettingHour: time.hour ?? 0, minute: time.minute ?? 0, second: 0, of: now) ?? departure
+        // Nearest raw future occurrence (>= now), ignoring cancellation.
+        var rawNext: Date?
+        var c = anchor
+        for _ in 0..<400 {
+            if c >= now, c >= firstDay, matchesRule(c, calendar: cal), !isSkipped(c) { rawNext = c; break }
+            c = cal.date(byAdding: .day, value: 1, to: c) ?? c
+        }
+        // Nearest raw past occurrence (<= now), ignoring cancellation.
+        var rawPrev: Date?
+        c = anchor
+        for _ in 0..<400 {
+            if c < firstDay { break }
+            if c <= now, matchesRule(c, calendar: cal), !isSkipped(c) { rawPrev = c; break }
+            c = cal.date(byAdding: .day, value: -1, to: c) ?? c
+        }
+        switch (rawPrev, rawNext) {
+        case let (p?, n?): return abs(now.timeIntervalSince(p)) <= abs(n.timeIntervalSince(now)) ? p : n
+        case let (p?, nil): return p
+        case let (nil, n?): return n
+        default: return nil
+        }
+    }
+
     /// The departure this drive is currently "at" for the dashboard's Up Next surface. A drive
     /// that's overdue to leave but hasn't been started still counts (so a *late* drive isn't
     /// skipped in favor of a later on-time one) — within a 6h grace window. Returns nil when
-    /// nothing is pending soon (already driven, or a one-time drive long past).
+    /// nothing is pending soon (already driven, canceled, or a one-time drive long past).
     func upNextDeparture(now: Date = .now) -> Date? {
+        // If the occurrence the user is currently at/near is canceled AND still within its own
+        // window, this drive has nothing pending right now — do NOT roll forward and re-promote the
+        // just-canceled drive (that read as "the canceled trip still shows in Up Next"). Only the
+        // canceled occurrence's own window is suppressed: once it's clearly past, the next
+        // occurrence surfaces normally instead of the drive staying hidden for days. The canceled
+        // occurrence stays visible on the departures board with a CANCELED status throughout.
+        if let raw = rawNearestOccurrence(now: now), isOccurrenceCanceled(raw),
+           now < raw.addingTimeInterval(arrivalBudget + 6 * 3600) { return nil }
         let ref = statusReferenceDeparture(now: now)
         if !wasDriven(ref), !isOccurrenceCanceled(ref), ref >= now.addingTimeInterval(-6 * 3600) { return ref }
         let next = nextDeparture(after: now)
@@ -688,6 +757,14 @@ final class UserSettings {
     var distanceUnit: String
     /// Used to estimate per-drive fuel cost for the paid-by breakdowns.
     var fuelPricePerGallon: Double = 3.75
+    /// Default payer for ad-hoc (non-scheduled) drives — the trip-summary picker and "Go to" trips
+    /// start here. Scheduled drives carry their own payer instead of using this.
+    var defaultPaidByRaw: String = PaidBy.myself.rawValue
+
+    var defaultPaidBy: PaidBy {
+        get { PaidBy(rawValue: defaultPaidByRaw) ?? .myself }
+        set { defaultPaidByRaw = newValue.rawValue }
+    }
 
     init(monthlyBudget: Double = 0, distanceUnit: String = "miles") {
         self.monthlyBudget = monthlyBudget
