@@ -393,6 +393,8 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         legArrivals = []
         legPointBoundaries = []
         finalDestinationName = nil
+        appleMapsExpectedTravelTime = nil
+        appleMapsTravelTimeFetchDate = nil
     }
 
     // MARK: - Derived values
@@ -458,18 +460,54 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         return here.distanceMeters(to: t.coordinate) / 1609.34 * 1.3
     }
 
-    private func eta(forMiles miles: Double?) -> Date? {
-        guard let miles else { return nil }
-        let now = Date()
-        if miles < 0.05 { return now }
-        return now.addingTimeInterval(miles / max(etaSpeedMph, 5) * 3600)
-    }
+     /// Apple Maps remaining travel time (in seconds) to destination, fetched fresh from the API.
+     /// This represents the estimated time to drive the current route from current location to destination.
+     var appleMapsExpectedTravelTime: TimeInterval?
+     /// When this travel time was fetched (used to subtract elapsed time for the ETA).
+     var appleMapsTravelTimeFetchDate: Date?
 
-    /// Overall arrival at the final destination.
-    var etaDate: Date? { eta(forMiles: remainingMiles) }
+     private func eta(forMiles miles: Double?) -> Date? {
+         guard let miles else { return nil }
+         let now = Date()
+         if miles < 0.05 { return now }
+         return now.addingTimeInterval(miles / max(etaSpeedMph, 5) * 3600)
+     }
 
-    /// Arrival at the current leg's target (the next stop).
-    var legEtaDate: Date? { eta(forMiles: legRemainingMiles) }
+     /// Overall arrival at the final destination, primarily using Apple Maps when available.
+     var etaDate: Date? {
+         guard let remaining = remainingMiles else { return nil }
+         let now = Date()
+         if remaining < 0.05 { return now }
+         
+         // Prefer Apple Maps travel time when available and fresh
+         if let travelTime = appleMapsExpectedTravelTime, let fetchDate = appleMapsTravelTimeFetchDate {
+             // Only trust Apple Maps data if it's less than 30 seconds old (still fresh)
+             let age = now.timeIntervalSince(fetchDate)
+             if age < 30 {
+                 return now.addingTimeInterval(travelTime)
+             }
+         }
+         
+         // Fallback to speed-based projection
+         return eta(forMiles: remaining)
+     }
+
+     /// Arrival at the current leg's target (the next stop).
+     var legEtaDate: Date? {
+         guard let remaining = legRemainingMiles else { return nil }
+         let now = Date()
+         if remaining < 0.05 { return now }
+         
+         // Prefer Apple Maps travel time when available and fresh
+         if let travelTime = appleMapsExpectedTravelTime, let fetchDate = appleMapsTravelTimeFetchDate {
+             let age = now.timeIntervalSince(fetchDate)
+             if age < 30 {
+                 return now.addingTimeInterval(travelTime)
+             }
+         }
+         
+         return eta(forMiles: remaining)
+     }
 
     /// Seconds late (positive) or early (negative) vs. the scheduled arrival.
     var delaySeconds: Int? {

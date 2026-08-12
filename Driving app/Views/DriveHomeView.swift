@@ -197,7 +197,7 @@ struct DriveHomeView: View {
         } label: {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Label("Up Next", systemImage: "calendar").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                    Label("Up Next", systemImage: "airplane.departure").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                     Spacer()
                     StatusChip(status: .occurrence(departure: departure,
                                                    scheduledArrival: arrival,
@@ -548,7 +548,7 @@ struct DepartureRow: View {
                         .font(.caption2).foregroundStyle(occ.drive.paidBy.tint)
                 }
                 HStack(spacing: 4) {
-                    Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
+                    Image(systemName: "airplane.departure").font(.caption2).foregroundStyle(.secondary)
                     Text(PlaceNamer.name(for: occ.drive.endCoordinate, fallback: occ.drive.endAddress, in: savedPlaces))
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }

@@ -92,11 +92,7 @@ struct LiveTrackingView: View {
                         if tracker.isMultiLeg {
                             legProgressStrip
                         }
-                        statsHUD
-                        secondaryHUD
-                        if tracker.destination != nil, !tracker.isPausedBetweenLegs {
-                            etaHUD
-                        }
+                        unifiedHUD
                     }
                     Spacer()
                     bottomControls
@@ -407,16 +403,45 @@ struct LiveTrackingView: View {
 
     // MARK: - Stats HUD
 
-    private var statsHUD: some View {
-        HStack(spacing: 0) {
-            statItem(value: String(format: "%.1f", tracker.distanceMiles), unit: "mi",
-                     icon: "point.topleft.down.to.point.bottomright.curvepath.fill")
-            Divider().frame(height: 40)
-            statItem(value: tracker.formattedElapsed(), unit: "time", icon: "clock.fill")
-            Divider().frame(height: 40)
-            statItem(value: String(format: "%.0f", tracker.currentSpeed), unit: "mph", icon: "speedometer")
+    private var unifiedHUD: some View {
+        VStack(spacing: 10) {
+            // Main driving stats: distance, time, speed
+            HStack(spacing: 0) {
+                statItem(value: String(format: "%.1f", tracker.distanceMiles), unit: "mi",
+                         icon: "point.topleft.down.to.point.bottomright.curvepath.fill")
+                Divider().frame(height: 28)
+                statItem(value: tracker.formattedElapsed(), unit: "time", icon: "clock.fill")
+                Divider().frame(height: 28)
+                statItem(value: String(format: "%.0f", tracker.currentSpeed), unit: "mph", icon: "speedometer")
+            }
+            
+            // ETA + on-time status (only if routed and not paused between legs)
+            if tracker.destination != nil, !tracker.isPausedBetweenLegs {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tracker.isMultiLeg ? "ETA (final)" : "ETA")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        if let eta = tracker.etaDate {
+                            Text(eta, format: .dateTime.hour().minute())
+                                .font(.headline).fontWeight(.bold).fontDesign(.rounded)
+                        } else {
+                            Text("—").font(.headline)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    
+                    if tracker.scheduledArrival != nil {
+                        if let delay = tracker.delaySeconds {
+                            StatusChip(status: .live(delaySeconds: delay))
+                        } else {
+                            StatusChip(status: .liveEnRoute)
+                        }
+                    }
+                }
+                .padding(.horizontal, 4)
+            }
         }
-        .padding(.vertical, 12).padding(.horizontal, 4)
+        .padding(.vertical, 12).padding(.horizontal, 12)
         .background(.ultraThinMaterial, in: .rect(cornerRadius: 16))
         .transition(.move(edge: .top).combined(with: .opacity))
     }
@@ -431,30 +456,11 @@ struct LiveTrackingView: View {
         .frame(maxWidth: .infinity)
     }
 
-    // A second, slimmer row of live data for richer at-a-glance telemetry.
-    private var secondaryHUD: some View {
-        HStack(spacing: 0) {
-            miniStat(String(format: "%.0f", tracker.avgSpeedMph), "avg mph")
-            Divider().frame(height: 26)
-            miniStat(String(format: "%.0f", tracker.maxSpeed), "max mph")
-            Divider().frame(height: 26)
-            miniStat(movingTimeString, "moving")
-            if let mpg = selectedVehicle?.avgMpg, mpg > 0 {
-                Divider().frame(height: 26)
-                miniStat(String(format: "%.2f", tracker.accumulatedGallons), "gal")
-            }
-        }
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: .rect(cornerRadius: 14))
-        .transition(.move(edge: .top).combined(with: .opacity))
-    }
-
     private func miniStat(_ value: String, _ unit: String) -> some View {
         VStack(spacing: 1) {
             Text(value).font(.subheadline.weight(.semibold)).fontDesign(.rounded)
             Text(unit).font(.caption2).foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity)
     }
 
     private var movingTimeString: String {
@@ -462,47 +468,6 @@ struct LiveTrackingView: View {
         let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
         if h > 0 { return String(format: "%d:%02d:%02d", h, m, sec) }
         return String(format: "%d:%02d", m, sec)
-    }
-
-    // MARK: - ETA / delay HUD
-
-    private var etaHUD: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(tracker.isMultiLeg ? "ETA (final)" : "ETA").font(.caption2).foregroundStyle(.secondary)
-                if let eta = tracker.etaDate {
-                    Text(eta, format: .dateTime.hour().minute())
-                        .font(.headline).fontDesign(.rounded)
-                } else {
-                    Text("—").font(.headline)
-                }
-                if let dest = tracker.finalDestinationName ?? tracker.destinationName {
-                    Text(dest).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            Spacer()
-            if let scheduled = tracker.scheduledArrival {
-                VStack(alignment: .center, spacing: 2) {
-                    Text("Scheduled").font(.caption2).foregroundStyle(.secondary)
-                    Text(scheduled, format: .dateTime.hour().minute())
-                        .font(.subheadline.weight(.medium))
-                }
-                Spacer()
-            }
-            if tracker.scheduledArrival != nil {
-                // A scheduled / "Go to" drive always has a target — so show its on-time verdict once
-                // an ETA exists, and a neutral "EN ROUTE" (never "NO SCHEDULE") until the first fix
-                // lets us compute one.
-                if let delay = tracker.delaySeconds {
-                    StatusChip(status: .live(delaySeconds: delay))
-                } else {
-                    StatusChip(status: .liveEnRoute)
-                }
-            }
-        }
-        .padding(.horizontal, 16).padding(.vertical, 12)
-        .background(.ultraThinMaterial, in: .rect(cornerRadius: 16))
-        .transition(.move(edge: .top).combined(with: .opacity))
     }
 
     // MARK: - Recovery banner
@@ -887,20 +852,26 @@ struct LiveTrackingView: View {
     #endif
 
     /// Fetch the fastest road route from the current location to the destination for the dotted
-    /// guide line. Throttled: only re-routes after the driver has moved ~350 m (or when we have no
-    /// line yet), keeping well under MapKit's directions rate limit while still re-routing on
-    /// meaningful deviations.
+    /// guide line. Prioritizes Apple Maps' recommended (fastest) route. Throttled: only re-routes
+    /// after the driver has moved ~250 m (or when we have no line yet), keeping well under MapKit's
+    /// directions rate limit while still re-routing on meaningful deviations.
     private func refreshEfficientRoute() {
         guard tracker.isTracking, let dest = tracker.destination, let from = tracker.currentLocation else { return }
-        if let last = lastRouteFetchFrom, !efficientRoute.isEmpty, from.distanceMeters(to: last) < 350 { return }
+        // More aggressive refresh threshold to stay up-to-date with Apple Maps route
+        if let last = lastRouteFetchFrom, !efficientRoute.isEmpty, from.distanceMeters(to: last) < 250 { return }
         lastRouteFetchFrom = from
         Task {
             let routes = await RouteMatcher.candidateRoutes(from: from, to: dest)
-            guard let best = routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) else { return }
+            guard let best = routes.first else { return }  // Apple Maps returns fastest first
             let coords = best.polyline.coordinates()
+            let travelTime = best.expectedTravelTime
             await MainActor.run {
                 // Ignore a stale response if the drive ended while it was in flight.
-                if tracker.isTracking { efficientRoute = coords }
+                if tracker.isTracking {
+                    efficientRoute = coords
+                    tracker.appleMapsExpectedTravelTime = travelTime
+                    tracker.appleMapsTravelTimeFetchDate = Date()
+                }
             }
         }
     }

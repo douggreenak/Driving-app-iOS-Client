@@ -30,14 +30,17 @@ enum RouteMatcher {
     /// Points within this distance of a candidate road are considered "on road".
     static let toleranceMeters: Double = 35
 
-    /// Fetch candidate driving routes between two coordinates. Returns [] on failure (e.g. offline).
+    /// Fetch candidate driving routes between two coordinates, preferring the fastest route
+    /// (Apple Maps recommended). Returns routes sorted by travel time (fastest first).
+    /// Set `allowAlternates` to false for live navigation (avoid slower alternate routes).
     static func candidateRoutes(from start: CLLocationCoordinate2D,
-                                to end: CLLocationCoordinate2D) async -> [MKRoute] {
+                                to end: CLLocationCoordinate2D,
+                                allowAlternates: Bool = false) async -> [MKRoute] {
         let request = MKDirections.Request()
         request.source = MKMapItem(placemark: MKPlacemark(coordinate: start))
         request.destination = MKMapItem(placemark: MKPlacemark(coordinate: end))
         request.transportType = .automobile
-        request.requestsAlternateRoutes = true
+        request.requestsAlternateRoutes = allowAlternates
         do {
             return try await MKDirections(request: request).calculate().routes
         } catch {
@@ -61,7 +64,7 @@ enum RouteMatcher {
             request.destination = MKMapItem(placemark: MKPlacemark(coordinate: waypoints[i]))
             request.transportType = .automobile
             guard let response = try? await MKDirections(request: request).calculate(),
-                  let route = response.routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime })
+                  let route = response.routes.first
             else { return nil }
             let s = Int(route.expectedTravelTime)
             totalSeconds += s
@@ -71,15 +74,16 @@ enum RouteMatcher {
         return (totalSeconds, coords, legSeconds)
     }
 
-    /// Match a recorded track to roads. `points` must be in chronological order.
-    static func match(points: [RecordedPoint]) async -> Result {
-        let coords = points.map(\.coordinate)
-        guard let start = coords.first, let end = coords.last, coords.count >= 2 else {
-            return Result(coordinates: coords, onRoad: Array(repeating: false, count: coords.count),
-                          fitMeters: 0, matchedFraction: 0, usedRoute: false)
-        }
+     /// Match a recorded track to roads. `points` must be in chronological order.
+     static func match(points: [RecordedPoint]) async -> Result {
+         let coords = points.map(\.coordinate)
+         guard let start = coords.first, let end = coords.last, coords.count >= 2 else {
+             return Result(coordinates: coords, onRoad: Array(repeating: false, count: coords.count),
+                           fitMeters: 0, matchedFraction: 0, usedRoute: false)
+         }
 
-        let routes = await candidateRoutes(from: start, to: end)
+         // Request alternates for historical route matching to find the best-fitting route
+         let routes = await candidateRoutes(from: start, to: end, allowAlternates: true)
         guard !routes.isEmpty else {
             // Offline / no route available: keep the raw track.
             return Result(coordinates: coords, onRoad: Array(repeating: false, count: coords.count),

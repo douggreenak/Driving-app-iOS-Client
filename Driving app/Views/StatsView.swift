@@ -303,7 +303,7 @@ struct StatsView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(PlaceNamer.name(for: trip.startCoordinate, fallback: trip.startAddress, in: savedPlaces)).font(.subheadline.weight(.medium)).lineLimit(1)
-                        Label(PlaceNamer.name(for: trip.endCoordinate, fallback: trip.endAddress, in: savedPlaces), systemImage: "arrow.right").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                        Label(PlaceNamer.name(for: trip.endCoordinate, fallback: trip.endAddress, in: savedPlaces), systemImage: "airplane.arrival").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 4) {

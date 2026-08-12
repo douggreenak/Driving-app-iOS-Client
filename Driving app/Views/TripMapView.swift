@@ -19,9 +19,6 @@ struct TripMapView: View {
                             MapPolyline(coordinates: coords)
                                 .stroke(.blue.opacity(0.8), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
                         }
-                        Marker(PlaceNamer.name(for: trip.endCoordinate, fallback: trip.endAddress, in: savedPlaces),
-                               systemImage: "mappin", coordinate: trip.endCoordinate)
-                            .tint(.red)
                     }
                 }
                 .mapControls { MapUserLocationButton(); MapCompass(); MapScaleView() }

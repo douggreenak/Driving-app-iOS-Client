@@ -229,7 +229,7 @@ struct TripSummaryView: View {
             if !startAddress.isEmpty || !endAddress.isEmpty {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Label("From", systemImage: "flag.fill")
+                        Label("From", systemImage: "airplane.departure")
                             .font(.caption)
                             .foregroundStyle(.green)
                         Text(startAddress.isEmpty ? "Resolving..." : startAddress)
@@ -237,7 +237,7 @@ struct TripSummaryView: View {
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 4) {
-                        Label("To", systemImage: "mappin")
+                        Label("To", systemImage: "airplane.arrival")
                             .font(.caption)
                             .foregroundStyle(.red)
                         Text(endAddress.isEmpty ? "Resolving..." : endAddress)

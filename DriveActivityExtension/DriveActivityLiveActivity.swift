@@ -19,25 +19,25 @@ struct DriveActivityLiveActivity: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label(miles(context), systemImage: "road.lanes").font(.caption).foregroundStyle(.blue)
+                    Label(miles(context), systemImage: "airplane.departure").font(.caption).foregroundStyle(.blue)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Label(arrival(context), systemImage: "flag.checkered")
+                    Label(arrival(context), systemImage: "airplane.arrival")
                         .font(.caption).foregroundStyle(delayColor(context))
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 4) {
                         ProgressView(value: context.state.progress ?? 0)
                             .tint(delayColor(context))
-                        Text(context.attributes.tripTitle).font(.caption2).foregroundStyle(.secondary)
+                        Text(context.state.destinationName ?? context.attributes.tripTitle).font(.caption2).foregroundStyle(.secondary)
                     }
                 }
             } compactLeading: {
-                Image(systemName: "car.fill").foregroundStyle(.blue)
+                Image(systemName: "airplane.departure").foregroundStyle(.blue)
             } compactTrailing: {
                 Text(shortProgress(context)).font(.caption2).monospacedDigit()
             } minimal: {
-                Image(systemName: "car.fill").foregroundStyle(.blue)
+                Image(systemName: "airplane.departure").foregroundStyle(.blue)
             }
         }
     }
@@ -78,7 +78,7 @@ private struct LockScreenView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label(context.attributes.tripTitle, systemImage: "car.fill")
+                Label(context.attributes.tripTitle, systemImage: "airplane.departure")
                     .font(.headline).foregroundStyle(.white)
                 Spacer()
                 if let dest = context.state.destinationName {
@@ -97,7 +97,7 @@ private struct LockScreenView: View {
                 Spacer()
                 VStack(spacing: 1) {
                     Text(statusText).font(.caption2.weight(.bold)).foregroundStyle(delayColor)
-                    Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
+                    Image(systemName: "airplane.arrival").font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 1) {

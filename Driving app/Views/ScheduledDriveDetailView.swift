@@ -110,7 +110,10 @@ struct ScheduledDriveDetailView: View {
             HStack {
                 endpoint(startName, departure, startColor, .leading)
                 Spacer(minLength: 8)
-                Image(systemName: "arrow.right").foregroundStyle(.white.opacity(0.7))
+                VStack(spacing: 4) {
+                    Image(systemName: "airplane.departure").font(.subheadline).foregroundStyle(.white.opacity(0.7))
+                    Image(systemName: "airplane.arrival").font(.subheadline).foregroundStyle(.white.opacity(0.7))
+                }
                 Spacer(minLength: 8)
                 endpoint(endName, arrival, endColor, .trailing)
             }
@@ -164,7 +167,7 @@ struct ScheduledDriveDetailView: View {
                 timeColumn("DEPARTS", departure, startName, .leading)
                 Spacer()
                 VStack(spacing: 4) {
-                    Image(systemName: "car.fill").foregroundStyle(.blue)
+                    Image(systemName: "airplane.departure").foregroundStyle(.blue)
                     Text(travelString(drive.estimatedTravelTime)).font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()

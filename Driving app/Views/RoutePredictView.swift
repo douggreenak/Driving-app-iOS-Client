@@ -183,7 +183,7 @@ struct RoutePredictView: View {
             request.transportType = .automobile
             do {
                 let response = try await MKDirections(request: request).calculate()
-                guard let route = response.routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) else {
+                guard let route = response.routes.first else {
                     routeError = "Couldn't find a driving route for one of the legs."
                     return
                 }

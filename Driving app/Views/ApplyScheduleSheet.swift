@@ -96,7 +96,7 @@ struct ApplyScheduleSheet: View {
 
                 // Route: start → (stops) → destination
                 HStack(spacing: 6) {
-                    Image(systemName: "flag.fill").font(.caption2).foregroundStyle(.green)
+                    Image(systemName: "airplane.departure").font(.caption2).foregroundStyle(.green)
                     Text(name(s.startCoordinate, s.startAddress)).font(.caption).lineLimit(1)
                     Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
                     if !s.stops.isEmpty {
@@ -104,7 +104,7 @@ struct ApplyScheduleSheet: View {
                             .font(.caption2).foregroundStyle(.orange)
                         Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
                     }
-                    Image(systemName: "mappin").font(.caption2).foregroundStyle(.red)
+                    Image(systemName: "airplane.arrival").font(.caption2).foregroundStyle(.red)
                     Text(name(s.endCoordinate, s.endAddress)).font(.caption).lineLimit(1)
                 }
 

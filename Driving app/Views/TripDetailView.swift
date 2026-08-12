@@ -278,8 +278,10 @@ struct TripDetailView: View {
             HStack {
                 endpointLabel(title: startName, time: trip.date, tint: startTint, align: .leading)
                 Spacer(minLength: 8)
-                Image(systemName: "arrow.right")
-                    .foregroundStyle(.white.opacity(0.7))
+                VStack(spacing: 4) {
+                    Image(systemName: "airplane.departure").font(.subheadline).foregroundStyle(.white.opacity(0.7))
+                    Image(systemName: "airplane.arrival").font(.subheadline).foregroundStyle(.white.opacity(0.7))
+                }
                 Spacer(minLength: 8)
                 endpointLabel(title: endName, time: trip.endDate, tint: endTint, align: .trailing)
             }
@@ -319,7 +321,7 @@ struct TripDetailView: View {
                            sub: startName, tint: startTint, align: .leading)
                 Spacer()
                 VStack(spacing: 4) {
-                    Image(systemName: "car.fill")
+                    Image(systemName: "airplane.departure")
                         .foregroundStyle(.blue)
                     Text(durationString(trip.duration))
                         .font(.caption2)
