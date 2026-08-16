@@ -28,6 +28,15 @@ struct DrivingStats {
         var value: String
         var icon: String
     }
+    /// Miles/gallons/drives for one payer group (keyed by `PayerGroup.key` in `byPayer`).
+    struct PayerBucket {
+        var miles = 0.0
+        var gallons = 0.0
+        var drives = 0
+        /// Gallons billable at the current pump price: only fuel burned since each car's last
+        /// fill-up. Cost is computed from this so the price applies to the current tank only.
+        var billableGallons = 0.0
+    }
 
     // Totals
     var driveCount = 0
@@ -35,21 +44,19 @@ struct DrivingStats {
     var totalSeconds = 0
     var totalGallons = 0.0
 
-    // Paid-by breakdown (the app's core: which drives parents cover)
-    var selfMiles = 0.0, parentsMiles = 0.0
-    var selfGallons = 0.0, parentsGallons = 0.0
-    var selfDrives = 0, parentsDrives = 0
-
-    /// Gallons billable at the current pump price: only fuel burned since each car's last fill-up.
-    /// Cost is computed from these so the price applies to the current tank only.
-    var selfBillableGallons = 0.0, parentsBillableGallons = 0.0
+    /// Paid-by breakdown (the app's core: which drives which group covers), keyed by `PayerGroup.key`.
+    /// Every payer group that ever appears on a trip gets an entry — including one whose group has
+    /// since been archived/deleted, so historical totals never silently vanish.
+    var byPayer: [String: PayerBucket] = [:]
     var totalBillableGallons = 0.0
 
-    func gallons(for payer: PaidBy) -> Double { payer == .parents ? parentsGallons : selfGallons }
-    func miles(for payer: PaidBy) -> Double { payer == .parents ? parentsMiles : selfMiles }
-    func drives(for payer: PaidBy) -> Int { payer == .parents ? parentsDrives : selfDrives }
-    func billableGallons(for payer: PaidBy) -> Double { payer == .parents ? parentsBillableGallons : selfBillableGallons }
-    func cost(for payer: PaidBy, pricePerGallon: Double) -> Double { billableGallons(for: payer) * pricePerGallon }
+    /// Bucket for `key`, or an all-zero bucket if it never appeared in any trip (never crashes/nils).
+    func bucket(for key: String) -> PayerBucket { byPayer[key] ?? PayerBucket() }
+    func gallons(for key: String) -> Double { bucket(for: key).gallons }
+    func miles(for key: String) -> Double { bucket(for: key).miles }
+    func drives(for key: String) -> Int { bucket(for: key).drives }
+    func billableGallons(for key: String) -> Double { bucket(for: key).billableGallons }
+    func cost(for key: String, pricePerGallon: Double) -> Double { billableGallons(for: key) * pricePerGallon }
     func totalCost(pricePerGallon: Double) -> Double { totalBillableGallons * pricePerGallon }
 
     var avgMph: Double { totalSeconds > 0 ? totalMiles / (Double(totalSeconds) / 3600) : 0 }
@@ -99,13 +106,10 @@ struct DrivingStats {
             let billable = fillUp == nil || t.date >= fillUp!
             if billable { totalBillableGallons += t.estimatedGallons }
 
-            if t.paidBy == .parents {
-                parentsMiles += t.distance; parentsGallons += t.estimatedGallons; parentsDrives += 1
-                if billable { parentsBillableGallons += t.estimatedGallons }
-            } else {
-                selfMiles += t.distance; selfGallons += t.estimatedGallons; selfDrives += 1
-                if billable { selfBillableGallons += t.estimatedGallons }
-            }
+            var bucket = byPayer[t.paidByRaw] ?? PayerBucket()
+            bucket.miles += t.distance; bucket.gallons += t.estimatedGallons; bucket.drives += 1
+            if billable { bucket.billableGallons += t.estimatedGallons }
+            byPayer[t.paidByRaw] = bucket
 
             longestMiles = max(longestMiles, t.distance)
             longestSeconds = max(longestSeconds, t.duration)

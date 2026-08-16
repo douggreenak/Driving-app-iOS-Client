@@ -34,7 +34,8 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     var scheduledArrival: Date?
     var tripName: String?
     var plannedCategory: TripCategory = .other
-    var plannedPaidBy: PaidBy = .myself
+    /// Who's paying, as a `PayerGroup.key` (see Models/PayerGroup.swift).
+    var plannedPaidBy: String = PayerGroup.selfKey
     var plannedVehicleName: String?
     /// Intermediate stops carried from a scheduled drive so the recorded trip keeps them.
     var plannedStops: [RouteStop] = []
@@ -280,7 +281,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
             category: plannedCategory.rawValue,
             vehicleName: plannedVehicleName,
             tripName: tripName,
-            paidBy: plannedPaidBy.rawValue,
+            paidBy: plannedPaidBy,
             finalDestinationName: finalDestinationName,
             legTargets: legTargets,
             currentLegIndex: currentLegIndex,
@@ -341,7 +342,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         scheduledDeparture = m.scheduledDeparture
         tripName = m.tripName
         plannedCategory = TripCategory(rawValue: m.category) ?? .other
-        plannedPaidBy = PaidBy(rawValue: m.paidBy) ?? .myself
+        plannedPaidBy = m.paidBy
         plannedVehicleName = m.vehicleName
         finalDestinationName = m.finalDestinationName
         legTargets = m.legTargets
@@ -383,7 +384,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         scheduledArrival = nil
         tripName = nil
         plannedCategory = .other
-        plannedPaidBy = .myself
+        plannedPaidBy = PayerGroup.selfKey
         plannedVehicleName = nil
         plannedStops = []
         legTargets = []
@@ -622,7 +623,8 @@ final class DriveLogger {
         var vehicleName: String?
         var tripName: String? = nil
         /// Who pays for this drive's gas — the app's core concept — so recovery/resume keeps it.
-        var paidBy: String = PaidBy.myself.rawValue
+        /// A `PayerGroup.key`.
+        var paidBy: String = PayerGroup.selfKey
         // Multi-leg progress, so a recovered/resumed drive keeps its stops and current leg.
         var finalDestinationName: String? = nil
         var legTargets: [RouteStop] = []
@@ -722,7 +724,7 @@ extension DriveLogger.Meta {
         category = try c.decodeIfPresent(String.self, forKey: .category) ?? TripCategory.other.rawValue
         vehicleName = try c.decodeIfPresent(String.self, forKey: .vehicleName)
         tripName = try c.decodeIfPresent(String.self, forKey: .tripName)
-        paidBy = try c.decodeIfPresent(String.self, forKey: .paidBy) ?? PaidBy.myself.rawValue
+        paidBy = try c.decodeIfPresent(String.self, forKey: .paidBy) ?? PayerGroup.selfKey
         finalDestinationName = try c.decodeIfPresent(String.self, forKey: .finalDestinationName)
         legTargets = try c.decodeIfPresent([RouteStop].self, forKey: .legTargets) ?? []
         currentLegIndex = try c.decodeIfPresent(Int.self, forKey: .currentLegIndex) ?? 0

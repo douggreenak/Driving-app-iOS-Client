@@ -11,6 +11,8 @@ struct StatsView: View {
     @Query private var settingsList: [UserSettings]
     @Query private var vehicles: [Vehicle]
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
+    @Environment(\.tabActivityToken) private var activityToken
 
     private var fuelPrice: Double { settingsList.first?.fuelPricePerGallon ?? 3.75 }
 
@@ -39,7 +41,9 @@ struct StatsView: View {
                 }
                 .sheet(isPresented: $showingEditLayout) { StatsLayoutEditor() }
                 .refreshable { await loadGas() }
-                .task { await loadGas() }
+                // `.task(id:)` so this refetches on every tab revisit / app-foreground, not just the
+                // first time this view is created (a bare `.task` doesn't refire on a tab switch).
+                .task(id: activityToken) { await loadGas() }
         }
     }
 
@@ -107,24 +111,33 @@ struct StatsView: View {
     private func paidBySection(_ stats: DrivingStats) -> some View {
         let price = fuelPrice
         let total = max(stats.totalCost(pricePerGallon: price), 0.01)
+        // Every payer that appears in the trip history, resolved to its group — includes an archived
+        // (removed-from-pickers) group so its historical spending isn't silently dropped, but never
+        // shows one with zero drives (e.g. a brand-new, never-used group).
+        let keys = Set(payerGroups.map(\.key)).union(stats.byPayer.keys)
+        let order = Dictionary(uniqueKeysWithValues: payerGroups.enumerated().map { ($1.key, $0) })
+        let payers = keys
+            .map { PayerGroup.resolve(key: $0, in: payerGroups) }
+            .filter { stats.drives(for: $0.key) > 0 }
+            .sorted { (order[$0.key] ?? .max) < (order[$1.key] ?? .max) }
         return VStack(alignment: .leading, spacing: 12) {
             sectionHeader("Who's paying for gas", "dollarsign.circle.fill")
-            ForEach(PaidBy.allCases, id: \.self) { payer in
-                let cost = stats.cost(for: payer, pricePerGallon: price)
+            ForEach(payers) { payer in
+                let cost = stats.cost(for: payer.key, pricePerGallon: price)
                 VStack(alignment: .leading, spacing: 5) {
                     HStack {
-                        Label(payer.label, systemImage: payer.icon)
-                            .font(.subheadline.weight(.semibold)).foregroundStyle(payer.tint)
+                        Label(payer.name, systemImage: payer.icon)
+                            .font(.subheadline.weight(.semibold)).foregroundStyle(payer.color)
                         Spacer()
                         Text(cost, format: .currency(code: "USD"))
                             .font(.system(.title3, design: .rounded, weight: .bold))
                     }
                     GeometryReader { geo in
-                        Capsule().fill(payer.tint.gradient)
+                        Capsule().fill(payer.color.gradient)
                             .frame(width: max(6, geo.size.width * CGFloat(cost / total)), height: 8)
                     }
                     .frame(height: 8)
-                    Text("\(stats.drives(for: payer)) drives · \(format(stats.miles(for: payer))) mi · \(String(format: "%.1f", stats.gallons(for: payer))) gal")
+                    Text("\(stats.drives(for: payer.key)) drives · \(format(stats.miles(for: payer.key))) mi · \(String(format: "%.1f", stats.gallons(for: payer.key))) gal")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }
@@ -263,8 +276,12 @@ struct StatsView: View {
                 Text(g.totalSpent, format: .currency(code: "USD"))
                     .font(.system(.largeTitle, design: .rounded, weight: .bold))
                 if g.totalSpent > 0 {
-                    BarRow(label: "Paid by Me", amount: g.selfPaid, total: g.totalSpent, color: .blue)
-                    BarRow(label: "Paid by Parents", amount: g.parentsPaid, total: g.totalSpent, color: .green)
+                    // The backend's own per-payer breakdown (`selfPaid`/`parentsPaid`) is a fixed
+                    // two-bucket schema that can't reflect a 3rd+ custom payer group, so it's
+                    // deliberately not shown here — the "Who's paying for gas" card above already
+                    // covers this, computed locally and fully dynamic across every group.
+                    Text("See \"Who's paying for gas\" above for the breakdown by payer.")
+                        .font(.caption2).foregroundStyle(.tertiary)
                 } else {
                     Text("No fuel purchases logged yet").font(.subheadline).foregroundStyle(.secondary)
                 }
@@ -373,20 +390,6 @@ private struct HeroTile: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(Color(.systemGray6), in: .rect(cornerRadius: 14))
-    }
-}
-
-private struct BarRow: View {
-    let label: String, amount: Double, total: Double, color: Color
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(label).font(.subheadline)
-                Spacer()
-                Text(amount, format: .currency(code: "USD")).font(.subheadline.weight(.semibold))
-            }
-            ProgressView(value: total > 0 ? amount / total : 0).tint(color)
-        }
     }
 }
 

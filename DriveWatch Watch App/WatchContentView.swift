@@ -180,8 +180,8 @@ private struct UpNextView: View {
                 HStack(spacing: 6) {
                     Text(drive.title).font(hero ? .headline : .subheadline.weight(.semibold)).lineLimit(1)
                     Spacer(minLength: 2)
-                    Image(systemName: drive.paidByParents ? "person.2.fill" : "person.fill")
-                        .font(.caption2).foregroundStyle(drive.paidByParents ? .green : .blue)
+                    Image(systemName: drive.payerIconName)
+                        .font(.caption2).foregroundStyle(WatchPayerColor.color(for: drive.payerColorName))
                 }
                 HStack(spacing: 4) {
                     Image(systemName: "mappin").font(.system(size: 9)).foregroundStyle(.secondary)

@@ -13,6 +13,7 @@ struct ApplyScheduleSheet: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \ScheduledDrive.createdAt, order: .reverse) private var schedules: [ScheduledDrive]
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
 
     @State private var showManual = false
 
@@ -91,7 +92,7 @@ struct ApplyScheduleSheet: View {
                     Image(systemName: s.category.icon).font(.subheadline).foregroundStyle(.blue)
                     Text(s.title).font(.headline).lineLimit(1)
                     Spacer()
-                    PayerChip(payer: s.paidBy)
+                    PayerChip(PayerGroup.resolve(key: s.paidByRaw, in: payerGroups))
                 }
 
                 // Route: start → (stops) → destination

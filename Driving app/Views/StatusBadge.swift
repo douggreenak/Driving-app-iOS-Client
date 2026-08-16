@@ -1,34 +1,46 @@
 import SwiftUI
 
-extension PaidBy {
-    /// Color used everywhere the payer is shown — parents (green) vs me (blue).
-    var tint: Color { self == .parents ? .green : .blue }
-}
-
 extension Color {
     /// Delayed / late status. A vivid amber that reads brightly on the dark UI and stays
     /// clearly distinct from the canceled red and the on-time green (plain system orange
     /// looked muddy on black and sat too close to red).
     static let statusDelay = Color(red: 1.0, green: 0.62, blue: 0.04)
+
+    /// The live-tracking guide route ahead ("where to drive"). A vivid sky-cyan, deliberately a
+    /// different hue from the traveled track's plain `.blue` so the two don't blur into one line
+    /// where they meet at the current position.
+    static let driveGuideRoute = Color(red: 0.30, green: 0.78, blue: 1.0)
 }
 
 /// A small filled chip showing who pays for a drive's gas.
 struct PayerChip: View {
-    let payer: PaidBy
+    let payer: PayerDisplay
     var compact: Bool = false
+
+    init(_ payer: PayerDisplay, compact: Bool = false) {
+        self.payer = payer
+        self.compact = compact
+    }
+
+    /// Convenience for a live `PayerGroup` (rather than an already-resolved `PayerDisplay`).
+    init(_ group: PayerGroup, compact: Bool = false) {
+        self.payer = group.display
+        self.compact = compact
+    }
+
     var body: some View {
         HStack(spacing: 3) {
             Image(systemName: payer.icon)
-            Text(payer.label)
+            Text(payer.name)
         }
         .font(compact ? .caption2.weight(.bold) : .caption.weight(.bold))
         .foregroundStyle(.white)
         .lineLimit(1)
         .padding(.horizontal, compact ? 7 : 9).padding(.vertical, compact ? 3 : 5)
-        .background(payer.tint, in: .capsule)
+        .background(payer.color, in: .capsule)
         .fixedSize()
         .accessibilityElement()
-        .accessibilityLabel("Paid by \(payer.label)")
+        .accessibilityLabel("Paid by \(payer.name)")
     }
 }
 

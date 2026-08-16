@@ -1,15 +1,40 @@
 import Foundation
 import Observation
+import SwiftUI
 import WatchConnectivity
+
+/// Resolves a payer group's `colorName` (sent from the phone — see `PayerGroup.colorPresets` in the
+/// app target) to a `Color`. The watch has no `PayerGroup` model of its own, so this small mirrored
+/// lookup table is the only place that name set needs to stay in sync between targets.
+enum WatchPayerColor {
+    private static let presets: [String: Color] = [
+        "blue": .blue, "green": .green, "orange": .orange, "purple": .purple,
+        "pink": .pink, "teal": .teal, "red": .red, "yellow": .yellow, "indigo": .indigo,
+    ]
+    static func color(for name: String) -> Color { presets[name] ?? .blue }
+}
 
 /// Mirror of the phone's `WatchSyncPayload`. Keep the field names identical on both sides.
 struct WatchSyncPayload: Codable {
+    /// A payer group's resolved display attributes + cost, as sent from the phone — the watch has no
+    /// `PayerGroup` store of its own, so it always renders from these already-resolved strings.
+    struct PayerStat: Codable, Identifiable {
+        var key: String
+        var name: String
+        var iconName: String
+        var colorName: String
+        var cost: Double
+        var id: String { key }
+    }
     struct Drive: Codable, Identifiable {
         var id: String
         var title: String
         var departure: Date
         var endName: String
-        var paidByParents: Bool
+        var payerKey: String
+        var payerName: String
+        var payerIconName: String
+        var payerColorName: String
     }
     struct Stats: Codable {
         var totalMiles: Double
@@ -17,8 +42,7 @@ struct WatchSyncPayload: Codable {
         var totalGallons: Double
         var totalSeconds: Int
         var topSpeed: Double
-        var meCost: Double
-        var parentsCost: Double
+        var payerStats: [PayerStat]
         var onTimePercent: Double
         var scheduledCount: Int
     }
@@ -110,15 +134,21 @@ extension WatchSyncPayload {
         WatchSyncPayload(
             drives: [
                 .init(id: "1", title: "Morning Commute", departure: Date().addingTimeInterval(25 * 60),
-                      endName: "Apex Engineering", paidByParents: true),
+                      endName: "Apex Engineering", payerKey: "PARENTS", payerName: "Parents",
+                      payerIconName: "person.2.fill", payerColorName: "green"),
                 .init(id: "2", title: "Gym", departure: Date().addingTimeInterval(3 * 3600),
-                      endName: "The Alaska Club", paidByParents: false),
+                      endName: "The Alaska Club", payerKey: "SELF", payerName: "Me",
+                      payerIconName: "person.fill", payerColorName: "blue"),
                 .init(id: "3", title: "School Pickup", departure: Date().addingTimeInterval(5 * 3600),
-                      endName: "Home", paidByParents: true),
+                      endName: "Home", payerKey: "PARENTS", payerName: "Parents",
+                      payerIconName: "person.2.fill", payerColorName: "green"),
             ],
             stats: .init(totalMiles: 1240, totalDrives: 68, totalGallons: 47.5,
                          totalSeconds: 41 * 3600, topSpeed: 72,
-                         meCost: 38.20, parentsCost: 121.55,
+                         payerStats: [
+                            .init(key: "SELF", name: "Me", iconName: "person.fill", colorName: "blue", cost: 38.20),
+                            .init(key: "PARENTS", name: "Parents", iconName: "person.2.fill", colorName: "green", cost: 121.55),
+                         ],
                          onTimePercent: 86, scheduledCount: 40))
     }
 

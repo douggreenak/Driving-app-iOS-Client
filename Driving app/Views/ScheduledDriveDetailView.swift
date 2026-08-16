@@ -11,12 +11,13 @@ struct ScheduledDriveDetailView: View {
     var occurrence: Date? = nil
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
+    @Environment(ActiveDriveController.self) private var activeDrive
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
 
     @State private var routeCoords: [CLLocationCoordinate2D] = []
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var loadingRoute = true
-    @State private var showStart = false
     @State private var showEdit = false
     @State private var showDeleteConfirm = false
 
@@ -71,7 +72,6 @@ struct ScheduledDriveDetailView: View {
             }
         }
         .task { await loadRoute() }
-        .fullScreenCover(isPresented: $showStart) { LiveTrackingView(scheduled: drive) }
         .sheet(isPresented: $showEdit) { NewScheduledDriveView(editing: drive, occurrenceDate: departure) }
     }
 
@@ -207,17 +207,20 @@ struct ScheduledDriveDetailView: View {
     // MARK: - Details
 
     private var detailsCard: some View {
-        VStack(spacing: 0) {
+        let current = PayerGroup.resolve(key: drive.paidByRaw, in: payerGroups)
+        return VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Image(systemName: "dollarsign.circle.fill").foregroundStyle(drive.paidBy.tint).frame(width: 24)
+                Image(systemName: "dollarsign.circle.fill").foregroundStyle(current.color).frame(width: 24)
                 Text("Paid by").foregroundStyle(.secondary)
                 Spacer()
                 Menu {
-                    ForEach(PaidBy.allCases, id: \.self) { p in
-                        Button { drive.paidBy = p; try? context.save() } label: { Label(p.label, systemImage: p.icon) }
+                    ForEach(payerGroups.filter { !$0.isArchived }) { group in
+                        Button { drive.paidByRaw = group.key; try? context.save() } label: {
+                            Label(group.name, systemImage: group.icon)
+                        }
                     }
                 } label: {
-                    PayerChip(payer: drive.paidBy, compact: true)
+                    PayerChip(current, compact: true)
                 }
             }
             .font(.subheadline).padding(.vertical, 12)
@@ -275,7 +278,7 @@ struct ScheduledDriveDetailView: View {
         VStack(spacing: 12) {
             Button {
                 Haptics.tap()
-                showStart = true
+                activeDrive.start(scheduled: drive)
             } label: {
                 Label("Start Drive", systemImage: "play.fill")
                     .font(.headline).foregroundStyle(.white)

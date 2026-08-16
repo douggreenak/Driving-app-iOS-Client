@@ -20,12 +20,26 @@ import WatchConnectivity
 /// few headline stats. Kept small and Codable — sent as WatchConnectivity application context
 /// (latest-state-wins). The watch decodes an identical struct.
 struct WatchSyncPayload: Codable {
+    /// A payer group's resolved display attributes + cost, as sent to the watch — a thin display
+    /// client with no `PayerGroup` store of its own, so it always works from these already-resolved
+    /// strings rather than looking anything up itself.
+    struct PayerStat: Codable, Identifiable {
+        var key: String
+        var name: String
+        var iconName: String
+        var colorName: String
+        var cost: Double
+        var id: String { key }
+    }
     struct Drive: Codable, Identifiable {
         var id: String
         var title: String
         var departure: Date
         var endName: String
-        var paidByParents: Bool
+        var payerKey: String
+        var payerName: String
+        var payerIconName: String
+        var payerColorName: String
     }
     struct Stats: Codable {
         var totalMiles: Double
@@ -33,9 +47,9 @@ struct WatchSyncPayload: Codable {
         var totalGallons: Double
         var totalSeconds: Int
         var topSpeed: Double
-        /// Estimated gas cost split (this pay period) — the app's core "who pays" concept.
-        var meCost: Double
-        var parentsCost: Double
+        /// Estimated gas cost split (this pay period) — the app's core "who pays" concept. An ordered
+        /// array (not a dictionary) so the watch renders bars in a stable, sort-respecting sequence.
+        var payerStats: [PayerStat]
         /// On-time performance across scheduled-and-completed drives.
         var onTimePercent: Double
         var scheduledCount: Int
