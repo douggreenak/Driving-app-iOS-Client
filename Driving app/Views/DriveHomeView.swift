@@ -9,11 +9,12 @@ import MapKit
 /// occurrence of every (repeating) drive as its own row. Swipe to cancel or delete; tap for detail.
 struct DriveHomeView: View {
     @Environment(\.modelContext) private var context
+    @Environment(ActiveDriveController.self) private var activeDrive
+    @Environment(\.tabActivityToken) private var activityToken
     @Query private var drives: [ScheduledDrive]
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
     @Query private var settingsList: [UserSettings]
 
-    @State private var showingLive = false
     @State private var showingNew = false
     @State private var showingPredict = false
     @State private var showingSettings = false
@@ -22,7 +23,6 @@ struct DriveHomeView: View {
     @State private var recovered: DriveLogger.Recovered?
 
     // "Go to" — one-tap ad-hoc navigation to a saved place with a computed ETA and on-time grading.
-    @State private var goToTarget: QuickTrip?
     @State private var goToLoadingPlace: UUID?
     @State private var goToLocator = CurrentLocationProvider()
 
@@ -120,12 +120,6 @@ struct DriveHomeView: View {
             .sheet(isPresented: $showingAddPlace) {
                 AddBookmarkView(nextOrder: (savedPlaces.map(\.sortOrder).max() ?? -1) + 1)
             }
-            .fullScreenCover(isPresented: $showingLive) {
-                LiveTrackingView(asModal: true, onFinish: { showingLive = false })
-            }
-            .fullScreenCover(item: $goToTarget) { target in
-                LiveTrackingView(goTo: target, onFinish: { goToTarget = nil })
-            }
             .confirmationDialog("Delete this scheduled drive?",
                                 isPresented: Binding(get: { pendingDelete != nil },
                                                      set: { if !$0 { pendingDelete = nil } }),
@@ -148,7 +142,9 @@ struct DriveHomeView: View {
                 await TripStore.syncPending(context: context)
                 await ScheduledDriveStore.sync(context: context)
             }
-            .task { await ScheduledDriveStore.sync(context: context) }
+            // `.task(id:)` so a schedule edited elsewhere (web dashboard, another device) is pulled
+            // in on every revisit to this tab / app-foreground, not just the first time it's shown.
+            .task(id: activityToken) { await ScheduledDriveStore.sync(context: context) }
             .task { recovered = LocationTracker.recoverableSession() }
         }
     }
@@ -172,7 +168,7 @@ struct DriveHomeView: View {
     }
 
     private var recoveryBanner: some View {
-        Button { showingLive = true } label: {
+        Button { activeDrive.adoptRecovering() } label: {
             HStack(spacing: 12) {
                 Image(systemName: "arrow.uturn.backward.circle.fill")
                     .font(.title2).foregroundStyle(Color.statusDelay)
@@ -225,7 +221,7 @@ struct DriveHomeView: View {
     private var startButton: some View {
         Button {
             Haptics.rigid()
-            showingLive = true
+            activeDrive.start(asModal: true)
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: "location.fill").font(.title3)
@@ -346,8 +342,9 @@ struct DriveHomeView: View {
                 travelSeconds = Int(best.expectedTravelTime)
             }
         }
-        goToTarget = QuickTrip(name: place.label, coordinate: place.coordinate, travelSeconds: travelSeconds,
-                               paidBy: settingsList.first?.defaultPaidBy ?? .myself)
+        let target = QuickTrip(name: place.label, coordinate: place.coordinate, travelSeconds: travelSeconds,
+                              paidBy: settingsList.first?.defaultPaidByRaw ?? PayerGroup.selfKey)
+        activeDrive.start(goTo: target)
     }
 
     // MARK: - Board
@@ -518,8 +515,10 @@ struct DriveOccurrence: Identifiable {
 struct DepartureRow: View {
     let occ: DriveOccurrence
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
 
     var body: some View {
+        let payer = PayerGroup.resolve(key: occ.drive.paidByRaw, in: payerGroups)
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -544,11 +543,14 @@ struct DepartureRow: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Text(occ.drive.title)
                         .font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.85)
-                    Image(systemName: occ.drive.paidBy.icon)
-                        .font(.caption2).foregroundStyle(occ.drive.paidBy.tint)
+                    Image(systemName: payer.icon)
+                        .font(.caption2).foregroundStyle(payer.color)
                 }
                 HStack(spacing: 4) {
-                    Image(systemName: "airplane.departure").font(.caption2).foregroundStyle(.secondary)
+                    // Arrival (not departure) plane: this is the destination address, mirroring
+                    // every other endpoint label in the app (ApplyScheduleSheet, TripSummaryView,
+                    // StatsView's recent-trip card all pair the arrival glyph with the end address).
+                    Image(systemName: "airplane.arrival").font(.caption2).foregroundStyle(.secondary)
                     Text(PlaceNamer.name(for: occ.drive.endCoordinate, fallback: occ.drive.endAddress, in: savedPlaces))
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }

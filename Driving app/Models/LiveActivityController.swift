@@ -19,6 +19,20 @@ enum LiveActivityController {
     /// Activities turned off.
     static func start(title: String, scheduledArrival: Date?, state: DriveActivityAttributes.ContentState) {
         guard ActivityAuthorizationInfo().areActivitiesEnabled, activity == nil else { return }
+        // Sweep away anything left over from a prior process (e.g. a force-quit mid-drive never got
+        // to call `end()`) so a stale, frozen activity doesn't linger alongside this new one. Snapshot
+        // the orphan ids *before* requesting our own activity below — the sweep runs as a
+        // fire-and-forget background Task, and by the time it actually executes our new activity may
+        // already be in `Activity<DriveActivityAttributes>.activities` too; ending everything found
+        // *then* would end the one we just started.
+        let orphanIDs = Set(Activity<DriveActivityAttributes>.activities.map(\.id))
+        if !orphanIDs.isEmpty {
+            Task {
+                for a in Activity<DriveActivityAttributes>.activities where orphanIDs.contains(a.id) {
+                    await a.end(nil, dismissalPolicy: .immediate)
+                }
+            }
+        }
         let attributes = DriveActivityAttributes(tripTitle: title, scheduledArrival: scheduledArrival)
         activity = try? Activity.request(attributes: attributes,
                                          content: .init(state: state, staleDate: nil))
@@ -57,6 +71,18 @@ enum LiveActivityController {
         self.activity = nil
         lastState = nil
         Task { await activity.end(nil, dismissalPolicy: .immediate) }
+    }
+
+    /// Ends every Live Activity of ours left running from a previous process — e.g. the app was
+    /// force-quit mid-drive, so `end()` never ran: the in-memory `activity` reference above was lost
+    /// on relaunch, but the OS-level activity itself keeps showing on the Lock Screen/Dynamic Island
+    /// with stale, frozen numbers (potentially until it auto-expires) unless something proactively
+    /// ends it. Intended for app launch, when there's no drive actually being recovered — safe to
+    /// call any time, including when nothing is orphaned.
+    static func endOrphaned() async {
+        for orphan in Activity<DriveActivityAttributes>.activities {
+            await orphan.end(nil, dismissalPolicy: .immediate)
+        }
     }
 }
 #endif

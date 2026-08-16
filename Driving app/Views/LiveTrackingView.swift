@@ -14,13 +14,14 @@ struct QuickTrip: Identifiable {
     /// anchored when tracking actually starts, so the ETA-fetch latency never skews the delay.
     var travelSeconds: Int?
     var category: TripCategory = .errand
-    var paidBy: PaidBy = .myself
+    var paidBy: String = PayerGroup.selfKey
     var vehicleName: String?
 }
 
 struct LiveTrackingView: View {
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
+    @Environment(ActiveDriveController.self) private var activeDrive
     @Query private var vehicles: [Vehicle]
     @Query private var settingsList: [UserSettings]
 
@@ -37,7 +38,10 @@ struct LiveTrackingView: View {
     /// Called after the cover is dismissed (saved or discarded) so the presenter can tear it down.
     var onFinish: (() -> Void)?
 
-    @State private var tracker: LocationTracker
+    /// Owned by `ActiveDriveController` (not this view) so it survives being minimized: dismissing
+    /// this view's full-screen cover no longer deallocates it — the same instance is handed back the
+    /// next time the cover is presented, whether that's a fresh start or a restore from minimized.
+    let tracker: LocationTracker
     @State private var selectedVehicle: Vehicle?
     @State private var cameraPosition: MapCameraPosition = .userLocation(followsHeading: true, fallback: .automatic)
     @State private var followUser = true
@@ -53,21 +57,27 @@ struct LiveTrackingView: View {
     @State private var efficientRoute: [CLLocationCoordinate2D] = []
     @State private var lastRouteFetchFrom: CLLocationCoordinate2D?
 
-    init(scheduled: ScheduledDrive? = nil, asModal: Bool = false, goTo: QuickTrip? = nil, onFinish: (() -> Void)? = nil) {
+    /// Designated init: used by `ContentView`'s single shared full-screen cover, which always has a
+    /// tracker on hand via `ActiveDriveController` (fresh for a new drive, or the same instance
+    /// again when restoring from minimized).
+    init(tracker: LocationTracker, scheduled: ScheduledDrive? = nil, asModal: Bool = false,
+         goTo: QuickTrip? = nil, onFinish: (() -> Void)? = nil) {
+        self.tracker = tracker
         self.scheduled = scheduled
         self.asModal = asModal
         self.goTo = goTo
         self.onFinish = onFinish
-        _tracker = State(initialValue: LocationTracker())
+    }
+
+    /// Convenience init that creates its own tracker — for standalone use outside the
+    /// controller-managed production flow (debug screenshots; a future SwiftUI preview).
+    init(scheduled: ScheduledDrive? = nil, asModal: Bool = false, goTo: QuickTrip? = nil, onFinish: (() -> Void)? = nil) {
+        self.init(tracker: LocationTracker(), scheduled: scheduled, asModal: asModal, goTo: goTo, onFinish: onFinish)
     }
 
     #if DEBUG
     init(previewTracker: LocationTracker) {
-        self.scheduled = nil
-        self.asModal = false
-        self.goTo = nil
-        self.onFinish = nil
-        _tracker = State(initialValue: previewTracker)
+        self.init(tracker: previewTracker)
     }
     #endif
 
@@ -104,36 +114,35 @@ struct LiveTrackingView: View {
             .navigationTitle(navTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // While tracking, the leading button minimizes (the drive keeps recording) instead of
+                // closing — closing-while-tracking used to stop the drive, which would now conflict
+                // with minimize being the "leave the screen" affordance. Before a drive has actually
+                // started, it still just closes.
                 if isModal {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button { stopIfNeededAndDismiss() } label: { Image(systemName: "xmark") }
+                        if tracker.isTracking {
+                            Button { Haptics.tap(); activeDrive.minimize() } label: {
+                                Image(systemName: "chevron.down")
+                            }
+                            .accessibilityLabel("Minimize")
+                        } else {
+                            Button { stopIfNeededAndDismiss() } label: { Image(systemName: "xmark") }
+                                .accessibilityLabel("Close")
+                        }
                     }
                 }
             }
             .onAppear(perform: setup)
             // Bring CoreLocation up off the first-render path so the tab appears instantly the
-            // first time; the map's user dot fills in a moment later.
+            // first time; the map's user dot fills in a moment later. Also re-runs (harmlessly) every
+            // time this view is reconstructed — e.g. restoring from minimized — since
+            // `configureIfNeeded()`/permission-request inside are already no-ops past the first call.
             .task { tracker.activateIdle() }
-            // Wrist controls: only the instance that's actually tracking acts on them.
-            .onReceive(NotificationCenter.default.publisher(for: .endDriveFromWatch)) { _ in
-                guard tracker.isTracking else { return }
-                endDrive()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .arriveStopFromWatch)) { _ in
-                guard tracker.isTracking, tracker.isMultiLeg, !tracker.isOnFinalLeg, !tracker.isPausedBetweenLegs else { return }
-                withAnimation(.spring(duration: 0.4)) { tracker.arriveAtCurrentStop() }
-                lastRouteFetchFrom = nil
-                refreshEfficientRoute()
-                updateLiveActivity()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .startNextLegFromWatch)) { _ in
-                guard tracker.isTracking, tracker.isPausedBetweenLegs else { return }
-                withAnimation(.spring(duration: 0.4)) { tracker.startNextLeg() }
-                followUser = true
-                lastRouteFetchFrom = nil
-                refreshEfficientRoute()
-                updateLiveActivity()
-            }
+            // Watch remote-control (end drive / arrive at stop / start next leg) is handled by
+            // `ContentView` via `ActiveDriveController`, not here — those must keep working even
+            // while this view doesn't exist (minimized), so they can't live on a view's own
+            // `.onReceive`. `setup()` picks up the result (e.g. a watch-triggered end while minimized)
+            // when this view reappears.
             .sheet(isPresented: $showingSummary) {
                 TripSummaryView(tracker: tracker, vehicle: selectedVehicle,
                                 initialPaidBy: tracker.plannedPaidBy,
@@ -153,7 +162,7 @@ struct LiveTrackingView: View {
                     tracker.appendLiveStop(RouteStop(address: picked.address, coordinate: picked.coordinate))
                     lastRouteFetchFrom = nil  // force the guide line to re-route to the new next stop
                     refreshEfficientRoute()
-                    updateLiveActivity()
+                    activeDrive.pushLiveUpdate()
                 }
             }
         }
@@ -164,8 +173,34 @@ struct LiveTrackingView: View {
     private func setup() {
         // Permission + location startup happen in `.task` (activateIdle) to keep first render cheap.
         if selectedVehicle == nil {
-            let wantedVehicle = scheduled?.vehicleName ?? goTo?.vehicleName
+            // Prefer the tracker's own record over the launch context: on a restore-from-minimized
+            // (or a watch-triggered end bringing the full view back), `scheduled`/`goTo` still
+            // reflect the ORIGINAL start intent, but `tracker.plannedVehicleName` reflects what's
+            // actually been recorded so far — the more reliable source once a drive is under way.
+            let wantedVehicle = tracker.plannedVehicleName ?? scheduled?.vehicleName ?? goTo?.vehicleName
             selectedVehicle = vehicles.first(where: { $0.name == wantedVehicle }) ?? vehicles.first
+        }
+        // Everything below (recovery check, default-payer seed, auto-start) is once-only setup for a
+        // BRAND NEW drive. `tracker.startTime` — set only once `startTracking()`/`resume(from:)`
+        // actually runs — is the reliable signal for that, unlike this view's own `@State` (including
+        // `didAutoStart`): minimizing dismisses this view's full-screen cover, which tears down all of
+        // its `@State`, so restoring (or a watch-triggered end bringing the full view back to show its
+        // summary) reconstructs a fresh view whose `didAutoStart` would incorrectly read `false` again
+        // even though the drive has been running (or just finished) the whole time. `tracker` itself,
+        // by contrast, survives minimize/restore (see the `tracker` property's doc comment).
+        guard tracker.startTime == nil else {
+            if tracker.isTracking {
+                // Already under way — resync what a freshly (re)constructed view needs instead of
+                // waiting on the next location fix.
+                lastRouteFetchFrom = nil
+                refreshEfficientRoute()
+                activeDrive.pushLiveUpdate()
+            } else if !tracker.points.isEmpty, !showingSummary {
+                // Stopped but never shown its summary — e.g. a watch-triggered "End Drive" that fired
+                // while this view was minimized (see `ActiveDriveController.handleEndFromWatch`).
+                showingSummary = true
+            }
+            return
         }
         // A scheduled or "Go to" drive starts a fresh auto-started session; only an ad-hoc drive
         // (Track / Start a Drive) offers to recover an interrupted session first.
@@ -173,7 +208,7 @@ struct LiveTrackingView: View {
             recovered = LocationTracker.recoverableSession()
             // Seed the payer from the user's default for non-scheduled drives (a recovered session
             // overrides this with its own saved payer when resumed).
-            tracker.plannedPaidBy = settingsList.first?.defaultPaidBy ?? .myself
+            tracker.plannedPaidBy = settingsList.first?.defaultPaidByRaw ?? PayerGroup.selfKey
         }
         // Auto-start a "Go to" drive once, pre-loaded with its destination & computed ETA so it
         // grades on-time exactly like a scheduled drive — but without touching the schedule.
@@ -212,7 +247,7 @@ struct LiveTrackingView: View {
             tracker.scheduledDeparture = schedDep
             tracker.scheduledArrival = schedArr
             tracker.plannedCategory = scheduled.category
-            tracker.plannedPaidBy = scheduled.paidBy
+            tracker.plannedPaidBy = scheduled.paidByRaw
             tracker.plannedVehicleName = scheduled.vehicleName
             // Mark this occurrence as departed for the departures board.
             scheduled.lastStartedAt = .now
@@ -227,17 +262,23 @@ struct LiveTrackingView: View {
         Map(position: $cameraPosition) {
             UserAnnotation()
 
-            // Dotted light-blue guide: the most efficient route still ahead to the destination.
-            // Drawn first so the actual (solid) track sits on top of it.
+            // Guide route ahead — the focal "where to drive" element while a drive is under way: a
+            // vivid sky-cyan (deliberately a different hue from the traveled track's plain blue, not
+            // just a faint dotted variant of it) with bold, legible dashes rather than a near-invisible
+            // dotted trace. Drawn first so the traveled track sits on top of it; the two rarely overlap
+            // in practice since one trails behind the current position and the other leads ahead of it.
             if tracker.isTracking, efficientRoute.count >= 2 {
                 MapPolyline(coordinates: efficientRoute)
-                    .stroke(.cyan.opacity(0.9),
-                            style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round, dash: [1, 12]))
+                    .stroke(Color.driveGuideRoute,
+                            style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round, dash: [3, 11]))
             }
 
+            // Traveled track — the actual recorded drive, this app's core record. Slightly receded
+            // (vs. full-opacity blue) so the guide route ahead reads as the primary "what to do next"
+            // element while actively driving, without losing visibility of where you've been.
             if tracker.points.count >= 2 {
                 MapPolyline(coordinates: tracker.points.map(\.coordinate))
-                    .stroke(.blue, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                    .stroke(.blue.opacity(0.85), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
             }
             if let start = tracker.startCoordinate, tracker.isTracking {
                 Annotation("Start", coordinate: start) {
@@ -274,7 +315,10 @@ struct LiveTrackingView: View {
         })
         // Observe the per-fix counter, not just latitude — a stationary car (or one heading due
         // east/west) delivers fixes with an unchanged latitude, which would otherwise stall the
-        // follow camera, guide-route refresh, and Live Activity.
+        // follow camera and guide-route refresh. The Live Activity/watch push itself is driven from
+        // `ContentView` (see `ActiveDriveController`), not here, so it keeps running even while this
+        // view is dismissed (minimized) — observing the same `fixCount`/`elapsedSeconds` here too
+        // would just be a redundant duplicate push while this view happens to be on screen.
         .onChange(of: tracker.fixCount) { _, _ in
             if followUser, let loc = tracker.currentLocation {
                 cameraPosition = .region(MKCoordinateRegion(
@@ -282,11 +326,7 @@ struct LiveTrackingView: View {
                     span: MKCoordinateSpan(latitudeDelta: 0.008, longitudeDelta: 0.008)))
             }
             refreshEfficientRoute()
-            updateLiveActivity()
         }
-        // Keep the Live Activity's clock/ETA advancing even while parked (no new fixes); the
-        // controller throttles, so a per-second tick collapses to a push every few seconds.
-        .onChange(of: tracker.elapsedSeconds) { _, _ in updateLiveActivity() }
         .ignoresSafeArea(edges: .top)
     }
 
@@ -592,7 +632,7 @@ struct LiveTrackingView: View {
                 followUser = true
                 lastRouteFetchFrom = nil
                 refreshEfficientRoute()
-                updateLiveActivity()
+                activeDrive.pushLiveUpdate()
             } label: {
                 controlLabel(tracker.isOnFinalLeg ? "Start Final Leg" : "Start Next Trip", "location.fill", .blue)
             }
@@ -618,10 +658,10 @@ struct LiveTrackingView: View {
         Button {
             Haptics.success()
             withAnimation(.spring(duration: 0.4)) { tracker.arriveAtCurrentStop() }
-            // The target advanced to the next stop — re-route the dotted guide line to it.
+            // The target advanced to the next stop — re-route the guide line to it.
             lastRouteFetchFrom = nil
             refreshEfficientRoute()
-            updateLiveActivity()
+            activeDrive.pushLiveUpdate()
         } label: {
             let name = tracker.currentLegTarget?.address
             controlLabel(name?.isEmpty == false ? "Arrived — Next Stop" : "Arrived at Stop", "checkmark.circle.fill", .green)
@@ -751,8 +791,8 @@ struct LiveTrackingView: View {
         efficientRoute = []
         lastRouteFetchFrom = nil
         refreshEfficientRoute()
-        startLiveActivity()
-        broadcastLive()
+        activeDrive.startLiveActivity()
+        activeDrive.broadcastLive()
     }
 
     /// Continue an interrupted drive: rebuild the tracker from the crash log and pick up recording
@@ -767,91 +807,14 @@ struct LiveTrackingView: View {
         efficientRoute = []
         lastRouteFetchFrom = nil
         refreshEfficientRoute()
-        startLiveActivity()
-        broadcastLive()
+        activeDrive.startLiveActivity()
+        activeDrive.broadcastLive()
     }
 
-    // MARK: - Live Activity (trip progress on Lock Screen / Dynamic Island)
+    // Live Activity start/update/end + Watch live-broadcast all live on `ActiveDriveController` now
+    // (see its doc comment) so they keep running whether this view is shown full-screen or minimized.
 
-    private func startLiveActivity() {
-        #if canImport(ActivityKit) && !os(macOS)
-        LiveActivityController.start(title: tracker.tripName ?? "Drive",
-                                     scheduledArrival: tracker.scheduledArrival,
-                                     state: liveActivityState())
-        #endif
-    }
-
-    private func updateLiveActivity() {
-        #if canImport(ActivityKit) && !os(macOS)
-        guard tracker.isTracking else { return }
-        LiveActivityController.update(liveActivityState())
-        #endif
-        broadcastLive()
-    }
-
-    /// Stream the current drive to the Apple Watch so it can be the live focus.
-    private func broadcastLive() {
-        #if canImport(WatchConnectivity) && os(iOS)
-        guard tracker.isTracking else { return }
-        var progress: Double?
-        if let remaining = tracker.remainingMiles {
-            let done = tracker.distanceMiles
-            let total = done + max(remaining, 0)
-            progress = total > 0.1 ? min(1, done / total) : nil
-        }
-        var legText: String?
-        if tracker.isMultiLeg {
-            var t = "Leg \(min(tracker.currentLegIndex + 1, tracker.totalLegs)) of \(tracker.totalLegs)"
-            if let next = tracker.currentLegTarget, !next.address.isEmpty { t += " · \(next.address)" }
-            legText = t
-        }
-        let live = WatchSyncPayload.Live(
-            tripName: tracker.tripName ?? tracker.finalDestinationName ?? "Drive",
-            milesTraveled: tracker.distanceMiles,
-            currentSpeed: tracker.currentSpeed,
-            elapsedSeconds: tracker.elapsedSeconds,
-            eta: tracker.etaDate,
-            delaySeconds: tracker.delaySeconds,
-            progress: progress,
-            legText: legText,
-            isPaused: tracker.isPausedBetweenLegs,
-            canAdvanceLeg: tracker.isMultiLeg && !tracker.isOnFinalLeg && !tracker.isPausedBetweenLegs)
-        PhoneWatchConnectivity.shared.sendLive(live)
-        #endif
-    }
-
-    private func endLiveBroadcast() {
-        #if canImport(WatchConnectivity) && os(iOS)
-        PhoneWatchConnectivity.shared.sendLive(nil)
-        #endif
-    }
-
-    #if canImport(ActivityKit) && !os(macOS)
-    private func liveActivityState() -> DriveActivityAttributes.ContentState {
-        // Progress toward the destination = traveled / (traveled + straight-line remaining).
-        var progress: Double?
-        if let remaining = tracker.remainingMiles {
-            let done = tracker.distanceMiles
-            let total = done + max(remaining, 0)
-            progress = total > 0.1 ? min(1, done / total) : nil
-        }
-        // Show the overall destination; for a multi-leg drive, append the current leg (e.g. "Home
-        // · Stop 2 of 3") so the Lock Screen reflects the leg you're on.
-        var name = tracker.finalDestinationName ?? tracker.destinationName
-        if tracker.isMultiLeg, let base = name {
-            name = "\(base) · Stop \(min(tracker.currentLegIndex + 1, tracker.totalLegs))/\(tracker.totalLegs)"
-        }
-        return .init(milesTraveled: tracker.distanceMiles,
-                     currentSpeed: tracker.currentSpeed,
-                     elapsedSeconds: tracker.elapsedSeconds,
-                     progress: progress,
-                     eta: tracker.etaDate,
-                     delaySeconds: tracker.delaySeconds,
-                     destinationName: name)
-    }
-    #endif
-
-    /// Fetch the fastest road route from the current location to the destination for the dotted
+    /// Fetch the fastest road route from the current location to the destination for the
     /// guide line. Prioritizes Apple Maps' recommended (fastest) route. Throttled: only re-routes
     /// after the driver has moved ~250 m (or when we have no line yet), keeping well under MapKit's
     /// directions rate limit while still re-routing on meaningful deviations.
@@ -876,7 +839,7 @@ struct LiveTrackingView: View {
         }
     }
 
-    private func saveTrip(category: TripCategory, paidBy: PaidBy, notes: String?) {
+    private func saveTrip(category: TripCategory, paidBy: String, notes: String?) {
         let pts = tracker.points
         let scheduledDeparture = tracker.scheduledDeparture
         let scheduledArrival = tracker.scheduledArrival
@@ -940,7 +903,7 @@ struct LiveTrackingView: View {
     private func buildLegInputs(
         pts: [RecordedPoint], legTargets: [RouteStop], boundaries: [Int],
         firstLegStart: String?, reachedFinal: Bool, finalName: String?,
-        category: TripCategory, paidBy: PaidBy, notes: String?, tripName: String?,
+        category: TripCategory, paidBy: String, notes: String?, tripName: String?,
         vehName: String?, vehMpg: Double?,
         scheduledDeparture: Date?, scheduledArrival: Date?
     ) async -> [TripStore.Input] {
@@ -1035,10 +998,8 @@ struct LiveTrackingView: View {
     private func finishAndExit() {
         efficientRoute = []
         lastRouteFetchFrom = nil
-        endLiveBroadcast()
-        #if canImport(ActivityKit) && !os(macOS)
-        LiveActivityController.end()
-        #endif
+        activeDrive.endLiveBroadcast()
+        activeDrive.endLiveActivity()
         if isModal {
             dismiss()
         } else {
@@ -1063,7 +1024,7 @@ struct LiveTrackingView: View {
         guard pts.count >= 2 else { return }
         let meta = rec.meta
         let category = TripCategory(rawValue: meta.category) ?? .other
-        let paidBy = PaidBy(rawValue: meta.paidBy) ?? .myself
+        let paidBy = meta.paidBy
         // Split a recovered multi-stop drive into per-leg linked trips too (an interrupted final leg
         // reverse-geocodes where it actually stopped rather than claiming an unreached target).
         let inputs = await buildLegInputs(

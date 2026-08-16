@@ -81,6 +81,7 @@ struct TripsListView: View {
 private struct TripRow: View {
     let trip: DriveTrip
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -123,7 +124,7 @@ private struct TripRow: View {
                 stat("fuelpump.fill", String(format: "%.2f gal", trip.estimatedGallons))
                 Spacer(minLength: 4)
                 if !trip.synced { Image(systemName: "icloud.slash").font(.caption2).foregroundStyle(.tertiary) }
-                PayerChip(payer: trip.paidBy, compact: true)
+                PayerChip(PayerGroup.resolve(key: trip.paidByRaw, in: payerGroups), compact: true)
             }
         }
         .padding(.vertical, 4)

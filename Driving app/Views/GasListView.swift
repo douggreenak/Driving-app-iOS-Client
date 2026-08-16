@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 struct GasListView: View {
     @State private var entries: [APIGasEntry] = []
@@ -6,22 +7,21 @@ struct GasListView: View {
     @State private var isRefreshing = false
     @State private var lastUpdated: Date?
     @State private var showingNewEntry = false
-    @State private var filter: PaidByFilter = .all
+    /// nil = "All"; otherwise a `PayerGroup.key` to filter to.
+    @State private var filterKey: String?
     @State private var pendingDelete: APIGasEntry?
-
-    enum PaidByFilter: CaseIterable {
-        case all, myself, parents
-        var label: String {
-            switch self { case .all: "All"; case .myself: "Me"; case .parents: "Parents" }
-        }
-    }
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
+    @Query(sort: \DriveTrip.date) private var trips: [DriveTrip]
+    @Environment(\.tabActivityToken) private var activityToken
 
     private var filteredEntries: [APIGasEntry] {
-        switch filter {
-        case .all: entries
-        case .myself: entries.filter { $0.paidBy == "SELF" }
-        case .parents: entries.filter { $0.paidBy == "PARENTS" }
-        }
+        guard let filterKey else { return entries }
+        return entries.filter { $0.paidBy == filterKey }
+    }
+
+    private var filterLabel: String {
+        guard let filterKey else { return "All" }
+        return PayerGroup.resolve(key: filterKey, in: payerGroups).name
     }
 
     private var filteredTotal: Double { filteredEntries.reduce(0) { $0 + $1.totalCost } }
@@ -30,8 +30,11 @@ struct GasListView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                Picker("Filter", selection: $filter) {
-                    ForEach(PaidByFilter.allCases, id: \.self) { Text($0.label).tag($0) }
+                Picker("Filter", selection: $filterKey) {
+                    Text("All").tag(String?.none)
+                    ForEach(payerGroups.filter { !$0.isArchived }) { group in
+                        Text(group.name).tag(String?.some(group.key))
+                    }
                 }
                 .pickerStyle(.segmented)
                 .padding()
@@ -66,10 +69,10 @@ struct GasListView: View {
                     ContentUnavailableView {
                         Label("No Gas Entries", systemImage: "fuelpump")
                     } description: {
-                        Text(filter == .all ? "Log a fill-up to track fuel spending and who paid."
-                                            : "No fill-ups paid by \(filter.label).")
+                        Text(filterKey == nil ? "Log a fill-up to track fuel spending and who paid."
+                                              : "No fill-ups paid by \(filterLabel).")
                     } actions: {
-                        if filter == .all {
+                        if filterKey == nil {
                             Button { Haptics.tap(); showingNewEntry = true } label: {
                                 Label("Add Fill-up", systemImage: "plus")
                             }
@@ -79,7 +82,8 @@ struct GasListView: View {
                 } else {
                     List {
                         ForEach(filteredEntries) { entry in
-                            GasRow(entry: entry)
+                            GasRow(entry: entry, payer: entry.payer(in: payerGroups),
+                                  comparison: fuelComparison(for: entry))
                                 .swipeActions(edge: .trailing) {
                                     Button(role: .destructive) { pendingDelete = entry } label: {
                                         Label("Delete", systemImage: "trash")
@@ -110,8 +114,26 @@ struct GasListView: View {
                 }
             }
             .refreshable { await loadEntries() }
-            .task { await loadEntries() }
+            // `.task(id:)` (rather than a bare `.task`) so this refetches every time the Gas tab is
+            // revisited or the app returns to the foreground, not just the first time this view is
+            // created — otherwise switching tabs and back could show stale entries until a relaunch.
+            .task(id: activityToken) { await loadEntries() }
         }
+    }
+
+    /// Compares what this fill-up actually pumped against what the app's speed-aware fuel model
+    /// estimates the vehicle's recorded trips burned since its previous fill-up (or across all
+    /// history, if this is the first one on record for that vehicle).
+    private func fuelComparison(for entry: APIGasEntry) -> FuelComparison? {
+        guard let vehicleName = entry.vehicleName else { return nil }
+        let since = entries
+            .filter { $0.vehicleName == vehicleName && $0.id != entry.id && $0.parsedDate < entry.parsedDate }
+            .map(\.parsedDate)
+            .max()
+        let estimated = FuelModel.estimatedGallonsBurned(
+            vehicleName: vehicleName, since: since, through: entry.parsedDate, trips: trips)
+        guard estimated > 0.01 else { return nil }
+        return FuelComparison(pumped: entry.gallons, estimated: estimated)
     }
 
     private func loadEntries() async {
@@ -128,7 +150,18 @@ struct GasListView: View {
             lastUpdated = .now
             loading = false
             Self.cache(fresh, at: .now)
-        } catch { loading = false }
+        } catch {
+            loading = false
+            #if DEBUG
+            // Manual-testing fallback: with no reachable backend, fall back to a local fixture so the
+            // pumped-vs-estimated comparison can still be checked. Only when explicitly launched with
+            // `UITEST_SEED=1`, and only if a real fetch never populated `entries` some other way.
+            if entries.isEmpty, ProcessInfo.processInfo.environment["UITEST_SEED"] == "1" {
+                entries = SampleData.sampleGasEntries()
+                lastUpdated = .now
+            }
+            #endif
+        }
         isRefreshing = false
     }
 
@@ -164,16 +197,38 @@ struct GasListView: View {
     }
 }
 
+/// Actual gallons pumped at a fill-up vs. what the speed-aware fuel model estimates the vehicle's
+/// trips burned since the previous one — a sanity check on the estimate (a big gap usually means an
+/// untracked trip, a partial fill-up, or an odometer/tank quirk).
+struct FuelComparison {
+    var pumped: Double
+    var estimated: Double
+
+    private var delta: Double { pumped - estimated }
+    private var percentOff: Double { estimated > 0.01 ? delta / estimated * 100 : 0 }
+
+    /// A wide gap (>15%) usually means a missed trip or a partial fill-up rather than model error.
+    var isCloseMatch: Bool { abs(percentOff) <= 15 }
+
+    var summary: String {
+        String(format: "Pumped %.1f gal · Trips est. %.1f gal (%@%.0f%%)",
+              pumped, estimated, delta >= 0 ? "+" : "−", abs(percentOff))
+    }
+}
+
 private struct GasRow: View {
     let entry: APIGasEntry
+    let payer: PayerDisplay
+    let comparison: FuelComparison?
+
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(entry.paidByEnum.label)
+                    Text(payer.name)
                         .font(.caption2).fontWeight(.semibold)
                         .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(entry.paidBy == "SELF" ? Color.blue.opacity(0.15) : Color.green.opacity(0.15), in: .capsule)
+                        .background(payer.color.opacity(0.2), in: .capsule)
                     Text(entry.parsedDate, style: .date)
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -184,6 +239,11 @@ private struct GasRow: View {
                     .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
                 if !subtitle.isEmpty {
                     Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                }
+                if let comparison {
+                    Text(comparison.summary)
+                        .font(.caption2)
+                        .foregroundStyle(comparison.isCloseMatch ? Color.secondary : Color.statusDelay)
                 }
             }
             Spacer()

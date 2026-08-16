@@ -2,25 +2,6 @@ import Foundation
 import SwiftData
 import CoreLocation
 
-enum PaidBy: String, Codable, CaseIterable {
-    case myself = "SELF"
-    case parents = "PARENTS"
-
-    var label: String {
-        switch self {
-        case .myself: "Me"
-        case .parents: "Parents"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .myself: "person.fill"
-        case .parents: "person.2.fill"
-        }
-    }
-}
-
 enum TripCategory: String, Codable, CaseIterable {
     case commute = "COMMUTE"
     case errand = "ERRAND"
@@ -179,8 +160,9 @@ final class DriveTrip {
     var name: String?
     var categoryRaw: String
     var isFavorite: Bool
-    /// Who covers this drive's fuel cost — the app's core concept.
-    var paidByRaw: String = PaidBy.myself.rawValue
+    /// Who covers this drive's fuel cost — the app's core concept. Stores a `PayerGroup.key` (see
+    /// Models/PayerGroup.swift); resolve to a display name/icon/color via `PayerGroup.resolve(key:in:)`.
+    var paidByRaw: String = PayerGroup.selfKey
 
     /// Intermediate stops on this trip (multi-stop), start → stops → end. Empty for a simple A→B.
     var stops: [RouteStop] = []
@@ -221,11 +203,6 @@ final class DriveTrip {
         set { categoryRaw = newValue.rawValue }
     }
 
-    var paidBy: PaidBy {
-        get { PaidBy(rawValue: paidByRaw) ?? .myself }
-        set { paidByRaw = newValue.rawValue }
-    }
-
     /// True when this trip is one leg of a linked multi-stop journey.
     var isJourneyLeg: Bool { journeyID != nil && legTotal > 1 }
 
@@ -247,7 +224,7 @@ final class DriveTrip {
         name: String? = nil,
         category: TripCategory = .other,
         isFavorite: Bool = false,
-        paidBy: PaidBy = .myself,
+        paidBy: String = PayerGroup.selfKey,
         vehicleName: String? = nil,
         vehicleMpg: Double? = nil,
         estimatedGallons: Double = 0,
@@ -274,7 +251,7 @@ final class DriveTrip {
         self.name = name
         self.categoryRaw = category.rawValue
         self.isFavorite = isFavorite
-        self.paidByRaw = paidBy.rawValue
+        self.paidByRaw = paidBy
         self.vehicleName = vehicleName
         self.vehicleMpg = vehicleMpg
         self.estimatedGallons = estimatedGallons
@@ -380,8 +357,8 @@ final class ScheduledDrive {
     var scheduledArrival: Date
     var repeatRuleRaw: String
     var categoryRaw: String
-    /// Default payer for drives started from this schedule.
-    var paidByRaw: String = PaidBy.myself.rawValue
+    /// Default payer for drives started from this schedule. Stores a `PayerGroup.key`.
+    var paidByRaw: String = PayerGroup.selfKey
     /// Intermediate stops on this scheduled route (multi-stop), start → stops → end.
     var stops: [RouteStop] = []
     var vehicleName: String?
@@ -417,7 +394,7 @@ final class ScheduledDrive {
         scheduledArrival: Date,
         repeatRule: RepeatRule = .none,
         category: TripCategory = .commute,
-        paidBy: PaidBy = .myself,
+        paidBy: String = PayerGroup.selfKey,
         vehicleName: String? = nil,
         notes: String? = nil,
         isEnabled: Bool = true
@@ -434,7 +411,7 @@ final class ScheduledDrive {
         self.scheduledArrival = scheduledArrival
         self.repeatRuleRaw = repeatRule.rawValue
         self.categoryRaw = category.rawValue
-        self.paidByRaw = paidBy.rawValue
+        self.paidByRaw = paidBy
         self.vehicleName = vehicleName
         self.notes = notes
         self.isEnabled = isEnabled
@@ -443,11 +420,6 @@ final class ScheduledDrive {
     var category: TripCategory {
         get { TripCategory(rawValue: categoryRaw) ?? .commute }
         set { categoryRaw = newValue.rawValue }
-    }
-
-    var paidBy: PaidBy {
-        get { PaidBy(rawValue: paidByRaw) ?? .myself }
-        set { paidByRaw = newValue.rawValue }
     }
 
     var repeatRule: RepeatRule {
@@ -698,11 +670,6 @@ final class GasEntry {
     var odometer: Double?
     var trip: DriveTrip?
 
-    var paidBy: PaidBy {
-        get { PaidBy(rawValue: paidByRaw) ?? .myself }
-        set { paidByRaw = newValue.rawValue }
-    }
-
     var fuelType: FuelType {
         get { FuelType(rawValue: fuelTypeRaw) ?? .regular }
         set { fuelTypeRaw = newValue.rawValue }
@@ -712,7 +679,7 @@ final class GasEntry {
         date: Date = .now,
         gallons: Double,
         pricePerGallon: Double,
-        paidBy: PaidBy,
+        paidBy: String,
         fuelType: FuelType = .regular,
         stationName: String? = nil,
         odometer: Double? = nil,
@@ -722,7 +689,7 @@ final class GasEntry {
         self.gallons = gallons
         self.pricePerGallon = pricePerGallon
         self.totalCost = gallons * pricePerGallon
-        self.paidByRaw = paidBy.rawValue
+        self.paidByRaw = paidBy
         self.fuelTypeRaw = fuelType.rawValue
         self.stationName = stationName
         self.odometer = odometer
@@ -758,13 +725,9 @@ final class UserSettings {
     /// Used to estimate per-drive fuel cost for the paid-by breakdowns.
     var fuelPricePerGallon: Double = 3.75
     /// Default payer for ad-hoc (non-scheduled) drives — the trip-summary picker and "Go to" trips
-    /// start here. Scheduled drives carry their own payer instead of using this.
-    var defaultPaidByRaw: String = PaidBy.myself.rawValue
-
-    var defaultPaidBy: PaidBy {
-        get { PaidBy(rawValue: defaultPaidByRaw) ?? .myself }
-        set { defaultPaidByRaw = newValue.rawValue }
-    }
+    /// start here. Scheduled drives carry their own payer instead of using this. Stores a
+    /// `PayerGroup.key`.
+    var defaultPaidByRaw: String = PayerGroup.selfKey
 
     init(monthlyBudget: Double = 0, distanceUnit: String = "miles") {
         self.monthlyBudget = monthlyBudget

@@ -119,4 +119,18 @@ enum FuelModel {
         }
         .filter { $0.miles > 0.01 }
     }
+
+    /// Sum of `estimatedGallons` for a vehicle's recorded trips in `(since, through]` — the fuel a
+    /// set of trips estimates was burned between two fill-ups (or from the start of recorded history,
+    /// when `since` is nil because the vehicle has no earlier fill-up). Used to compare what the app
+    /// *estimates* was burned against what was actually pumped at a fill-up.
+    static func estimatedGallonsBurned(vehicleName: String, since: Date?, through: Date, trips: [DriveTrip]) -> Double {
+        var total = 0.0
+        for trip in trips {
+            guard trip.vehicleName == vehicleName, trip.date <= through else { continue }
+            if let since, trip.date <= since { continue }
+            total += trip.estimatedGallons
+        }
+        return total
+    }
 }

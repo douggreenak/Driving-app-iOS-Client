@@ -11,6 +11,7 @@ struct TripDetailView: View {
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
 
     /// The sibling legs of this trip's journey (including itself), in leg order. Fetched on demand
     /// only when this trip is a journey leg — never loading the whole trip history for a standalone.
@@ -458,22 +459,23 @@ struct TripDetailView: View {
     // MARK: - Paid by (the core: who covers this drive)
 
     private var paidByCard: some View {
-        HStack(spacing: 12) {
+        let current = PayerGroup.resolve(key: trip.paidByRaw, in: payerGroups)
+        return HStack(spacing: 12) {
             Image(systemName: "dollarsign.circle.fill")
-                .font(.title2).foregroundStyle(trip.paidBy.tint).frame(width: 32)
+                .font(.title2).foregroundStyle(current.color).frame(width: 32)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Paid by").font(.subheadline.weight(.semibold))
                 Text("Who covers this drive's gas").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             Menu {
-                ForEach(PaidBy.allCases, id: \.self) { p in
-                    Button { trip.paidBy = p; try? context.save() } label: {
-                        Label(p.label, systemImage: p.icon)
+                ForEach(payerGroups.filter { !$0.isArchived }) { group in
+                    Button { trip.paidByRaw = group.key; try? context.save() } label: {
+                        Label(group.name, systemImage: group.icon)
                     }
                 }
             } label: {
-                PayerChip(payer: trip.paidBy)
+                PayerChip(current)
             }
         }
         .padding()

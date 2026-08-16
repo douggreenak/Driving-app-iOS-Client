@@ -8,6 +8,7 @@ struct NewScheduledDriveView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var context
     @Query private var vehicles: [Vehicle]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
     /// Most-recent schedules first — used to prefill non-location/time details on a new drive.
     @Query(sort: \ScheduledDrive.createdAt, order: .reverse) private var recentDrives: [ScheduledDrive]
 
@@ -28,7 +29,7 @@ struct NewScheduledDriveView: View {
     @State private var departure = defaultDeparture()
     @State private var repeatRule: RepeatRule = .weekdays
     @State private var category: TripCategory = .work
-    @State private var paidBy: PaidBy = .myself
+    @State private var paidBy: String = PayerGroup.selfKey
     @State private var vehicleName: String?
     @State private var notes = ""
 
@@ -60,7 +61,7 @@ struct NewScheduledDriveView: View {
             _arrivalOverride = State(initialValue: dep.addingTimeInterval(budget))
             _repeatRule = State(initialValue: d.repeatRule)
             _category = State(initialValue: d.category)
-            _paidBy = State(initialValue: d.paidBy)
+            _paidBy = State(initialValue: d.paidByRaw)
             _vehicleName = State(initialValue: d.vehicleName)
             _notes = State(initialValue: d.notes ?? "")
             _startCoord = State(initialValue: d.startCoordinate)
@@ -183,8 +184,8 @@ struct NewScheduledDriveView: View {
 
                 Section("Details") {
                     Picker("Paid by", selection: $paidBy) {
-                        ForEach(PaidBy.allCases, id: \.self) {
-                            Label($0.label, systemImage: $0.icon).tag($0)
+                        ForEach(payerGroups.filter { !$0.isArchived }) { group in
+                            Label(group.name, systemImage: group.icon).tag(group.key)
                         }
                     }
                     Picker("Category", selection: $category) {
@@ -289,7 +290,7 @@ struct NewScheduledDriveView: View {
         guard let last = recentDrives.first else { return }
         repeatRule = last.repeatRule
         category = last.category
-        paidBy = last.paidBy
+        paidBy = last.paidByRaw
         vehicleName = last.vehicleName
     }
 
@@ -341,7 +342,7 @@ struct NewScheduledDriveView: View {
         drive.stops = pickedStops
         drive.repeatRule = repeatRule
         drive.category = category
-        drive.paidBy = paidBy
+        drive.paidByRaw = paidBy
         drive.vehicleName = vehicleName
         drive.notes = notes.isEmpty ? nil : notes
     }

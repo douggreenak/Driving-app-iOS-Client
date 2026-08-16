@@ -4,12 +4,14 @@ import SwiftData
 struct NewGasEntryView: View {
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Vehicle.name) private var vehicles: [Vehicle]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
+    @Query(sort: \DriveTrip.date) private var trips: [DriveTrip]
     var onSaved: (() async -> Void)?
 
     @State private var date = Date.now
     @State private var gallons = ""
     @State private var pricePerGallon = ""
-    @State private var paidBy: PaidBy = .myself
+    @State private var paidBy: String = PayerGroup.selfKey
     @State private var fuelType: FuelType = .regular
     @State private var stationName = ""
     @State private var odometer = ""
@@ -18,6 +20,18 @@ struct NewGasEntryView: View {
 
     private var totalCost: Double {
         (Double(gallons) ?? 0) * (Double(pricePerGallon) ?? 0)
+    }
+
+    private var selectedVehicle: Vehicle? { vehicles.first { $0.name == vehicleName } }
+
+    /// What the app's speed-aware fuel model estimates was burned since this vehicle's last fill-up
+    /// (or across all recorded history if it has none), so the estimate is visible before saving too —
+    /// not just after, in the Gas list.
+    private var estimatedBurnedSinceLastFillUp: Double? {
+        guard let name = vehicleName else { return nil }
+        let amount = FuelModel.estimatedGallonsBurned(
+            vehicleName: name, since: selectedVehicle?.lastFilledUp, through: date, trips: trips)
+        return amount > 0.01 ? amount : nil
     }
 
     /// Require valid, positive gallons & price before the entry can be saved.
@@ -42,20 +56,27 @@ struct NewGasEntryView: View {
 
                 Section("Who's Paying?") {
                     Picker("Paid by", selection: $paidBy) {
-                        Text("Me").tag(PaidBy.myself)
-                        Text("Parents").tag(PaidBy.parents)
+                        ForEach(payerGroups.filter { !$0.isArchived }) { group in
+                            Label(group.name, systemImage: group.icon).tag(group.key)
+                        }
                     }
                     .pickerStyle(.segmented)
                 }
 
                 if !vehicles.isEmpty {
-                    Section("Vehicle") {
+                    Section {
                         Picker("Car", selection: $vehicleName) {
                             Text("None").tag(String?.none)
                             ForEach(vehicles) { vehicle in
                                 Text(vehicle.name).tag(String?.some(vehicle.name))
                             }
                         }
+                        if let estimate = estimatedBurnedSinceLastFillUp {
+                            Text(String(format: "Since your last fill-up, trips are estimated to have used ~%.1f gal.", estimate))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    } header: {
+                        Text("Vehicle")
                     }
                 }
 
@@ -113,7 +134,7 @@ struct NewGasEntryView: View {
                 date: f.string(from: date),
                 gallons: Double(gallons) ?? 0,
                 pricePerGallon: Double(pricePerGallon) ?? 0,
-                paidBy: paidBy.rawValue,
+                paidBy: paidBy,
                 fuelType: fuelType.rawValue,
                 stationName: stationName.isEmpty ? nil : stationName,
                 odometer: Double(odometer),

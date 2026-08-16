@@ -1,15 +1,17 @@
 import SwiftUI
+import SwiftData
 import MapKit
 
 struct TripSummaryView: View {
     let tracker: LocationTracker
     let vehicle: Vehicle?
-    var initialPaidBy: PaidBy = .myself
-    let onSave: (TripCategory, PaidBy, String?) -> Void
+    var initialPaidBy: String = PayerGroup.selfKey
+    let onSave: (TripCategory, String, String?) -> Void
     let onDiscard: () -> Void
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
 
     @State private var category: TripCategory = .other
-    @State private var paidBy: PaidBy = .myself
+    @State private var paidBy: String = PayerGroup.selfKey
     @State private var notes = ""
     @State private var saving = false
     @State private var didInit = false
@@ -253,12 +255,15 @@ struct TripSummaryView: View {
     // MARK: - Category & Notes
 
     private var paidByPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let current = PayerGroup.resolve(key: paidBy, in: payerGroups)
+        return VStack(alignment: .leading, spacing: 8) {
             Label("Who's paying for gas?", systemImage: "dollarsign.circle.fill")
                 .font(.subheadline.weight(.medium))
-                .foregroundStyle(paidBy == .parents ? .green : .blue)
+                .foregroundStyle(current.color)
             Picker("Paid by", selection: $paidBy) {
-                ForEach(PaidBy.allCases, id: \.self) { Label($0.label, systemImage: $0.icon).tag($0) }
+                ForEach(payerGroups.filter { !$0.isArchived }) { group in
+                    Label(group.name, systemImage: group.icon).tag(group.key)
+                }
             }
             .pickerStyle(.segmented)
         }

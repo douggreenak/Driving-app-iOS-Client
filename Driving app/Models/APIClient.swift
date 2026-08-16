@@ -277,8 +277,12 @@ struct APIGasEntry: Codable, Identifiable {
         return f.date(from: date) ?? Date()
     }
 
-    var paidByEnum: PaidBy {
-        PaidBy(rawValue: paidBy) ?? .myself
+    /// Resolve this entry's stored payer key against the live group list — see
+    /// `PayerGroup.resolve(key:in:)`. Falls back to a neutral "Unknown" display so a fill-up whose
+    /// payer group was since archived/removed still shows *something* instead of silently reading
+    /// as "Me".
+    func payer(in groups: [PayerGroup]) -> PayerDisplay {
+        PayerGroup.resolve(key: paidBy, in: groups)
     }
 
     var fuelTypeEnum: FuelType {

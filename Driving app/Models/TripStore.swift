@@ -19,7 +19,8 @@ enum TripStore {
         var startAddress: String
         var endAddress: String
         var category: TripCategory
-        var paidBy: PaidBy
+        /// A `PayerGroup.key`.
+        var paidBy: String
         var notes: String?
         var name: String?
         var vehicleName: String?

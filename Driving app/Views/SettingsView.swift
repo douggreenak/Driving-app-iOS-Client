@@ -8,12 +8,13 @@ struct SettingsView: View {
     @Query private var settings: [UserSettings]
     @Query private var vehicles: [Vehicle]
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
     @State private var showingAddBookmark = false
 
     @State private var budget = ""
     @State private var fuelPrice = ""
     @State private var unit = "miles"
-    @State private var defaultPayer: PaidBy = .myself
+    @State private var defaultPayer: String = PayerGroup.selfKey
     @State private var showingVehicleForm = false
     @State private var vehicleName = ""
     @State private var vehicleMake = ""
@@ -21,9 +22,18 @@ struct SettingsView: View {
     @State private var vehicleYear = ""
     @State private var vehicleTank = ""
     @State private var vehicleMpg = ""
+    @State private var showingPayerGroupForm = false
+    @State private var payerGroupName = ""
+    @State private var payerGroupIcon = "person.fill"
+    @State private var payerGroupColor = "purple"
     @State private var pendingVehicleDelete: Vehicle?
     @State private var pendingPlaceDelete: SavedPlace?
+    @State private var pendingPayerGroupArchive: PayerGroup?
     @State private var savedFlash = false
+
+    /// Active (non-archived) groups, in display order — everywhere in this view that needs "the
+    /// current list of payers" reads this instead of the raw query.
+    private var activePayerGroups: [PayerGroup] { payerGroups.filter { !$0.isArchived } }
 
     private var currentSettings: UserSettings {
         if let s = settings.first { return s }
@@ -85,26 +95,89 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Picker("Paid by", selection: $defaultPayer) {
-                        ForEach(PaidBy.allCases, id: \.self) { payer in
-                            Label(payer.label, systemImage: payer.icon).tag(payer)
+                    ForEach(activePayerGroups) { group in
+                        HStack(spacing: 12) {
+                            Image(systemName: group.icon)
+                                .foregroundStyle(group.color)
+                                .frame(width: 24)
+                            Text(group.name).fontWeight(.medium)
+                            Spacer()
+                            if group.isBuiltIn {
+                                Text("Built-in").font(.caption2).foregroundStyle(.tertiary)
+                            }
                         }
                     }
-                    .pickerStyle(.segmented)
-                    .onAppear { defaultPayer = currentSettings.defaultPaidBy }
+                    .onDelete { indexSet in
+                        // Built-in groups (Me/Parents) offer no delete affordance — skip them so a
+                        // swipe that happens to land on one is a no-op instead of archiving it.
+                        let rows = activePayerGroups
+                        if let i = indexSet.first, !rows[i].isBuiltIn { pendingPayerGroupArchive = rows[i] }
+                    }
+
+                    Button {
+                        showingPayerGroupForm.toggle()
+                    } label: {
+                        Label(showingPayerGroupForm ? "Cancel" : "Add Payer Group",
+                              systemImage: showingPayerGroupForm ? "xmark" : "plus")
+                    }
+
+                    if showingPayerGroupForm {
+                        TextField("Name *", text: $payerGroupName)
+                        HStack(spacing: 10) {
+                            ForEach(PayerGroup.iconPresets, id: \.self) { icon in
+                                Button { payerGroupIcon = icon } label: {
+                                    Image(systemName: icon)
+                                        .font(.subheadline)
+                                        .foregroundStyle(payerGroupIcon == icon ? .white : .secondary)
+                                        .frame(width: 30, height: 30)
+                                        .background(payerGroupIcon == icon ? PayerGroup.color(for: payerGroupColor) : Color(.systemGray5),
+                                                   in: .circle)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        HStack(spacing: 10) {
+                            ForEach(PayerGroup.colorPresets, id: \.name) { preset in
+                                Button { payerGroupColor = preset.name } label: {
+                                    Circle().fill(preset.color).frame(width: 26, height: 26)
+                                        .overlay(Circle().stroke(.white, lineWidth: payerGroupColor == preset.name ? 2 : 0))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        Button("Save Group") {
+                            let nextOrder = (payerGroups.map(\.sortOrder).max() ?? -1) + 1
+                            let key = "GROUP_\(UUID().uuidString.prefix(8))"
+                            let g = PayerGroup(key: key, name: payerGroupName, icon: payerGroupIcon,
+                                              colorName: payerGroupColor, sortOrder: nextOrder)
+                            modelContext.insert(g)
+                            try? modelContext.save()
+                            Haptics.success()
+                            payerGroupName = ""; payerGroupIcon = "person.fill"; payerGroupColor = "purple"
+                            showingPayerGroupForm = false
+                        }
+                        .disabled(payerGroupName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+
+                    Picker("Default payer", selection: $defaultPayer) {
+                        ForEach(activePayerGroups) { group in
+                            Label(group.name, systemImage: group.icon).tag(group.key)
+                        }
+                    }
+                    .onAppear { defaultPayer = currentSettings.defaultPaidByRaw }
                     .onChange(of: defaultPayer) { _, newValue in
                         // Guard against the load-on-appear flip firing a spurious save + haptic:
-                        // onAppear can change defaultPayer (e.g. .myself → .parents), which trips
-                        // onChange even though nothing was persisted yet. Only write real edits.
-                        guard newValue != currentSettings.defaultPaidBy else { return }
-                        currentSettings.defaultPaidBy = newValue
+                        // onAppear can change defaultPayer, which trips onChange even though nothing
+                        // was persisted yet. Only write real edits.
+                        guard newValue != currentSettings.defaultPaidByRaw else { return }
+                        currentSettings.defaultPaidByRaw = newValue
                         try? modelContext.save()
                         Haptics.tap()
                     }
                 } header: {
                     Text("Who Pays for Gas")
                 } footer: {
-                    Text("The default payer for drives you start ad-hoc (Start a Drive or Go to). Scheduled drives use the payer set on the schedule, and you can still change any drive's payer afterward.")
+                    Text("The default payer for drives you start ad-hoc (Start a Drive or Go to). Scheduled drives use the payer set on the schedule, and you can still change any drive's payer afterward. Removing a group hides it from pickers but keeps its name on drives/fill-ups already logged with it.")
                 }
 
                 Section("Distance Unit") {
@@ -267,6 +340,27 @@ struct SettingsView: View {
                     if let p = pendingPlaceDelete { Haptics.warning(); modelContext.delete(p) }
                     pendingPlaceDelete = nil
                 }
+            }
+            .confirmationDialog("Remove this payer group?",
+                                isPresented: Binding(get: { pendingPayerGroupArchive != nil },
+                                                     set: { if !$0 { pendingPayerGroupArchive = nil } }),
+                                titleVisibility: .visible) {
+                Button("Remove Group", role: .destructive) {
+                    if let g = pendingPayerGroupArchive {
+                        Haptics.warning()
+                        g.isArchived = true
+                        // A default payer pointing at the group being removed would otherwise pick a
+                        // hidden option in the picker above — fall back to the built-in "Me".
+                        if currentSettings.defaultPaidByRaw == g.key {
+                            currentSettings.defaultPaidByRaw = PayerGroup.selfKey
+                            defaultPayer = PayerGroup.selfKey
+                        }
+                        try? modelContext.save()
+                    }
+                    pendingPayerGroupArchive = nil
+                }
+            } message: {
+                Text("Drives and fill-ups already logged with it keep showing its name — it just won't be offered for new ones.")
             }
         }
     }

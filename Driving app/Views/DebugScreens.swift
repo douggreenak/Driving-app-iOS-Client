@@ -10,10 +10,18 @@ struct ScreenshotHarness: View {
 
     @State private var container: ModelContainer = {
         let schema = Schema([DriveTrip.self, TrackPoint.self, ScheduledDrive.self,
-                             GasEntry.self, Vehicle.self, UserSettings.self, SavedPlace.self])
+                             GasEntry.self, Vehicle.self, UserSettings.self, SavedPlace.self,
+                             PayerGroup.self])
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
-        return try! ModelContainer(for: schema, configurations: config)
+        let c = try! ModelContainer(for: schema, configurations: config)
+        PayerGroupStore.seedIfNeeded(context: c.mainContext)
+        return c
     }()
+    /// Every screenshot case renders a plain `LiveTrackingView` without going through
+    /// `ActiveDriveController.start(...)` — it still needs *some* controller in the environment since
+    /// `LiveTrackingView` reads one for its minimize button, even though minimizing is never exercised
+    /// in a screenshot fixture.
+    @State private var activeDrive = ActiveDriveController()
 
     var body: some View {
         Group {
@@ -115,6 +123,7 @@ struct ScreenshotHarness: View {
             }
         }
         .modelContainer(container)
+        .environment(activeDrive)
         .preferredColorScheme(.dark)
     }
 
@@ -281,7 +290,7 @@ enum SampleData {
                 startLat: first.lat, startLng: first.lng, endLat: last.lat, endLng: last.lng,
                 distance: miles, duration: secs, movingSeconds: Int(Double(secs) * 0.85),
                 maxSpeed: seg.map(\.speed).max() ?? 0, avgSpeed: secs > 0 ? miles / (Double(secs) / 3600) : 0,
-                name: "Errand Run", category: .errand, paidBy: .parents,
+                name: "Errand Run", category: .errand, paidBy: PayerGroup.parentsKey,
                 vehicleName: "My Subaru", vehicleMpg: 28, estimatedGallons: gallons)
             trip.journeyID = jid
             trip.legIndex = i
@@ -319,7 +328,7 @@ enum SampleData {
                 startLat: 61.21, startLng: -149.90, endLat: 61.17, endLng: -149.99,
                 distance: miles, duration: secs, movingSeconds: Int(Double(secs) * 0.85),
                 maxSpeed: 52 + Double(k % 4) * 6, avgSpeed: miles / (Double(secs) / 3600),
-                category: cats[k % cats.count], paidBy: k % 2 == 0 ? .parents : .myself,
+                category: cats[k % cats.count], paidBy: k % 2 == 0 ? PayerGroup.parentsKey : PayerGroup.selfKey,
                 vehicleName: cars[k % cars.count],
                 vehicleMpg: mpg, estimatedGallons: miles / mpg, scheduledArrival: scheduled)
             context.insert(trip)
@@ -335,7 +344,7 @@ enum SampleData {
             title: "Morning Commute", startAddress: "Downtown Anchorage", endAddress: "Ted Stevens Intl Airport",
             startLat: 61.2181, startLng: -149.9003, endLat: 61.1743, endLng: -149.9982,
             departure: dep, estimatedTravelTime: 22 * 60, scheduledArrival: dep.addingTimeInterval(8 * 60),
-            repeatRule: .weekdays, category: .work, paidBy: .parents, vehicleName: "My Subaru")
+            repeatRule: .weekdays, category: .work, paidBy: PayerGroup.parentsKey, vehicleName: "My Subaru")
         context.insert(d)
         return d
     }
@@ -361,7 +370,7 @@ enum SampleData {
             startLat: 61.2181, startLng: -149.9003, endLat: 61.19, endLng: -149.88,
             departure: dep, estimatedTravelTime: 12 * 60,
             scheduledArrival: dep.addingTimeInterval(12 * 60),
-            repeatRule: .daily, category: .errand, paidBy: .parents, vehicleName: "My Subaru")
+            repeatRule: .daily, category: .errand, paidBy: PayerGroup.parentsKey, vehicleName: "My Subaru")
         context.insert(d)
         // Cancel the exact occurrence that would otherwise be promoted to Up Next.
         if let up = d.upNextDeparture() { d.setOccurrenceCanceled(up, true) }
@@ -377,7 +386,7 @@ enum SampleData {
             startLat: 61.2181, startLng: -149.9003, endLat: 61.19, endLng: -149.82,
             departure: dep, estimatedTravelTime: 12 * 60,
             scheduledArrival: dep.addingTimeInterval(12 * 60),
-            repeatRule: .daily, category: .school, paidBy: .parents, vehicleName: "My Subaru")
+            repeatRule: .daily, category: .school, paidBy: PayerGroup.parentsKey, vehicleName: "My Subaru")
         context.insert(d)
         // Cancel the earlier-today occurrence (now clearly past its window).
         let cal = Calendar.current
@@ -395,7 +404,7 @@ enum SampleData {
             startLat: 61.2181, startLng: -149.9003, endLat: 61.1743, endLng: -149.9982,
             departure: morning, estimatedTravelTime: 22 * 60,
             scheduledArrival: morning.addingTimeInterval(22 * 60),
-            repeatRule: .weekdays, category: .work, paidBy: .parents, vehicleName: "My Subaru")
+            repeatRule: .weekdays, category: .work, paidBy: PayerGroup.parentsKey, vehicleName: "My Subaru")
         let evening = cal.date(bySettingHour: 17, minute: 30, second: 0, of: Date()) ?? Date()
         let s2 = ScheduledDrive(
             title: "Gym", startAddress: "Apex Engineering", endAddress: "The Alaska Club",
@@ -509,6 +518,107 @@ enum SampleData {
         t.destinationName = "Home"
         t.scheduledArrival = Date().addingTimeInterval(30 * 60)  // ample budget → ON TIME / EARLY
         return t
+    }
+}
+
+// MARK: - Full sample-data seed for manual testing (UITEST_SEED=1)
+
+extension SampleData {
+    /// Comprehensive seed for manually exercising the app in a real (non-headless) simulator run —
+    /// triggered by launching with the `UITEST_SEED=1` environment variable (see `ContentView`).
+    /// Unlike the screenshot fixtures above (which each seed just enough for one screen), this
+    /// populates every model the newer features touch in one pass: two vehicles (one with a fill-up
+    /// date, for the pumped-vs-estimated comparison), a custom payer group beyond the built-in
+    /// Me/Parents, trips spanning several fill-up windows across all three payers, upcoming scheduled
+    /// drives, and saved places. Safe to call every launch — no-ops once the marker vehicle exists.
+    @MainActor
+    static func seedEverythingForTesting(context: ModelContext) {
+        guard (try? context.fetch(FetchDescriptor<Vehicle>()))?.isEmpty ?? true else { return }
+
+        seedPlaces(into: context)
+        seedSchedules(into: context)
+
+        let subaru = Vehicle(name: "My Subaru", make: "Subaru", model: "Outback", year: 2021, tankSize: 16.5, avgMpg: 28)
+        subaru.lastFilledUp = Date().addingTimeInterval(-3 * 86400)
+        let crv = Vehicle(name: "Mom's CR-V", make: "Honda", model: "CR-V", year: 2019, tankSize: 14, avgMpg: 26)
+        context.insert(subaru)
+        context.insert(crv)
+
+        // A custom payer group beyond the two built-ins, to prove "add a payer group" end-to-end —
+        // it should show up in every payer picker, the Stats breakdown, and the Gas filter.
+        let grandma = PayerGroup(key: "GROUP_TEST_GRANDMA", name: "Grandma", icon: "figure.wave",
+                                 colorName: "purple", sortOrder: 2)
+        context.insert(grandma)
+
+        // Trips for "My Subaru" spanning three fill-up windows (20d/10d/3d ago — matching
+        // `sampleGasEntries()` below), across all three payers, so the Gas tab's pumped-vs-estimated
+        // comparison and the Stats "Who's paying" breakdown both have real, varied data.
+        let payers = [PayerGroup.selfKey, PayerGroup.parentsKey, "GROUP_TEST_GRANDMA"]
+        let destinations = ["Apex Engineering", "Ted Stevens Intl Airport", "The Alaska Club"]
+        let categories: [TripCategory] = [.commute, .errand, .work, .leisure]
+        for (i, offset) in [-19, -17, -14, -12, -9, -7, -5, -2, -1].enumerated() {
+            insertTestTrip(into: context, daysAgo: offset, vehicleName: "My Subaru", ratedMpg: 28,
+                           endAddress: destinations[i % destinations.count],
+                           category: categories[i % categories.count], paidBy: payers[i % payers.count])
+        }
+        // A couple of trips for the second car too, so "Time in each car" / the vehicle picker have
+        // more than one real option.
+        for offset in [-6, -2] {
+            insertTestTrip(into: context, daysAgo: offset, vehicleName: "Mom's CR-V", ratedMpg: 26,
+                           endAddress: "The Alaska Club", category: .leisure, paidBy: PayerGroup.parentsKey)
+        }
+
+        try? context.save()
+    }
+
+    private static func insertTestTrip(into context: ModelContext, daysAgo: Int, vehicleName: String,
+                                        ratedMpg: Double, endAddress: String, category: TripCategory, paidBy: String) {
+        let base = Date().addingTimeInterval(Double(daysAgo) * 86400)
+        let pts = recordedPoints(base: base)
+        guard let first = pts.first, let last = pts.last else { return }
+        var meters = 0.0
+        for k in 1..<pts.count { meters += pts[k - 1].coordinate.distanceMeters(to: pts[k].coordinate) }
+        let miles = meters / 1609.34
+        let secs = Int(last.t.timeIntervalSince(first.t))
+        let gallons = FuelModel.gallons(segments: FuelModel.segments(from: pts), ratedMpg: ratedMpg)
+        let trip = DriveTrip(
+            date: first.t, endDate: last.t,
+            startAddress: "Home", endAddress: endAddress,
+            startLat: first.lat, startLng: first.lng, endLat: last.lat, endLng: last.lng,
+            distance: miles, duration: secs, movingSeconds: Int(Double(secs) * 0.85),
+            maxSpeed: pts.map(\.speed).max() ?? 0, avgSpeed: secs > 0 ? miles / (Double(secs) / 3600) : 0,
+            category: category, paidBy: paidBy,
+            vehicleName: vehicleName, vehicleMpg: ratedMpg, estimatedGallons: gallons)
+        context.insert(trip)
+        for (k, p) in pts.enumerated() {
+            let tp = TrackPoint(seq: k, t: p.t, lat: p.lat, lng: p.lng, speed: p.speed,
+                                course: p.course, accuracy: p.accuracy, altitude: p.altitude, onRoad: true)
+            tp.trip = trip
+            context.insert(tp)
+        }
+    }
+
+    /// Fake gas fill-ups for "My Subaru" spanning the same three windows as the seeded trips above.
+    /// Used only as a local stand-in when the real backend is unreachable (see
+    /// `GasListView.loadEntries`) so the pumped-vs-estimated comparison can be checked in a manual
+    /// test run without a live backend connection or real account data.
+    static func sampleGasEntries() -> [APIGasEntry] {
+        let f = ISO8601DateFormatter()
+        func iso(_ daysAgo: Int) -> String { f.string(from: Date().addingTimeInterval(-Double(daysAgo) * 86400)) }
+        return [
+            APIGasEntry(id: "test-1", date: iso(20), gallons: 11.4, pricePerGallon: 3.79,
+                       totalCost: 11.4 * 3.79, paidBy: PayerGroup.selfKey, fuelType: "REGULAR",
+                       stationName: "Costco", odometer: 30500, vehicleName: "My Subaru"),
+            APIGasEntry(id: "test-2", date: iso(10), gallons: 2.1, pricePerGallon: 3.85,
+                       totalCost: 2.1 * 3.85, paidBy: PayerGroup.parentsKey, fuelType: "REGULAR",
+                       stationName: "Tesoro", odometer: 30700, vehicleName: "My Subaru"),
+            APIGasEntry(id: "test-3", date: iso(3), gallons: 10.8, pricePerGallon: 3.72,
+                       totalCost: 10.8 * 3.72, paidBy: "GROUP_TEST_GRANDMA", fuelType: "PREMIUM",
+                       stationName: "Costco", odometer: 30950, vehicleName: "My Subaru"),
+            APIGasEntry(id: "test-4", date: iso(6), gallons: 9.6, pricePerGallon: 3.65,
+                       totalCost: 9.6 * 3.65, paidBy: PayerGroup.parentsKey, fuelType: "REGULAR",
+                       stationName: "Fred Meyer", odometer: 15200, vehicleName: "Mom's CR-V"),
+        ]
     }
 }
 #endif
