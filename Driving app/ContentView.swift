@@ -97,20 +97,32 @@ struct ContentView: View {
         // A `ZStack` sibling here used to render the bar UNDER the tab bar's own bottom placement —
         // both being bottom-aligned in the same stack, the bar and the tab bar occupied nearly the
         // same ~85% of screen height, so the bar visually blended into the tab bar chrome (same
-        // `.ultraThinMaterial`) and ate most of the Stats/Trips/Gas tap targets. `.safeAreaInset`
-        // instead docks it as its own bar genuinely ABOVE the tab bar (the "Apple Music mini-player"
-        // position the doc comment always intended) and insets every tab's content to make room for
-        // it, so nothing else scrolls underneath it either.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if activeDrive.isMinimized, let tracker = activeDrive.tracker {
+        // `.ultraThinMaterial`) and ate most of the Stats/Trips/Gas tap targets. A `.safeAreaInset`
+        // attached to the `TabView` itself was tried next, but the tab bar's own bottom chrome isn't a
+        // normal participant in safe-area-inset layout — it's baked into the `TabView`, so the inset
+        // wasn't guaranteed to stack genuinely above it, and in practice the bar still overlapped the
+        // tab bar. `.tabViewBottomAccessory` is the API the platform ships specifically for this
+        // "Apple Music mini-player" placement: it docks content in the tab bar's own accessory slot,
+        // above the tab bar, and keeps it there as the tab bar's height changes. `.tabBarMinimizeBehavior
+        // (.never)` keeps the tab bar from shrinking on scroll, so the accessory never has to
+        // renegotiate space with a tab bar whose height just changed under it.
+        //
+        // The `isEnabled:` parameter (not just an empty/`if`-gated content closure) matters here: the
+        // system draws the accessory slot's own Liquid Glass background as soon as the modifier is
+        // attached, independent of whether its content view is empty — an `if activeDrive.isMinimized
+        // {...}` *inside* the closure left a fully-chrome'd, empty glass bar sitting above the tab bar
+        // with no drive active. `isEnabled:` tells the system to collapse the slot itself, chrome
+        // included, when there's nothing to show.
+        .tabViewBottomAccessory(isEnabled: activeDrive.isMinimized) {
+            if let tracker = activeDrive.tracker {
                 MinimizedDriveBar(tracker: tracker) {
                     Haptics.tap()
                     activeDrive.restore()
                 }
-                .padding(.bottom, 6)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .tabBarMinimizeBehavior(.never)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: activeDrive.isMinimized)
         .environment(activeDrive)
         .environment(\.tabActivityToken, activityToken)
