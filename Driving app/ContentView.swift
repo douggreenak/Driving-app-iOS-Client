@@ -155,9 +155,16 @@ struct ContentView: View {
             set: { if !$0 { activeDrive.clear() } }
         )) {
             if let tracker = activeDrive.tracker {
+                // Re-applied explicitly: `.environment(activeDrive)` above (on the ZStack) normally
+                // propagates into this cover's content, but `LiveTrackingView`'s own top-level
+                // `NavigationStack` resolves its destinations through a code path that doesn't
+                // reliably see environment values inherited across a fullScreenCover boundary —
+                // without this, `LiveTrackingView`'s `@Environment(ActiveDriveController.self)` read
+                // crashes instantly with "No Observable object of type ActiveDriveController found."
                 LiveTrackingView(tracker: tracker, scheduled: activeDrive.context.scheduled,
                                  asModal: activeDrive.context.asModal, goTo: activeDrive.context.goTo,
                                  onFinish: { activeDrive.clear(); watchStart = nil; selection = .drive })
+                    .environment(activeDrive)
             }
         }
         #if canImport(WatchConnectivity) && os(iOS)
