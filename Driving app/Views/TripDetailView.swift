@@ -407,7 +407,7 @@ struct TripDetailView: View {
         let m = abs(seconds) / 60
         let text: String
         if abs(seconds) < 60 { text = "\(verb) on time" }
-        else { text = "\(verb) \(m)m \(seconds > 0 ? "late" : "early")" }
+        else { text = "\(verb) \(m)m \(seconds > 0 ? "delayed" : "early")" }
         return Text(text)
             .font(.caption.weight(.medium))
             .foregroundStyle(abs(seconds) < 60 ? .green : tint)
@@ -696,7 +696,7 @@ struct EditTripScheduleView: View {
                         labeledDelta("Actual departure", trip.date, departure)
                     }
                 } footer: {
-                    Text("Set the time you were supposed to leave. The start dot turns orange if you left late.")
+                    Text("Set the time you were supposed to leave. The start dot turns orange if your departure was delayed.")
                 }
                 Section {
                     Toggle("Scheduled arrival", isOn: $hasArrival.animation())
@@ -705,7 +705,7 @@ struct EditTripScheduleView: View {
                         labeledDelta("Actual arrival", trip.endDate, arrival)
                     }
                 } footer: {
-                    Text("Set the time you were supposed to arrive. The trip is graded on-time or late against this.")
+                    Text("Set the time you were supposed to arrive. The trip is graded on-time or delayed against this.")
                 }
             }
             .navigationTitle("Edit Schedule")
@@ -721,7 +721,7 @@ struct EditTripScheduleView: View {
     private func labeledDelta(_ label: String, _ actual: Date, _ scheduled: Date) -> some View {
         let secs = Int(actual.timeIntervalSince(scheduled))
         let m = abs(secs) / 60
-        let text = abs(secs) < 60 ? "on time" : "\(m)m \(secs > 0 ? "late" : "early")"
+        let text = abs(secs) < 60 ? "on time" : "\(m)m \(secs > 0 ? "delayed" : "early")"
         return HStack {
             Text(label).foregroundStyle(.secondary)
             Spacer()

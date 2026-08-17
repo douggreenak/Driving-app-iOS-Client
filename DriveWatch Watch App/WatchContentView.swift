@@ -136,7 +136,7 @@ private struct LiveDriveView: View {
     private var delayText: String? {
         guard let d = live.delaySeconds else { return nil }
         let m = max(1, abs(d) / 60)
-        if d > 90 { return "\(m)m late" }
+        if d > 90 { return "\(m)m delayed" }
         if d < -90 { return "\(m)m early" }
         return "On time"
     }

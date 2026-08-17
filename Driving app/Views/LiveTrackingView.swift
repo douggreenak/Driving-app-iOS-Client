@@ -55,7 +55,17 @@ struct LiveTrackingView: View {
     /// drawn as a dotted light-blue guide line. Refreshed as they drive so it re-routes if they
     /// deviate. Empty when there's no destination or no route yet.
     @State private var efficientRoute: [CLLocationCoordinate2D] = []
+    /// Only advances on a SUCCESSFUL fetch — a failed/throttled attempt must not count as "we tried
+    /// from here", or every subsequent fix would silently skip retrying (see `refreshEfficientRoute`).
     @State private var lastRouteFetchFrom: CLLocationCoordinate2D?
+    /// True while a directions request is in flight — blocks a new one from firing on every ~1 Hz
+    /// GPS fix while the current one is still pending (that produced dozens of concurrent requests
+    /// and got MapKit to throttle us into never drawing a route at all).
+    @State private var routeFetchInFlight = false
+    /// Bumped on every fetch attempt so a late-arriving response from an old (now-irrelevant) leg
+    /// target can recognize it's stale and discard itself instead of overwriting a fresher route.
+    @State private var routeRequestID = 0
+    @State private var lastRouteFetchFailedAt: Date?
 
     /// Designated init: used by `ContentView`'s single shared full-screen cover, which always has a
     /// tracker on hand via `ActiveDriveController` (fresh for a new drive, or the same instance
@@ -159,7 +169,16 @@ struct LiveTrackingView: View {
             .sheet(isPresented: $showingAddStop) {
                 LocationSearchSheet(title: addStopSheetTitle) { picked in
                     Haptics.tap()
-                    tracker.appendLiveStop(RouteStop(address: picked.address, coordinate: picked.coordinate))
+                    let stop = RouteStop(address: picked.address, coordinate: picked.coordinate)
+                    if !tracker.isTracking {
+                        // Pre-start "Set destination" / "Tap to change": this is the single ad-hoc
+                        // destination, not a growing stop list — `appendLiveStop` would INSERT ahead
+                        // of whatever was already picked instead of replacing it, silently turning
+                        // "change my destination" into a 2-stop route via the discarded old one.
+                        tracker.setRoute(stops: [], finalDestination: picked.coordinate, finalName: picked.address)
+                    } else {
+                        tracker.appendLiveStop(stop)
+                    }
                     lastRouteFetchFrom = nil  // force the guide line to re-route to the new next stop
                     refreshEfficientRoute()
                     activeDrive.pushLiveUpdate()
@@ -534,7 +553,17 @@ struct LiveTrackingView: View {
                         .font(.caption.weight(.bold)).buttonStyle(.borderedProminent)
                 }
             }
-            Button { LocationTracker.discardRecoverableSession(); recovered = nil } label: {
+            Button {
+                LocationTracker.discardRecoverableSession()
+                recovered = nil
+                // This recovered session belongs to a previous process that force-quit before
+                // calling `end()` — nothing in THIS process's `LiveActivityController` knows about
+                // it, so the normal `activeDrive.endLiveActivity()` path (which only acts on an
+                // in-memory reference) can't clean it up. Sweep orphans directly instead.
+                #if canImport(ActivityKit) && !os(macOS)
+                Task { await LiveActivityController.endOrphaned() }
+                #endif
+            } label: {
                 Image(systemName: "trash").foregroundStyle(.red)
             }
         }
@@ -678,9 +707,14 @@ struct LiveTrackingView: View {
         }
     }
 
-    /// End the whole drive now (from any leg) → summary.
+    /// End the whole drive now (from any leg) → summary. Pushes a terminal Live Activity/Watch frame
+    /// right away — independent of whether the user goes on to Save or Discard in the summary sheet,
+    /// the physical drive is over the instant this fires, and the activity shouldn't keep reading
+    /// "On the way" while they're filling in the category/notes.
     private func endDrive() {
         withAnimation(.spring(duration: 0.4)) { tracker.stopTracking() }
+        activeDrive.endLiveActivityWithFinalState()
+        activeDrive.endLiveBroadcast()
         showingSummary = true
     }
 
@@ -816,25 +850,53 @@ struct LiveTrackingView: View {
 
     /// Fetch the fastest road route from the current location to the destination for the
     /// guide line. Prioritizes Apple Maps' recommended (fastest) route. Throttled: only re-routes
-    /// after the driver has moved ~250 m (or when we have no line yet), keeping well under MapKit's
-    /// directions rate limit while still re-routing on meaningful deviations.
+    /// after the driver has moved ~250 m, keeping well under MapKit's directions rate limit while
+    /// still re-routing on meaningful deviations.
+    ///
+    /// Three failure modes this guards against (each was reproducible and drew a "nonexistent" or
+    /// stale guide line): (1) the 250 m throttle used to only apply once a route existed, so a slow
+    /// first fetch got re-requested on every ~1 Hz GPS fix — dozens of concurrent requests that got
+    /// MapKit to throttle us into never drawing a route; (2) nothing tracked which request was
+    /// newest, so a slow response for a leg the driver already left could land after a fresher one
+    /// and snap the guide line back to a stop they're no longer headed to; (3) a failed attempt still
+    /// advanced `lastRouteFetchFrom`, so one MapKit hiccup left a stale line frozen for the rest of
+    /// the drive instead of retrying.
     private func refreshEfficientRoute() {
-        guard tracker.isTracking, let dest = tracker.destination, let from = tracker.currentLocation else { return }
-        // More aggressive refresh threshold to stay up-to-date with Apple Maps route
-        if let last = lastRouteFetchFrom, !efficientRoute.isEmpty, from.distanceMeters(to: last) < 250 { return }
-        lastRouteFetchFrom = from
+        guard tracker.isTracking, !tracker.isPausedBetweenLegs,
+              let dest = tracker.destination, let from = tracker.currentLocation, dest.isUsableCoordinate
+        else { return }
+        // A drawn line whose start has drifted far from where we actually are is worse than no line —
+        // most likely a stop we can no longer reach (or a route that failed to refresh for a while).
+        if let first = efficientRoute.first, first.distanceMeters(to: from) > 800 {
+            efficientRoute = []
+        }
+        guard !routeFetchInFlight else { return }
+        if let last = lastRouteFetchFrom, from.distanceMeters(to: last) < 250 { return }
+        // After a failure, back off a few seconds instead of retrying on every single GPS fix.
+        if let failedAt = lastRouteFetchFailedAt, Date().timeIntervalSince(failedAt) < 5 { return }
+
+        routeFetchInFlight = true
+        routeRequestID += 1
+        let requestID = routeRequestID
         Task {
             let routes = await RouteMatcher.candidateRoutes(from: from, to: dest)
-            guard let best = routes.first else { return }  // Apple Maps returns fastest first
-            let coords = best.polyline.coordinates()
-            let travelTime = best.expectedTravelTime
             await MainActor.run {
-                // Ignore a stale response if the drive ended while it was in flight.
-                if tracker.isTracking {
-                    efficientRoute = coords
-                    tracker.appleMapsExpectedTravelTime = travelTime
-                    tracker.appleMapsTravelTimeFetchDate = Date()
+                routeFetchInFlight = false
+                // Stale if a newer request has since been fired, or the leg target changed while
+                // this one was in flight — either way, this response no longer describes where
+                // we're headed and must not overwrite whatever's current.
+                guard requestID == routeRequestID, tracker.isTracking,
+                      tracker.destination.map({ $0.isApproximately(dest) }) == true
+                else { return }
+                guard let best = routes.first, best.polyline.pointCount >= 2 else {
+                    lastRouteFetchFailedAt = Date()
+                    return
                 }
+                lastRouteFetchFrom = from
+                lastRouteFetchFailedAt = nil
+                efficientRoute = best.polyline.coordinates()
+                tracker.appleMapsExpectedTravelTime = best.expectedTravelTime
+                tracker.appleMapsTravelTimeFetchDate = Date()
             }
         }
     }
@@ -1015,6 +1077,11 @@ struct LiveTrackingView: View {
         guard recovered != nil else { return }
         recovered = nil
         LocationTracker.discardRecoverableSession()
+        // Same as the trash button: this session's Live Activity (if any) belongs to a previous,
+        // now-dead process — this one never called `start()` for it, so nothing else will end it.
+        #if canImport(ActivityKit) && !os(macOS)
+        Task { await LiveActivityController.endOrphaned() }
+        #endif
         Task { await saveRecovered(rec) }
     }
 

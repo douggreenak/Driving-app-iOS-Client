@@ -12,6 +12,7 @@ struct ScheduledDriveDetailView: View {
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
     @Environment(ActiveDriveController.self) private var activeDrive
+    @Environment(\.tabActivityToken) private var activityToken
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
     @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
 
@@ -20,6 +21,10 @@ struct ScheduledDriveDetailView: View {
     @State private var loadingRoute = true
     @State private var showEdit = false
     @State private var showDeleteConfirm = false
+    /// See `DriveHomeView.now`'s doc comment — same problem (the ON TIME/DELAYED banner, the dots,
+    /// and the countdown all used to read `Date()`/`.now` in a computed property, so none of them
+    /// ever refreshed on their own while this page stayed open), same fix.
+    @State private var now = Date.now
 
     // Anchor the page on the tapped occurrence when we have one, else the drive's Up Next occurrence
     // — the next one still to make (or the current one if it's overdue and unstarted).
@@ -39,14 +44,14 @@ struct ScheduledDriveDetailView: View {
     private var isCanceled: Bool { drive.isOccurrenceCanceled(departure) }
     private var status: TripStatus {
         .occurrence(departure: departure, scheduledArrival: arrival, travelSeconds: drive.estimatedTravelTime,
-                    isCanceled: isCanceled, startedAt: drive.lastStartedAt)
+                    isCanceled: isCanceled, startedAt: drive.lastStartedAt, now: now)
     }
 
     // Start dot = departure status, end dot = arrival status (green / yellow / red). Overdue is
     // measured against the same anchored occurrence the banner uses, so the dots never disagree with
-    // the status (e.g. a green ON TIME banner next to yellow "late" dots). A not-yet-started drive is
-    // never pre-judged as delayed from its raw predicted travel time.
-    private var isOverdueToDepart: Bool { Date().timeIntervalSince(departure) > 90 }
+    // the status (e.g. a green ON TIME banner next to yellow "delayed" dots). A not-yet-started drive
+    // is never pre-judged as delayed from its raw predicted travel time.
+    private var isOverdueToDepart: Bool { now.timeIntervalSince(departure) > 90 }
     private var startColor: Color { isCanceled ? .red : (isOverdueToDepart ? .yellow : .green) }
     private var endColor: Color { isCanceled ? .red : (isOverdueToDepart ? .yellow : .green) }
 
@@ -71,7 +76,16 @@ struct ScheduledDriveDetailView: View {
                 Button { showEdit = true } label: { Image(systemName: "pencil") }
             }
         }
-        .task { await loadRoute() }
+        // `.task(id:)` (not a bare `.task`) so revisiting this page — the tab was left and come back
+        // to, or the app was foregrounded — re-fetches the route instead of showing whatever was
+        // current the first time it ever opened.
+        .task(id: activityToken) { await loadRoute() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                now = .now
+            }
+        }
         .sheet(isPresented: $showEdit) { NewScheduledDriveView(editing: drive, occurrenceDate: departure) }
     }
 
@@ -186,7 +200,7 @@ struct ScheduledDriveDetailView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if !isCanceled {
-                    Text(TripStatus.countdown(to: departure)).font(.caption.weight(.semibold)).foregroundStyle(status.color)
+                    Text(TripStatus.countdown(to: departure, from: now)).font(.caption.weight(.semibold)).foregroundStyle(status.color)
                 }
             }
         }
@@ -274,18 +288,39 @@ struct ScheduledDriveDetailView: View {
 
     // MARK: - Actions
 
+    /// True when some OTHER drive (not this schedule) is already active — starting would otherwise
+    /// silently reopen that unrelated drive instead (`ActiveDriveController.start` just hands back
+    /// whatever tracker already exists), with nothing to tell the user their tap did the wrong thing.
+    private var anotherDriveIsActive: Bool {
+        activeDrive.hasActiveDrive && activeDrive.context.scheduled?.id != drive.id
+    }
+    /// True when THIS schedule is the one already active — the button becomes "resume" instead.
+    private var thisDriveIsActive: Bool {
+        activeDrive.hasActiveDrive && activeDrive.context.scheduled?.id == drive.id
+    }
+
     private var actions: some View {
         VStack(spacing: 12) {
             Button {
-                Haptics.tap()
-                activeDrive.start(scheduled: drive)
+                if anotherDriveIsActive {
+                    Haptics.warning()
+                    activeDrive.restore()
+                } else {
+                    Haptics.tap()
+                    activeDrive.start(scheduled: drive)
+                }
             } label: {
-                Label("Start Drive", systemImage: "play.fill")
+                Label(thisDriveIsActive ? "Resume Drive" : "Start Drive", systemImage: thisDriveIsActive ? "location.fill.viewfinder" : "play.fill")
                     .font(.headline).foregroundStyle(.white)
                     .frame(maxWidth: .infinity).padding(.vertical, 14)
-                    .background((isCanceled ? Color.gray : .green).gradient, in: .capsule)
+                    .background((isCanceled ? Color.gray : (thisDriveIsActive ? Color.blue : .green)).gradient, in: .capsule)
             }
             .disabled(isCanceled)
+            if anotherDriveIsActive {
+                Text("Another drive is already in progress — tap to return to it first.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
 
             HStack(spacing: 12) {
                 Button {
@@ -319,6 +354,10 @@ struct ScheduledDriveDetailView: View {
                 let removedRemoteID = drive.remoteID
                 let doomed = drive
                 let ctx = context
+                // Recorded before the network delete below, which may not reach the server (offline,
+                // or fails outright) — without it, a later sync's pull would see this drive still on
+                // the server and silently resurrect it locally. See `ScheduledDriveStore`.
+                if let id = removedRemoteID { ScheduledDriveStore.recordLocalDeletion(remoteID: id) }
                 // Pop FIRST, then delete: `drive` is @Bindable and read all over this body, so
                 // deleting it while the view is still on screen risks a re-render dereferencing an
                 // invalidated SwiftData model. Deleting after the pop avoids that.
@@ -340,12 +379,18 @@ struct ScheduledDriveDetailView: View {
     // MARK: - Route fetch
 
     private func loadRoute() async {
+        loadingRoute = true
         // Route through every waypoint (start → stops → destination), summing the legs.
         if let result = await RouteMatcher.multiLegRoute(through: drive.routeCoordinates) {
             routeCoords = result.coordinates
-            // Refresh the stored predicted travel time from the live optimal multi-leg route.
-            drive.estimatedTravelTime = result.seconds
-            try? context.save()
+            // Refresh the stored predicted travel time from the live optimal multi-leg route — but
+            // only write (and only when it actually differs) so an ordinary re-visit that fetches
+            // the exact same route doesn't dirty the drive and trigger a full `ScheduledDriveStore`
+            // push/reconcile cycle for a no-op change.
+            if abs(result.seconds - drive.estimatedTravelTime) > 60 {
+                drive.estimatedTravelTime = result.seconds
+                try? context.save()
+            }
         }
         let coords = routeCoords.isEmpty ? drive.routeCoordinates : routeCoords
         cameraPosition = .region(.enclosing(coords))

@@ -256,7 +256,7 @@ struct StatsView: View {
                 Text("\(stats.onTimeCount) of \(stats.scheduledCount.things("scheduled drive")) on time")
                     .font(.caption).foregroundStyle(.secondary)
                 if let avg = stats.avgDelaySeconds {
-                    Text(avg > 60 ? "Avg \(Fmt.duration(avg)) late" : avg < -60 ? "Avg \(Fmt.duration(-avg)) early" : "On schedule")
+                    Text(avg > 60 ? "Avg \(Fmt.duration(avg)) delayed" : avg < -60 ? "Avg \(Fmt.duration(-avg)) early" : "On schedule")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(avg > 60 ? .orange : .green)
                 }

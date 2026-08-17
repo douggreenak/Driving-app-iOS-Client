@@ -102,7 +102,7 @@ enum RouteMatcher {
         let fastest = routes.map(\.expectedTravelTime).min() ?? 1
 
         // Score = mean GPS-to-route distance, lightly penalized for inefficiency.
-        var best = 0
+        var best: Int?
         var bestScore = Double.greatestFiniteMagnitude
         for (i, poly) in projected.enumerated() {
             guard poly.count >= 2 else { continue }
@@ -113,6 +113,11 @@ enum RouteMatcher {
                 bestScore = score
                 best = i
             }
+        }
+        // Every candidate route was a degenerate (< 2 point) polyline — nothing to snap to.
+        guard let best else {
+            return Result(coordinates: coords, onRoad: Array(repeating: false, count: coords.count),
+                          fitMeters: 0, matchedFraction: 0, usedRoute: false)
         }
 
         let route = projected[best]
@@ -134,11 +139,23 @@ enum RouteMatcher {
             }
         }
 
+        let matchedFraction = Double(matched) / Double(coords.count)
+        // The candidate route was requested for just start→end, so a round trip (or any drive whose
+        // start and end are close together) only ever gets a short connector to snap onto — most of
+        // the real track falls outside `toleranceMeters` and each of those points independently
+        // snaps to whichever bit of that connector happens to be nearest, scrambling the display
+        // polyline into a zig-zag that doesn't resemble the drive at all. A low matched fraction is
+        // the signal that happened; the raw (unsnapped) track is a strictly better display than that.
+        guard matchedFraction >= 0.35 else {
+            return Result(coordinates: coords, onRoad: Array(repeating: false, count: coords.count),
+                          fitMeters: 0, matchedFraction: 0, usedRoute: false)
+        }
+
         return Result(
             coordinates: simplify(display, tolerance: 4),
             onRoad: onRoad,
             fitMeters: fitSum / Double(gps.count),
-            matchedFraction: Double(matched) / Double(coords.count),
+            matchedFraction: matchedFraction,
             usedRoute: true
         )
     }

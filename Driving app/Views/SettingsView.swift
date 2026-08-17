@@ -30,17 +30,29 @@ struct SettingsView: View {
     @State private var pendingPlaceDelete: SavedPlace?
     @State private var pendingPayerGroupArchive: PayerGroup?
     @State private var savedFlash = false
+    /// Guards the one-time field load below — see its comment.
+    @State private var didLoadFields = false
+    @State private var exporting = false
+    @State private var exportError: String?
+    @State private var exportedFiles: [URL] = []
+    @State private var showingExportShare = false
 
     /// Active (non-archived) groups, in display order — everywhere in this view that needs "the
     /// current list of payers" reads this instead of the raw query.
     private var activePayerGroups: [PayerGroup] { payerGroups.filter { !$0.isArchived } }
 
-    private var currentSettings: UserSettings {
-        if let s = settings.first { return s }
-        let s = UserSettings()
-        modelContext.insert(s)
-        return s
-    }
+    /// A pure read — no inserting side effect. This used to insert a fresh `UserSettings` into the
+    /// context whenever `settings.first` was nil, but `currentSettings` is a *computed property*
+    /// read from several `.onAppear`s in the same `Form` — a `Form`'s rows are a lazy list, so on a
+    /// fresh install (before `@Query settings` had republished the first insert) multiple rows could
+    /// each see `settings.first == nil` in the same frame and each insert their own row, leaving
+    /// several `UserSettings` behind. Whichever one `settings.first` happened to return from then on
+    /// was arbitrary, so a saved fuel price or default payer could silently "not take" if it landed
+    /// on a different row than the one other screens (`StatsView`, `DriveHomeView`) read. A row is
+    /// now seeded exactly once at app launch (`ContentView`'s seed task, alongside
+    /// `PayerGroupStore.seedIfNeeded`); this transient fallback only covers the brief window before
+    /// that completes, and deliberately does NOT insert, so it can't create a duplicate itself.
+    private var currentSettings: UserSettings { settings.first ?? UserSettings() }
 
     var body: some View {
         NavigationStack {
@@ -50,7 +62,6 @@ struct SettingsView: View {
                         Text("$")
                         TextField("0", text: $budget)
                             .keyboardType(.decimalPad)
-                            .onAppear { budget = String(format: "%.0f", currentSettings.monthlyBudget) }
                     }
                     Button("Save Budget") {
                         currentSettings.monthlyBudget = Double(budget) ?? 0
@@ -67,7 +78,6 @@ struct SettingsView: View {
                         Text("$")
                         TextField("3.75", text: $fuelPrice)
                             .keyboardType(.decimalPad)
-                            .onAppear { fuelPrice = String(format: "%.2f", currentSettings.fuelPricePerGallon) }
                         Text("/ gal").foregroundStyle(.secondary)
                     }
                     Button {
@@ -164,7 +174,6 @@ struct SettingsView: View {
                             Label(group.name, systemImage: group.icon).tag(group.key)
                         }
                     }
-                    .onAppear { defaultPayer = currentSettings.defaultPaidByRaw }
                     .onChange(of: defaultPayer) { _, newValue in
                         // Guard against the load-on-appear flip firing a spurious save + haptic:
                         // onAppear can change defaultPayer, which trips onChange even though nothing
@@ -186,7 +195,6 @@ struct SettingsView: View {
                         Text("Kilometers").tag("km")
                     }
                     .pickerStyle(.segmented)
-                    .onAppear { unit = currentSettings.distanceUnit }
                     .onChange(of: unit) { _, newValue in
                         currentSettings.distanceUnit = newValue
                         try? modelContext.save()
@@ -312,15 +320,56 @@ struct SettingsView: View {
                 } footer: {
                     Text("Add vehicles with their MPG to get gas estimates during live tracking.")
                 }
+
+                Section {
+                    Button {
+                        exportDatabase()
+                    } label: {
+                        if exporting {
+                            HStack {
+                                ProgressView().controlSize(.small)
+                                Text("Preparing Export…")
+                            }
+                        } else {
+                            Label("Export Database", systemImage: "square.and.arrow.up")
+                        }
+                    }
+                    .disabled(exporting)
+                    if let exportError {
+                        Label(exportError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("Data")
+                } footer: {
+                    Text("Saves a copy of everything on this phone — trips, schedules, vehicles, and settings — as SQLite database files you can back up or open elsewhere. This only reads a copy; nothing here is deleted or changed.")
+                }
             }
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
             .keyboardDismissable()
+            // Loads every field exactly once, instead of each row's own `.onAppear` — a `Form`'s
+            // rows are a lazy list, so scrolling a row off-screen and back re-fires `.onAppear`,
+            // silently overwriting whatever the user had just typed (e.g. type a new budget, scroll
+            // down to Vehicles, scroll back up, and the field had reverted to the old saved value).
+            .task {
+                guard !didLoadFields else { return }
+                didLoadFields = true
+                budget = String(format: "%.0f", currentSettings.monthlyBudget)
+                fuelPrice = String(format: "%.2f", currentSettings.fuelPricePerGallon)
+                defaultPayer = currentSettings.defaultPaidByRaw
+                unit = currentSettings.distanceUnit
+            }
             .sheet(isPresented: $showingAddBookmark) {
                 AddBookmarkView(nextOrder: (savedPlaces.map(\.sortOrder).max() ?? -1) + 1)
             }
+            #if canImport(UIKit)
+            .sheet(isPresented: $showingExportShare) {
+                ActivityShareSheet(items: exportedFiles)
+            }
+            #endif
             .confirmationDialog("Delete this vehicle?",
                                 isPresented: Binding(get: { pendingVehicleDelete != nil },
                                                      set: { if !$0 { pendingVehicleDelete = nil } }),
@@ -368,6 +417,54 @@ struct SettingsView: View {
     private func vehicleDetails(_ v: Vehicle) -> String? {
         let parts = [v.year.map(String.init), v.make, v.model].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    // MARK: - Database export
+
+    /// Exports a COPY of the on-device SwiftData/SQLite store — never touches, moves, or deletes the
+    /// live files the app is actually running on, so a failed or interrupted export can't disrupt
+    /// real data. SQLite (SwiftData's storage) keeps its store as up to three files sharing a base
+    /// name — the main `.sqlite`, and `-wal`/`-shm` sidecars that hold recently-written data not yet
+    /// folded into the main file. Copying only the main file could silently omit very recent writes;
+    /// all three (whichever exist) are copied together so the export is a complete, consistent
+    /// snapshot that opens correctly in any SQLite browser.
+    private func exportDatabase() {
+        exportError = nil
+        exporting = true
+        Task {
+            defer { exporting = false }
+            // Flush any pending in-memory changes first so the exported copy is fully current —
+            // a normal save, no different from what every other Save button in this screen already
+            // does; it doesn't touch the export files themselves.
+            try? modelContext.save()
+
+            guard let storeURL = modelContext.container.configurations.first?.url else {
+                exportError = "Couldn't locate the database file."
+                return
+            }
+            let fm = FileManager.default
+            let stamp = ISO8601DateFormatter().string(from: .now).replacingOccurrences(of: ":", with: "-")
+            let exportDir = fm.temporaryDirectory.appendingPathComponent("DriveTrackerExport-\(stamp)", isDirectory: true)
+            do {
+                try fm.createDirectory(at: exportDir, withIntermediateDirectories: true)
+                var copied: [URL] = []
+                for suffix in ["", "-wal", "-shm"] {
+                    let source = URL(fileURLWithPath: storeURL.path + suffix)
+                    guard fm.fileExists(atPath: source.path) else { continue }
+                    let dest = exportDir.appendingPathComponent(source.lastPathComponent)
+                    try fm.copyItem(at: source, to: dest)
+                    copied.append(dest)
+                }
+                guard !copied.isEmpty else {
+                    exportError = "No database file found to export."
+                    return
+                }
+                exportedFiles = copied
+                showingExportShare = true
+            } catch {
+                exportError = "Couldn't prepare the export: \(error.localizedDescription)"
+            }
+        }
     }
 }
 

@@ -32,19 +32,27 @@ struct DriveHomeView: View {
     @State private var horizonDays = 21
     private let pageDays = 21
 
+    /// Every time-derived thing on this screen — the countdown, ON TIME → DELAYED flips, a
+    /// completed drive dropping off the board, even the "Good morning/afternoon/evening" greeting —
+    /// used to read `Date()`/`.now` directly inside a computed property. Nothing about that is a
+    /// `@Query`/`@State`/`@Environment` SwiftUI can observe, so none of it ever refreshed on its own;
+    /// it only ever changed when something UNRELATED (switching tabs, which bumps `activityToken`)
+    /// happened to force a re-render. This ticking `@State` is the actual clock those computations
+    /// read instead, so the screen updates on its own every 30s while it's visible.
+    @State private var now = Date.now
+
     private var greeting: String {
-        let hour = Calendar.current.component(.hour, from: .now)
+        let hour = Calendar.current.component(.hour, from: now)
         if hour < 12 { return "Good morning" }
         if hour < 17 { return "Good afternoon" }
         return "Good evening"
     }
 
     /// The single most-imminent occurrence, promoted to the hero card. Ranking by absolute distance
-    /// to now means an overdue-but-unstarted drive wins over a later on-time one, so a late drive is
-    /// never hidden. This exact occurrence is skipped in the board below to avoid showing it twice.
+    /// to now means an overdue-but-unstarted drive wins over a later on-time one, so a delayed drive
+    /// is never hidden. This exact occurrence is skipped in the board below to avoid showing it twice.
     private var upNext: (drive: ScheduledDrive, departure: Date)? {
-        let now = Date.now
-        return drives
+        drives
             .filter { $0.isEnabled }
             .compactMap { d in d.upNextDeparture(now: now).map { (d, $0) } }
             .min { abs($0.1.timeIntervalSince(now)) < abs($1.1.timeIntervalSince(now)) }
@@ -55,7 +63,7 @@ struct DriveHomeView: View {
     private var hasMoreToLoad: Bool {
         if drives.contains(where: { $0.repeatRule != .none }) { return true }
         let cal = Calendar.current
-        let horizonEnd = cal.date(byAdding: .day, value: horizonDays, to: cal.startOfDay(for: .now)) ?? .now
+        let horizonEnd = cal.date(byAdding: .day, value: horizonDays, to: cal.startOfDay(for: now)) ?? now
         return drives.contains { $0.repeatRule == .none && $0.departure > horizonEnd }
     }
 
@@ -71,7 +79,7 @@ struct DriveHomeView: View {
     /// occurrence removed so it doesn't appear both in the hero and the board.
     private var grouped: [(day: Date, items: [DriveOccurrence])] {
         let cal = Calendar.current
-        let start = cal.startOfDay(for: .now)
+        let start = cal.startOfDay(for: now)
         let end = cal.date(byAdding: .day, value: horizonDays, to: start) ?? start
         let promoted = upNext
         var all: [DriveOccurrence] = []
@@ -79,7 +87,7 @@ struct DriveHomeView: View {
             for dep in drive.occurrences(in: start...end) {
                 if let promoted, promoted.drive.id == drive.id, promoted.departure == dep { continue }
                 let occ = DriveOccurrence(drive: drive, departure: dep,
-                                          arrival: dep.addingTimeInterval(drive.arrivalBudget))
+                                          arrival: dep.addingTimeInterval(drive.arrivalBudget), now: now)
                 if occ.isCompleted || occ.isStaleDeparted { continue }
                 all.append(occ)
             }
@@ -149,6 +157,16 @@ struct DriveHomeView: View {
             // in on every revisit to this tab / app-foreground, not just the first time it's shown.
             .task(id: activityToken) { await ScheduledDriveStore.sync(context: context) }
             .task { recovered = LocationTracker.recoverableSession() }
+            // The actual clock `now`/`greeting`/every status chip and countdown on this screen reads
+            // — see `now`'s doc comment. 30s is frequent enough that ON TIME → DELAYED, a countdown,
+            // or a completed drive dropping off the board all catch up within half a minute on their
+            // own, without requiring a tab switch to force a re-render.
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(30))
+                    now = .now
+                }
+            }
         }
     }
 
@@ -202,13 +220,13 @@ struct DriveHomeView: View {
                                                    scheduledArrival: arrival,
                                                    travelSeconds: drive.estimatedTravelTime,
                                                    isCanceled: drive.isOccurrenceCanceled(departure),
-                                                   startedAt: drive.lastStartedAt), compact: true)
+                                                   startedAt: drive.lastStartedAt, now: now), compact: true)
                 }
                 Text(drive.title).font(.title3.weight(.bold))
                 HStack(spacing: 6) {
                     Image(systemName: "clock").foregroundStyle(.blue)
                     Text(departure, format: .dateTime.weekday().hour().minute()).font(.subheadline.weight(.medium))
-                    Text(TripStatus.countdown(to: departure)).font(.caption.weight(.semibold)).foregroundStyle(.blue)
+                    Text(TripStatus.countdown(to: departure, from: now)).font(.caption.weight(.semibold)).foregroundStyle(.blue)
                 }
                 Text("\(PlaceNamer.name(for: drive.startCoordinate, fallback: drive.startAddress, in: savedPlaces)) → \(PlaceNamer.name(for: drive.endCoordinate, fallback: drive.endAddress, in: savedPlaces))")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -221,20 +239,32 @@ struct DriveHomeView: View {
         .buttonStyle(.plain)
     }
 
+    /// A drive already recording (possibly minimized) hijacks this button's normal purpose: rather
+    /// than let it look like "Start a Drive" and silently reopen the unrelated in-progress one
+    /// (`ActiveDriveController.start` just re-presents whatever's already active), it becomes the
+    /// same "return to it" affordance as the minimized bar — the whole point being that a currently-
+    /// tracking drive should be obvious and reachable from every corner of the app, not just the bar.
     private var startButton: some View {
         Button {
-            Haptics.rigid()
-            activeDrive.start(asModal: true)
+            if activeDrive.hasActiveDrive {
+                Haptics.tap()
+                activeDrive.restore()
+            } else {
+                Haptics.rigid()
+                activeDrive.start(asModal: true)
+            }
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: "location.fill").font(.title3)
-                Text("Start a Drive").font(.title3.weight(.semibold))
+                Image(systemName: activeDrive.hasActiveDrive ? "location.fill.viewfinder" : "location.fill")
+                    .font(.title3)
+                Text(activeDrive.hasActiveDrive ? "Drive in Progress — Resume" : "Start a Drive")
+                    .font(.title3.weight(.semibold))
             }
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 18)
-            .background(Color.green.gradient, in: .capsule)
-            .shadow(color: .green.opacity(0.4), radius: 12, y: 4)
+            .background((activeDrive.hasActiveDrive ? Color.blue : Color.green).gradient, in: .capsule)
+            .shadow(color: (activeDrive.hasActiveDrive ? Color.blue : .green).opacity(0.4), radius: 12, y: 4)
         }
         .buttonStyle(.plain)
         .padding(.top, 2)
@@ -297,7 +327,10 @@ struct DriveHomeView: View {
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(.blue.opacity(loading ? 0.5 : 0), lineWidth: 1.5))
         }
         .buttonStyle(.plain)
-        .disabled(goToLoadingPlace != nil)
+        // A drive already in progress can't be silently swapped for this one — `startGoTo` itself
+        // guards against it too, but disabling here means the card visibly reads as unavailable
+        // instead of tappable-but-secretly-a-no-op.
+        .disabled(goToLoadingPlace != nil || activeDrive.hasActiveDrive)
     }
 
     private var goToAddCard: some View {
@@ -326,6 +359,15 @@ struct DriveHomeView: View {
     /// ETA can't be fetched (offline / no location), the drive still starts, just ungraded.
     private func startGoTo(_ place: SavedPlace) async {
         guard goToLoadingPlace == nil else { return }
+        // A drive already in progress (possibly minimized, possibly for a totally different
+        // destination) must not be silently swapped out — `ActiveDriveController.start` would just
+        // hand back the existing tracker and discard this whole Go-to, with no sign anything went
+        // wrong. Surface it instead: bring the real in-progress drive back so it's obvious why.
+        guard !activeDrive.hasActiveDrive else {
+            Haptics.warning()
+            activeDrive.restore()
+            return
+        }
         // Never clobber an unsaved drive: a Go-to auto-starts (and the crash logger truncates the
         // active log), so if a recoverable session is pending, surface it instead of starting.
         if let rec = LocationTracker.recoverableSession() {
@@ -453,6 +495,10 @@ struct DriveHomeView: View {
     private func deleteSeries(_ drive: ScheduledDrive) {
         Haptics.warning()
         let removedRemoteID = drive.remoteID
+        // Recorded BEFORE the network call below, which may never reach the server (offline, or
+        // fails outright) — the tombstone is what stops a later sync from pulling this drive back in
+        // as if it were newly added elsewhere. See `ScheduledDriveStore`'s doc comment.
+        if let id = removedRemoteID { ScheduledDriveStore.recordLocalDeletion(remoteID: id) }
         let ctx = drive.modelContext
         ctx?.delete(drive)
         try? ctx?.save()
@@ -469,6 +515,11 @@ struct DriveOccurrence: Identifiable {
     let drive: ScheduledDrive
     let departure: Date
     let arrival: Date
+    /// The instant this occurrence's status/colors are judged against. Stored (rather than each
+    /// computed property reading `Date()` fresh) so a whole board of rows is judged against one
+    /// consistent moment, AND so re-evaluating them is driven entirely by `DriveHomeView`'s ticking
+    /// `now` reconstructing these — the same reason those `Date()` reads never used to refresh live.
+    var now: Date = .now
     var id: String { "\(drive.id)-\(departure.timeIntervalSince1970)" }
 
     /// Was this occurrence actually driven (a recorded start in its window)?
@@ -487,7 +538,7 @@ struct DriveOccurrence: Identifiable {
     /// A departed occurrence now well past its window that never recorded a completion (force-quit
     /// mid-drive, or an older build's discard). Treated as finished so it drops off the board.
     var isStaleDeparted: Bool {
-        isDeparted && Date() > arrival.addingTimeInterval(6 * 3600)
+        isDeparted && now > arrival.addingTimeInterval(6 * 3600)
     }
 
     /// Is this specific occurrence canceled?
@@ -496,21 +547,21 @@ struct DriveOccurrence: Identifiable {
     var status: TripStatus {
         .occurrence(departure: departure, scheduledArrival: arrival,
                     travelSeconds: drive.estimatedTravelTime, isCanceled: isCanceled,
-                    startedAt: drive.lastStartedAt)
+                    startedAt: drive.lastStartedAt, now: now)
     }
 
-    /// Start dot = departure status: green on time, yellow if late to depart, red if canceled.
+    /// Start dot = departure status: green on time, yellow if delayed to depart, red if canceled.
     var startColor: Color {
         if isCanceled { return .red }
         if isDeparted { return .gray }
-        return Date() > departure ? .yellow : .green
+        return now > departure ? .yellow : .green
     }
 
-    /// End dot mirrors the departure state (a drive that hasn't left yet can't be "late to arrive").
+    /// End dot mirrors the departure state (a drive that hasn't left yet can't be "delayed to arrive").
     var endColor: Color {
         if isCanceled { return .red }
         if isDeparted { return .gray }
-        return Date() > departure ? .yellow : .green
+        return now > departure ? .yellow : .green
     }
 }
 

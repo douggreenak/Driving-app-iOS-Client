@@ -28,7 +28,7 @@ struct ApplyScheduleSheet: View {
 
                     if schedules.isEmpty {
                         ContentUnavailableView("No saved schedules", systemImage: "calendar.badge.plus",
-                            description: Text("Create a scheduled drive first, then apply it here to grade this trip on-time or late."))
+                            description: Text("Create a scheduled drive first, then apply it here to grade this trip on-time or delayed."))
                             .padding(.top, 24)
                     } else {
                         HStack {
@@ -57,7 +57,7 @@ struct ApplyScheduleSheet: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Grade this trip")
                 .font(.title3.weight(.bold))
-            Text("Pick the schedule this drive was meant to follow. Its departure and arrival times become this trip's targets, so it's scored on-time or late. Who pays for gas is left unchanged.")
+            Text("Pick the schedule this drive was meant to follow. Its departure and arrival times become this trip's targets, so it's scored on-time or delayed. Who pays for gas is left unchanged.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -50,6 +50,21 @@ extension CLLocationCoordinate2D {
         CLLocation(latitude: latitude, longitude: longitude)
             .distance(from: CLLocation(latitude: other.latitude, longitude: other.longitude))
     }
+
+    /// A coordinate is "usable" when it's a real fix, not the (0, 0) Null Island placeholder some
+    /// call sites use for an unset stop (e.g. a `RouteStop` created before its address is picked)
+    /// and not otherwise malformed. Routing to/through an unusable coordinate is how a "nonexistent"
+    /// path gets drawn — MapKit will happily return a route to the middle of the Atlantic.
+    var isUsableCoordinate: Bool {
+        CLLocationCoordinate2DIsValid(self) && !(abs(latitude) < 0.001 && abs(longitude) < 0.001)
+    }
+
+    /// Same place, allowing for floating-point/geocoding jitter — used to tell whether a route
+    /// response still describes the leg target we're currently driving toward, or was requested
+    /// for one we've since left (arrived, changed, or advanced past).
+    func isApproximately(_ other: CLLocationCoordinate2D, toleranceMeters: Double = 15) -> Bool {
+        distanceMeters(to: other) <= toleranceMeters
+    }
 }
 
 /// Resolves a coordinate to a saved-place label ("Home", "Work") when one is bookmarked nearby,

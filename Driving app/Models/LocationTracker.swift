@@ -183,7 +183,11 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     /// Configure a destination (and optional intermediate stops) before starting, so the drive
     /// advances stop-by-stop. The current navigation target becomes the first leg's target.
     func setRoute(stops: [RouteStop], finalDestination: CLLocationCoordinate2D, finalName: String?) {
-        var targets = stops.filter { $0.lat != 0 || $0.lng != 0 }
+        // Guard against Null Island: an intermediate stop created before its address was picked
+        // (or a malformed one from the backend) defaults to (0, 0) — routing through it is how a
+        // "nonexistent path" gets drawn, since MapKit will happily plot a course to it.
+        guard finalDestination.isUsableCoordinate else { return }
+        var targets = stops.filter(\.coordinate.isUsableCoordinate)
         targets.append(RouteStop(address: finalName ?? "Destination", coordinate: finalDestination))
         legTargets = targets
         currentLegIndex = 0
@@ -197,6 +201,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     /// Add a stop while a drive is in progress. New stops are visited before the final destination
     /// but after everything already passed. With no route yet, the stop becomes the destination.
     func appendLiveStop(_ stop: RouteStop) {
+        guard stop.coordinate.isUsableCoordinate else { return }
         if legTargets.isEmpty {
             legTargets = [stop]
             finalDestinationName = stop.address

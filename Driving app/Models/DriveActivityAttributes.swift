@@ -20,9 +20,21 @@ struct DriveActivityAttributes: ActivityAttributes {
         /// Projected delay vs. the scheduled arrival, seconds (+ = late). Nil if not scheduled.
         var delaySeconds: Int?
         var destinationName: String?
+        /// True while parked at an intermediate stop on a multi-leg drive — the widget shows
+        /// "Parked at Stop N" instead of a speed/ETA that would otherwise read as frozen/wrong
+        /// while the car genuinely isn't moving toward anything right now.
+        var isPaused: Bool = false
+        /// Mirrors `DriveActivityAttributes.tripTitle`/`scheduledArrival` below. `ActivityAttributes`
+        /// is fixed for the activity's whole life, but a drive's title and schedule aren't: an
+        /// ad-hoc drive that later gains a destination (or a "Go to" whose ETA resolves after the
+        /// activity already started) needs to update these too, which only `ContentState` can do.
+        /// The widget reads these in preference to the attribute fields.
+        var tripTitle: String?
+        var scheduledArrival: Date?
     }
 
-    /// Fixed for the life of the activity.
+    /// Initial values only — see `ContentState.tripTitle`/`scheduledArrival` for why the live values
+    /// live there instead. Kept here too since `Activity.request` requires *something* at creation.
     var tripTitle: String
     var scheduledArrival: Date?
 }

@@ -117,7 +117,7 @@ struct TripStatus {
         }
         let mins = max(1, abs(delaySeconds) / 60)
         if delaySeconds > tolerance {
-            return .init(kind: .delayed, headline: "DELAYED", detail: "Arriving ~\(delayLabel(minutes: mins)) late",
+            return .init(kind: .delayed, headline: "DELAYED", detail: "Arriving ~\(delayLabel(minutes: mins)) delayed",
                          color: .statusDelay, icon: "clock.fill")
         } else if delaySeconds < -tolerance {
             return .init(kind: .early, headline: "EARLY", detail: "Arriving ~\(delayLabel(minutes: mins)) early",
@@ -140,7 +140,7 @@ struct TripStatus {
 
     /// Status for a single departures-board occurrence (also used by the scheduled-detail page).
     /// Follows the product spec: an upcoming drive is ON TIME (green) until its departure time;
-    /// once departure passes with no recorded start it becomes LATE (orange); a start in the
+    /// once departure passes with no recorded start it becomes DELAYED (orange); a start in the
     /// window marks it DEPARTED; canceled wins over everything.
     static func occurrence(departure: Date, scheduledArrival: Date, travelSeconds: Int,
                            isCanceled: Bool, startedAt: Date?, now: Date = .now) -> TripStatus {
@@ -158,9 +158,9 @@ struct TripStatus {
             return .init(kind: .onTime, headline: "ON TIME", detail: countdown(to: departure, from: now),
                          color: .green, icon: "checkmark.seal.fill")
         }
-        // Departure time has passed without a recorded start → late to leave.
+        // Departure time has passed without a recorded start → delayed to leave.
         let lateMins = max(1, Int(now.timeIntervalSince(departure)) / 60)
-        return .init(kind: .delayed, headline: "LATE", detail: "\(delayLabel(minutes: lateMins)) past departure",
+        return .init(kind: .delayed, headline: "DELAYED", detail: "\(delayLabel(minutes: lateMins)) past departure",
                      color: .statusDelay, icon: "clock.fill")
     }
 

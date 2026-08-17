@@ -406,6 +406,33 @@ enum TripStore {
         return synced
     }
 
+    /// Pull down edits made on the web dashboard to fields it can actually change — category,
+    /// notes, favorite, and payer — for trips this phone already has. This deliberately does NOT
+    /// create local trips for remote rows the phone doesn't recognize, and never deletes a local
+    /// trip: a server `APITrip` carries only the lightweight summary fields (see its doc comment),
+    /// none of the track, speed stats, or map-matching that make a *recorded* trip what it is — the
+    /// phone is the source of truth for that, by design (see the `syncPending`/`syncToBackend` doc
+    /// comments). Without this, "pull to refresh" on Trips could never reflect a change made
+    /// anywhere but this phone, no matter how many times you pulled.
+    @discardableResult
+    static func pullRemoteEdits(context: ModelContext) async -> Int {
+        guard let remote = try? await APIClient.fetchTrips(), !remote.isEmpty else { return 0 }
+        guard let local = try? context.fetch(FetchDescriptor<DriveTrip>()) else { return 0 }
+        let byRemoteID = Dictionary(uniqueKeysWithValues: local.compactMap { t in t.remoteID.map { ($0, t) } })
+        var updated = 0
+        for r in remote {
+            guard let trip = byRemoteID[r.id] else { continue }
+            var changed = false
+            if trip.categoryRaw != r.category { trip.categoryRaw = r.category; changed = true }
+            if trip.notes != r.notes { trip.notes = r.notes; changed = true }
+            if trip.isFavorite != r.isFavorite { trip.isFavorite = r.isFavorite; changed = true }
+            if let paidBy = r.paidBy, trip.paidByRaw != paidBy { trip.paidByRaw = paidBy; changed = true }
+            if changed { updated += 1 }
+        }
+        if updated > 0 { try? context.save() }
+        return updated
+    }
+
     private static func movingSeconds(_ pts: [RecordedPoint]) -> Int {
         guard pts.count >= 2 else { return 0 }
         var s = 0.0

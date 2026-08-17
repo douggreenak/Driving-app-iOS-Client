@@ -83,7 +83,15 @@ final class ActiveDriveController {
     }
 
     /// The drive is over (saved or discarded) — drop the tracker and reset presentation entirely.
+    /// Unconditionally ends the Live Activity and the Watch live broadcast: this used to be left to
+    /// callers to do explicitly (only `finishAndExit()` in `LiveTrackingView` did), but `clear()` is
+    /// also the `fullScreenCover` binding's setter, reachable from any system-driven dismissal — any
+    /// path that reaches `clear()` without those two calls orphaned a frozen activity/broadcast for
+    /// the rest of the process (or, for the Live Activity, until it auto-expired hours later). Both
+    /// are safe no-ops when nothing's running.
     func clear() {
+        endLiveActivity()
+        endLiveBroadcast()
         tracker = nil
         context = Context(scheduled: nil, goTo: nil, asModal: false)
         presentation = .none
@@ -108,7 +116,10 @@ final class ActiveDriveController {
         }
         return .init(milesTraveled: tracker.distanceMiles, currentSpeed: tracker.currentSpeed,
                      elapsedSeconds: tracker.elapsedSeconds, progress: progress, eta: tracker.etaDate,
-                     delaySeconds: tracker.delaySeconds, destinationName: name)
+                     delaySeconds: tracker.delaySeconds, destinationName: name,
+                     isPaused: tracker.isPausedBetweenLegs,
+                     tripTitle: tracker.tripName ?? tracker.finalDestinationName ?? "Drive",
+                     scheduledArrival: tracker.scheduledArrival)
     }
     #endif
 
@@ -170,6 +181,17 @@ final class ActiveDriveController {
         #endif
     }
 
+    /// Push a terminal "arrived" frame (final distance/time, no more "on the way") and let the
+    /// widget hold it on screen for a couple of minutes before dismissing, instead of the Live
+    /// Activity just vanishing the instant the drive stops — call this right when tracking ends,
+    /// before `clear()` drops the tracker this needs to build that final state from.
+    func endLiveActivityWithFinalState() {
+        #if canImport(ActivityKit) && !os(macOS)
+        guard let state = liveActivityState() else { endLiveActivity(); return }
+        LiveActivityController.endWithFinal(state)
+        #endif
+    }
+
     // MARK: - Watch remote-control (must keep working whether the drive is full-screen or minimized)
 
     /// The watch asked to end the in-progress drive. Stops the tracker and brings the full view back
@@ -180,6 +202,8 @@ final class ActiveDriveController {
     func handleEndFromWatch() {
         guard let tracker, tracker.isTracking else { return }
         tracker.stopTracking()
+        endLiveActivityWithFinalState()
+        endLiveBroadcast()
         presentation = .full
     }
 

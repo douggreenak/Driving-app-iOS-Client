@@ -29,7 +29,7 @@ struct DriveActivityLiveActivity: Widget {
                     VStack(spacing: 4) {
                         ProgressView(value: context.state.progress ?? 0)
                             .tint(delayColor(context))
-                        Text(context.state.destinationName ?? context.attributes.tripTitle).font(.caption2).foregroundStyle(.secondary)
+                        Text(context.state.destinationName ?? title(context)).font(.caption2).foregroundStyle(.secondary)
                     }
                 }
             } compactLeading: {
@@ -42,10 +42,16 @@ struct DriveActivityLiveActivity: Widget {
         }
     }
 
+    /// See `LockScreenView.title` — the live title lives in `state`, with the fixed attribute as a
+    /// defensive fallback.
+    private func title(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
+        c.state.tripTitle ?? c.attributes.tripTitle
+    }
     private func miles(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
         String(format: "%.1f mi", c.state.milesTraveled)
     }
     private func arrival(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
+        if c.state.isPaused { return "Parked" }
         guard let eta = c.state.eta else { return "—" }
         return eta.formatted(date: .omitted, time: .shortened)
     }
@@ -67,10 +73,18 @@ private struct LockScreenView: View {
         return d > 90 ? Color(red: 1.0, green: 0.62, blue: 0.04) : .green
     }
 
+    /// `ContentState.tripTitle`/`scheduledArrival` are the live values — a drive's title and
+    /// schedule can both change after the activity starts (see `ContentState`'s doc comment) — with
+    /// the fixed `ActivityAttributes` fields as a fallback for the (practically impossible) case a
+    /// push landed without them.
+    private var title: String { context.state.tripTitle ?? context.attributes.tripTitle }
+    private var scheduledArrival: Date? { context.state.scheduledArrival ?? context.attributes.scheduledArrival }
+
     private var statusText: String {
+        if context.state.isPaused { return "Parked at a stop" }
         guard let d = context.state.delaySeconds else { return "On the way" }
         let mins = max(1, abs(d) / 60)
-        if d > 90 { return "\(mins) min late" }
+        if d > 90 { return "\(mins) min delayed" }
         if d < -90 { return "\(mins) min early" }
         return "On time"
     }
@@ -78,7 +92,7 @@ private struct LockScreenView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label(context.attributes.tripTitle, systemImage: "airplane.departure")
+                Label(title, systemImage: "airplane.departure")
                     .font(.headline).foregroundStyle(.white)
                 Spacer()
                 if let dest = context.state.destinationName {
@@ -91,7 +105,7 @@ private struct LockScreenView: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Scheduled").font(.caption2).foregroundStyle(.secondary)
-                    Text(context.attributes.scheduledArrival.map { $0.formatted(date: .omitted, time: .shortened) } ?? "—")
+                    Text(scheduledArrival.map { $0.formatted(date: .omitted, time: .shortened) } ?? "—")
                         .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
                 }
                 Spacer()

@@ -42,9 +42,13 @@ struct MinimizedDriveBar: View {
                     }
                 }
 
-                Image(systemName: "chevron.up")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
+                VStack(spacing: 1) {
+                    Image(systemName: "chevron.up")
+                        .font(.caption.weight(.bold))
+                    Text("Resume")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundStyle(.blue)
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
             .background(.ultraThinMaterial, in: .rect(cornerRadius: 18))

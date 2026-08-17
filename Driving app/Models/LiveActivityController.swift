@@ -14,6 +14,13 @@ enum LiveActivityController {
     /// driving; ActivityKit budgets frequent updates and will throttle then stop delivering, freezing
     /// the Lock Screen. ~3s keeps us comfortably under budget while staying live.
     private static let minInterval: TimeInterval = 3
+    /// How far ahead each push marks its content stale. Without this (it used to be `nil` on every
+    /// push) the OS never dims/greys a frozen activity — so if the pushing side ever genuinely stops
+    /// (e.g. this exact class of bug: the periodic-push wiring silently missing), the Lock Screen
+    /// keeps showing the last numbers as if they were still live, indefinitely, with no visual cue
+    /// anything's wrong. A stale marker a little past our own push cadence means a real freeze still
+    /// shows the system's built-in "not current" treatment.
+    private static let staleAfter: TimeInterval = 90
 
     /// Begin a Live Activity for a drive. Ignored if one is already running or the user has Live
     /// Activities turned off.
@@ -35,7 +42,7 @@ enum LiveActivityController {
         }
         let attributes = DriveActivityAttributes(tripTitle: title, scheduledArrival: scheduledArrival)
         activity = try? Activity.request(attributes: attributes,
-                                         content: .init(state: state, staleDate: nil))
+                                         content: .init(state: state, staleDate: Date().addingTimeInterval(staleAfter)))
         lastPush = Date()
         lastState = state
     }
@@ -51,7 +58,7 @@ enum LiveActivityController {
         }
         lastPush = now
         lastState = state
-        Task { await activity.update(.init(state: state, staleDate: nil)) }
+        Task { await activity.update(.init(state: state, staleDate: Date().addingTimeInterval(staleAfter))) }
     }
 
     /// Push right away for changes a driver would notice even between throttle windows.
@@ -65,9 +72,29 @@ enum LiveActivityController {
         return false
     }
 
-    /// End and dismiss the activity when the drive stops.
-    static func end() {
+    /// Push a final state (e.g. "Arrived, 42.3 mi, on time") and end the activity a couple of
+    /// minutes later, so the widget shows a real terminal frame instead of just vanishing —
+    /// `dismissalPolicy: .immediate` in `end()` skipped straight past whatever was last on screen.
+    static func endWithFinal(_ state: DriveActivityAttributes.ContentState) {
         guard let activity else { return }
+        self.activity = nil
+        lastState = nil
+        Task {
+            await activity.update(.init(state: state, staleDate: nil))
+            try? await Task.sleep(for: .seconds(1))
+            await activity.end(.init(state: state, staleDate: nil), dismissalPolicy: .after(Date().addingTimeInterval(120)))
+        }
+    }
+
+    /// End and dismiss the activity when the drive stops. Falls back to sweeping every orphaned
+    /// activity of ours when there's no in-memory `activity` to end directly — e.g. the drive was
+    /// recovered (Save/Discard) after a relaunch, so nothing in THIS process ever called `start()`
+    /// to populate it, and without this fallback the previous process's activity would never end.
+    static func end() {
+        guard let activity else {
+            Task { await endOrphaned() }
+            return
+        }
         self.activity = nil
         lastState = nil
         Task { await activity.end(nil, dismissalPolicy: .immediate) }

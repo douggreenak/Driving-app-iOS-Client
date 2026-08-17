@@ -80,22 +80,28 @@ struct ContentView: View {
     private var fuelPrice: Double { settingsList.first?.fuelPricePerGallon ?? 3.75 }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            TabView(selection: $selection) {
-                Tab("Drive", systemImage: "location.fill", value: AppTab.drive) {
-                    DriveHomeView()
-                }
-                Tab("Stats", systemImage: "chart.bar.fill", value: AppTab.stats) {
-                    StatsView()
-                }
-                Tab("Trips", systemImage: "map.fill", value: AppTab.trips) {
-                    TripsListView()
-                }
-                Tab("Gas", systemImage: "fuelpump.fill", value: AppTab.gas) {
-                    GasListView()
-                }
+        TabView(selection: $selection) {
+            Tab("Drive", systemImage: "location.fill", value: AppTab.drive) {
+                DriveHomeView()
             }
-
+            Tab("Stats", systemImage: "chart.bar.fill", value: AppTab.stats) {
+                StatsView()
+            }
+            Tab("Trips", systemImage: "map.fill", value: AppTab.trips) {
+                TripsListView()
+            }
+            Tab("Gas", systemImage: "fuelpump.fill", value: AppTab.gas) {
+                GasListView()
+            }
+        }
+        // A `ZStack` sibling here used to render the bar UNDER the tab bar's own bottom placement —
+        // both being bottom-aligned in the same stack, the bar and the tab bar occupied nearly the
+        // same ~85% of screen height, so the bar visually blended into the tab bar chrome (same
+        // `.ultraThinMaterial`) and ate most of the Stats/Trips/Gas tap targets. `.safeAreaInset`
+        // instead docks it as its own bar genuinely ABOVE the tab bar (the "Apple Music mini-player"
+        // position the doc comment always intended) and insets every tab's content to make room for
+        // it, so nothing else scrolls underneath it either.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             if activeDrive.isMinimized, let tracker = activeDrive.tracker {
                 MinimizedDriveBar(tracker: tracker) {
                     Haptics.tap()
@@ -117,8 +123,18 @@ struct ContentView: View {
             try? await Task.sleep(for: .milliseconds(600))
             MapPrewarmer.warm()
         }
+        // Launch-only setup: seeding must run exactly once per process, not on every tab switch /
+        // app-resume — a bare `.task` (not `.task(id:)`) is correct here specifically because of that.
         .task {
             PayerGroupStore.seedIfNeeded(context: modelContext)
+            // Exactly one `UserSettings` row, seeded once — `SettingsView.currentSettings`'s doc
+            // comment has the story: this used to be created lazily wherever it was first read,
+            // which on a fresh install could insert several duplicate rows in the same frame, and
+            // wherever `.first` landed after that was arbitrary.
+            if (try? modelContext.fetch(FetchDescriptor<UserSettings>()))?.isEmpty ?? true {
+                modelContext.insert(UserSettings())
+                try? modelContext.save()
+            }
             #if DEBUG
             // Manual-testing fixture — see `SampleData.seedEverythingForTesting`. Only runs when
             // explicitly launched with `UITEST_SEED=1`; never in a normal debug or release run.
@@ -126,13 +142,19 @@ struct ContentView: View {
                 SampleData.seedEverythingForTesting(context: modelContext)
             }
             #endif
-            // Push local trips up (incl. any unsynced) and backfill payer onto historical trips so
-            // all current app data reaches the server. Centralized here so it runs regardless of tab.
+        }
+        // Unlike the seeding above, this genuinely needs to re-run on every resume: `syncPending`
+        // previously only ever fired once at launch, so a trip saved while offline sat with its
+        // `icloud.slash` badge until the user happened to pull-to-refresh or force-quit and relaunch
+        // — reconnecting alone never retried it. `.task(id: activityToken)` re-fires it on every tab
+        // switch and app-foreground too (`activityToken` bumps on both). Everything inside is safe to
+        // repeat: `syncPending`/`backfillPaidBy` only touch what's still outstanding, and the Live
+        // Activity sweep's own `recoverableSession() == nil` guard already covers "a real in-progress
+        // drive is running right now" (its log file makes it "recoverable" too) regardless of how
+        // many times this runs, not just at first launch.
+        .task(id: activityToken) {
             await TripStore.syncPending(context: modelContext)
             await TripStore.backfillPaidBy(context: modelContext)
-            // A genuine in-progress drive keeps its Live Activity running through this launch (its
-            // recovery banner will offer to resume/save it); only sweep away an activity nothing is
-            // recovering, which means the app force-quit and never got a chance to end it itself.
             #if canImport(ActivityKit) && !os(macOS)
             if LocationTracker.recoverableSession() == nil {
                 await LiveActivityController.endOrphaned()
@@ -142,8 +164,13 @@ struct ContentView: View {
         .task(id: watchSyncKey) { broadcastToWatch() }
         .onChange(of: selection) { _, _ in activityToken += 1 }
         .onChange(of: scenePhase) { old, new in
-            if new == .active, old != .active { activityToken += 1 }
+            if new == .active, old != .active { activityToken += 1; activeDrive.pushLiveUpdate() }
         }
+        // The Live Activity / Watch live screen push, per `ActiveDriveController`'s doc comment —
+        // driven from here (not `LiveTrackingView`) so it keeps running while a drive is minimized,
+        // when that view doesn't exist. `LocationTracker` is `@Observable`; both tick while tracking.
+        .onChange(of: activeDrive.tracker?.fixCount) { _, _ in activeDrive.pushLiveUpdate() }
+        .onChange(of: activeDrive.tracker?.elapsedSeconds) { _, _ in activeDrive.pushLiveUpdate() }
         .fullScreenCover(isPresented: Binding(
             get: { activeDrive.isFull },
             // SwiftUI routes any system-driven dismissal (e.g. `LiveTrackingView`'s own
@@ -152,7 +179,18 @@ struct ContentView: View {
             // state (the cover visually dismisses but `activeDrive` still thinks a drive is active).
             // Clearing mirrors what a not-yet-started drive's close button already means: there's
             // nothing to minimize, so tear the whole thing down.
-            set: { if !$0 { activeDrive.clear() } }
+            //
+            // CRITICAL: SwiftUI's presentation coordinator echoes `false` back through this setter
+            // once the dismiss animation completes for ANY reason — including one *we* initiated by
+            // flipping `activeDrive.presentation` away from `.full` to minimize. Without the
+            // `!= .minimized` guard, minimizing immediately triggers this "confirmation" callback,
+            // which called `clear()` and destroyed the very drive the user just tried to minimize —
+            // dropping the tracker and the Live Activity with no way back. Only a dismissal that
+            // *isn't* an intentional minimize should tear the drive down.
+            set: { presented in
+                guard !presented, activeDrive.presentation != .minimized else { return }
+                activeDrive.clear()
+            }
         )) {
             if let tracker = activeDrive.tracker {
                 // Re-applied explicitly: `.environment(activeDrive)` above (on the ZStack) normally
@@ -180,7 +218,15 @@ struct ContentView: View {
                 return
             }
             selection = .drive
-            activeDrive.start(scheduled: drive)
+            // The guard the doc comment above already promises, but never actually implemented:
+            // a drive already active (possibly for a different schedule) must not be silently
+            // swapped out — `start(scheduled:)` would just hand back the existing tracker and this
+            // tap would appear to do nothing. Surface the real in-progress drive instead.
+            if activeDrive.hasActiveDrive, activeDrive.context.scheduled?.id != drive.id {
+                activeDrive.restore()
+            } else {
+                activeDrive.start(scheduled: drive)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .endDriveFromWatch)) { _ in
             activeDrive.handleEndFromWatch()

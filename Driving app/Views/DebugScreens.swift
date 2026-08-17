@@ -161,7 +161,7 @@ private struct StatusChipGallery: View {
             Text("Saved trip status").font(.headline)
             row("Arrived on time", StatusChip(status: .forTrip(delaySeconds: 30)))
             row("Arrived early", StatusChip(status: .forTrip(delaySeconds: -7 * 60)))
-            row("Arrived late", StatusChip(status: .forTrip(delaySeconds: 22 * 60)))
+            row("Arrived delayed", StatusChip(status: .forTrip(delaySeconds: 22 * 60)))
             Spacer()
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -3,6 +3,7 @@ import SwiftData
 
 struct TripsListView: View {
     @Environment(\.modelContext) private var context
+    @Environment(\.tabActivityToken) private var activityToken
     @Query(sort: \DriveTrip.date, order: .reverse) private var trips: [DriveTrip]
     @State private var searchText = ""
     @State private var pendingDelete: DriveTrip?
@@ -40,12 +41,22 @@ struct TripsListView: View {
                         }
                     }
                     .searchable(text: $searchText, prompt: "Search trips")
-                    .refreshable { await TripStore.syncPending(context: context) }
                 }
             }
             .background(.black)
             .navigationTitle("Trips")
             .navigationBarTitleDisplayMode(.inline)
+            // Was only on the `List` inside the non-empty branch above — pulling down on the empty
+            // state (exactly when a user expects a refresh to fix "outdated/missing trips") did
+            // nothing at all, not even attempt a sync, because there was no gesture attached there.
+            .refreshable { await refresh() }
+            // `syncPending` only ever pushed local trips up; nothing pulled server-side edits (the
+            // fields actually editable from the web dashboard — category, notes, favorite, payer)
+            // back down, so "pull to refresh" could never surface a change made anywhere but this
+            // phone. Trip *creation* stays phone-only on purpose (a server row has no GPS track, no
+            // speed stats, none of what makes a recorded trip a recorded trip — see
+            // `TripStore.pullRemoteEdits`), but edits to those few fields now sync both ways.
+            .task(id: activityToken) { await refresh() }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     NavigationLink { TripMapView() } label: { Image(systemName: "map") }
@@ -63,6 +74,11 @@ struct TripsListView: View {
                 Text("This permanently removes the recorded drive and its track.")
             }
         }
+    }
+
+    private func refresh() async {
+        await TripStore.syncPending(context: context)
+        await TripStore.pullRemoteEdits(context: context)
     }
 
     private func delete(_ trip: DriveTrip) {
