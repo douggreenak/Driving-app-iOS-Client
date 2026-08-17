@@ -17,6 +17,7 @@ struct DriveHomeView: View {
 
     @State private var showingNew = false
     @State private var showingPredict = false
+    @State private var showingLogMissed = false
     @State private var showingSettings = false
     @State private var showingAddPlace = false
     @State private var pendingDelete: DriveOccurrence?
@@ -108,6 +109,7 @@ struct DriveHomeView: View {
                     Menu {
                         Button { showingNew = true } label: { Label("Schedule a Drive", systemImage: "calendar.badge.plus") }
                         Button { showingPredict = true } label: { Label("Predict a Route", systemImage: "dollarsign.arrow.circlepath") }
+                        Button { showingLogMissed = true } label: { Label("Log a Missed Drive", systemImage: "clock.badge.exclamationmark") }
                     } label: {
                         Image(systemName: "plus")
                     }
@@ -116,6 +118,7 @@ struct DriveHomeView: View {
             }
             .sheet(isPresented: $showingNew) { NewScheduledDriveView() }
             .sheet(isPresented: $showingPredict) { RoutePredictView() }
+            .sheet(isPresented: $showingLogMissed) { LogMissedDriveView() }
             .sheet(isPresented: $showingSettings) { SettingsView() }
             .sheet(isPresented: $showingAddPlace) {
                 AddBookmarkView(nextOrder: (savedPlaces.map(\.sortOrder).max() ?? -1) + 1)

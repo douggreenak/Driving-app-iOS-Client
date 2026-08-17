@@ -80,6 +80,7 @@ struct TripDetailView: View {
         VStack(spacing: 0) {
             mapHeader(d)
             VStack(spacing: 16) {
+                if trip.isManualEntry { manualEntryNotice }
                 StatusBanner(status: .forTrip(delaySeconds: trip.delaySeconds))
                 scheduleCard
                 statsRow
@@ -90,12 +91,32 @@ struct TripDetailView: View {
                 scheduleLinkCard
                 fuelCard(d)
                 if !d.chart.isEmpty { speedChartCard(d) }
-                playButton(d)
-                trimButton
+                if !trip.isManualEntry {
+                    playButton(d)
+                    trimButton
+                }
                 deleteButton
             }
             .padding()
         }
+    }
+
+    /// Unmissable — the whole point of a manually-logged drive is that it must never be mistaken for
+    /// a real GPS recording. Distance/timing here come from a map route and what the user typed, not
+    /// a recorded track.
+    private var manualEntryNotice: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "square.and.pencil").font(.title3).foregroundStyle(.orange).frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Not a Recorded Drive").font(.subheadline.weight(.bold))
+                Text("Logged manually — distance and timing are estimated from a map route, not GPS.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding()
+        .background(.orange.opacity(0.14), in: .rect(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.orange.opacity(0.3), lineWidth: 1))
     }
 
     /// Editable stops for a driven trip (multi-stop annotation): add the places you stopped along
@@ -400,7 +421,11 @@ struct TripDetailView: View {
             stat("Distance", String(format: "%.1f mi", trip.distance), "point.topleft.down.to.point.bottomright.curvepath.fill", .blue)
             stat("Duration", durationString(trip.duration), "clock.fill", .orange)
             stat("Avg Speed", String(format: "%.0f mph", trip.avgSpeed), "speedometer", .green)
-            stat("Top Speed", String(format: "%.0f mph", trip.maxSpeed), "gauge.with.dots.needle.67percent", .red)
+            // A manual entry has no real top speed — it'd just duplicate Avg Speed (they're set
+            // equal) and read as more precise than it actually is, so it's left off entirely.
+            if !trip.isManualEntry {
+                stat("Top Speed", String(format: "%.0f mph", trip.maxSpeed), "gauge.with.dots.needle.67percent", .red)
+            }
         }
     }
 
@@ -610,9 +635,17 @@ struct TripDerived {
         let recorded = pts.map {
             RecordedPoint(t: $0.t, coordinate: $0.coordinate, speed: $0.speed, course: $0.course, accuracy: $0.accuracy)
         }
-        let segments = FuelModel.segments(from: recorded)
         let rated = trip.vehicleMpg ?? 25
-        bands = FuelModel.bandBreakdown(segments: segments, ratedMpg: rated)
+        if pts.isEmpty, trip.distance > 0 {
+            // No track to break into per-segment speeds (a manually-logged drive) — fall back to a
+            // single band at the trip's overall average speed, so the fuel card still shows a
+            // sensible one-bar breakdown instead of nothing.
+            let segments = [FuelModel.Segment(miles: trip.distance, mph: trip.avgSpeed)]
+            bands = FuelModel.bandBreakdown(segments: segments, ratedMpg: rated)
+        } else {
+            let segments = FuelModel.segments(from: recorded)
+            bands = FuelModel.bandBreakdown(segments: segments, ratedMpg: rated)
+        }
         maxBandGallons = max(0.0001, bands.map(\.gallons).max() ?? 0.0001)
         flatEstimate = trip.distance / rated
 

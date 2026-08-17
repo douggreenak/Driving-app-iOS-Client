@@ -110,6 +110,81 @@ enum TripStore {
         return trip
     }
 
+    /// Everything needed to log a drive that wasn't GPS-recorded (forgot to hit record, or it
+    /// happened before the app was installed) — a start/end, when it actually happened, and a
+    /// pre-fetched MapKit route for the distance and display polyline.
+    struct ManualInput {
+        var date: Date
+        var endDate: Date
+        var startAddress: String
+        var endAddress: String
+        var startCoordinate: CLLocationCoordinate2D
+        var endCoordinate: CLLocationCoordinate2D
+        /// Road distance from a MapKit lookup between the two points — never a real recorded track.
+        var distanceMiles: Double
+        var routeCoordinates: [CLLocationCoordinate2D]
+        var category: TripCategory
+        /// A `PayerGroup.key`.
+        var paidBy: String
+        var notes: String?
+        var name: String?
+        var vehicleName: String?
+        var vehicleMpg: Double?
+        var scheduledDeparture: Date?
+        var scheduledArrival: Date?
+    }
+
+    /// Log a drive after the fact: no track points, so no map-matching — the distance is whatever
+    /// MapKit route the caller already looked up, and speed/fuel are estimated from that distance
+    /// spread evenly across the entered departure→arrival, exactly like `RoutePredictView`'s
+    /// per-leg estimate. Marked `isManualEntry` so it displays everywhere as "not a recorded drive".
+    @discardableResult
+    static func saveManual(_ input: ManualInput, context: ModelContext) async -> DriveTrip? {
+        guard input.endDate > input.date, input.distanceMiles > 0 else { return nil }
+        let seconds = Int(input.endDate.timeIntervalSince(input.date))
+        let avgMph = seconds > 0 ? input.distanceMiles / (Double(seconds) / 3600) : 0
+        let mpg = input.vehicleMpg ?? 25
+        let gallons = input.distanceMiles / FuelModel.mpg(atMph: avgMph, ratedMpg: mpg)
+        let matchedData = try? JSONEncoder().encode(input.routeCoordinates.map { [$0.latitude, $0.longitude] })
+
+        let trip = DriveTrip(
+            date: input.date,
+            endDate: input.endDate,
+            startAddress: input.startAddress,
+            endAddress: input.endAddress,
+            startLat: input.startCoordinate.latitude, startLng: input.startCoordinate.longitude,
+            endLat: input.endCoordinate.latitude, endLng: input.endCoordinate.longitude,
+            distance: input.distanceMiles,
+            duration: seconds,
+            // No real track to distinguish stopped-vs-moving time — assume the same ~85% moving
+            // fraction used for seeded sample data elsewhere in the app.
+            movingSeconds: Int(Double(seconds) * 0.85),
+            maxSpeed: avgMph,
+            avgSpeed: avgMph,
+            notes: input.notes,
+            name: input.name,
+            category: input.category,
+            paidBy: input.paidBy,
+            vehicleName: input.vehicleName,
+            vehicleMpg: input.vehicleMpg,
+            estimatedGallons: gallons,
+            scheduledDeparture: input.scheduledDeparture,
+            scheduledArrival: input.scheduledArrival,
+            matchedFraction: 0,
+            usedRouteMatching: false,
+            matchedPolyline: matchedData,
+            isManualEntry: true
+        )
+        context.insert(trip)
+        try? context.save()
+
+        // Best-effort remote sync, same as a recorded trip.
+        Task.detached {
+            await syncToBackend(trip: trip, displayCoords: input.routeCoordinates)
+        }
+        return trip
+    }
+
     /// Persist a finished multi-stop drive as several separate, **linked** trips — one per leg —
     /// sharing a `journeyID`. Each leg is a plain A→B trip: map-matched and synced independently
     /// (the backend just sees N trips); the journey link is a local grouping so the drives read as

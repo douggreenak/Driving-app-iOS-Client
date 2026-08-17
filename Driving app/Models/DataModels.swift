@@ -193,6 +193,12 @@ final class DriveTrip {
     var remoteID: String?
     var synced: Bool
 
+    /// True for a drive logged after the fact (e.g. "forgot to hit record") instead of GPS-tracked
+    /// live. Its distance/route come from a MapKit lookup between the entered start/end and its
+    /// duration from the entered departure/arrival — never from a real recorded track. Shown as a
+    /// clear "not a recorded drive" notice everywhere this trip appears.
+    var isManualEntry: Bool = false
+
     @Relationship(deleteRule: .cascade, inverse: \TrackPoint.trip)
     var points: [TrackPoint]
     @Relationship(deleteRule: .cascade, inverse: \GasEntry.trip)
@@ -232,7 +238,8 @@ final class DriveTrip {
         scheduledArrival: Date? = nil,
         matchedFraction: Double = 0,
         usedRouteMatching: Bool = false,
-        matchedPolyline: Data? = nil
+        matchedPolyline: Data? = nil,
+        isManualEntry: Bool = false
     ) {
         self.date = date
         self.endDate = endDate
@@ -260,6 +267,7 @@ final class DriveTrip {
         self.matchedFraction = matchedFraction
         self.usedRouteMatching = usedRouteMatching
         self.matchedPolyline = matchedPolyline
+        self.isManualEntry = isManualEntry
         self.remoteID = nil
         self.synced = false
         self.points = []

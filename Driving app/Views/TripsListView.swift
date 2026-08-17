@@ -95,6 +95,16 @@ private struct TripRow: View {
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(.purple.opacity(0.18), in: .capsule)
             }
+            if trip.isManualEntry {
+                HStack(spacing: 5) {
+                    Image(systemName: "square.and.pencil").font(.caption2)
+                    Text("Not Recorded — Logged Manually")
+                        .font(.caption2.weight(.bold))
+                }
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(.orange.opacity(0.18), in: .capsule)
+            }
             if let name = trip.name, !name.isEmpty {
                 Text(name)
                     .font(.headline).fontWeight(.semibold).foregroundStyle(.primary).lineLimit(1)
