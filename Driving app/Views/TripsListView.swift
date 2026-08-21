@@ -5,6 +5,7 @@ struct TripsListView: View {
     @Environment(\.modelContext) private var context
     @Environment(\.tabActivityToken) private var activityToken
     @Query(sort: \DriveTrip.date, order: .reverse) private var trips: [DriveTrip]
+    @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
     @State private var searchText = ""
     @State private var pendingDelete: DriveTrip?
 
@@ -13,7 +14,12 @@ struct TripsListView: View {
         return trips.filter {
             $0.startAddress.localizedCaseInsensitiveContains(searchText) ||
             $0.endAddress.localizedCaseInsensitiveContains(searchText) ||
-            ($0.name?.localizedCaseInsensitiveContains(searchText) ?? false)
+            ($0.name?.localizedCaseInsensitiveContains(searchText) ?? false) ||
+            // Rows display the bookmarked-place name ("Home"), not the raw address, whenever one's
+            // nearby (see `TripRow`'s use of `PlaceNamer.name`) — searching only the raw address
+            // meant typing exactly what's printed on screen ("Home") could return no results at all.
+            PlaceNamer.name(for: $0.startCoordinate, fallback: "", in: savedPlaces).localizedCaseInsensitiveContains(searchText) ||
+            PlaceNamer.name(for: $0.endCoordinate, fallback: "", in: savedPlaces).localizedCaseInsensitiveContains(searchText)
         }
     }
 
@@ -22,7 +28,7 @@ struct TripsListView: View {
             Group {
                 if trips.isEmpty {
                     ContentUnavailableView("No Trips Yet", systemImage: "road.lanes",
-                                           description: Text("Record a drive from the Track tab and it'll show up here."))
+                                           description: Text("Record a drive from the Drive tab and it'll show up here."))
                 } else if filtered.isEmpty {
                     ContentUnavailableView.search(text: searchText)
                 } else {
@@ -40,12 +46,20 @@ struct TripsListView: View {
                             }
                         }
                     }
-                    .searchable(text: $searchText, prompt: "Search trips")
                 }
             }
             .background(.black)
             .navigationTitle("Trips")
             .navigationBarTitleDisplayMode(.inline)
+            // Was on the `List` inside the non-empty `else` branch above — the moment a search query
+            // matched nothing, `filtered.isEmpty` swapped in `ContentUnavailableView.search(text:)`
+            // in place of the `List`, tearing `.searchable` out of the view hierarchy along with it.
+            // The search field (and keyboard) vanished mid-keystroke and `searchText` had no way to
+            // be edited or cleared short of leaving and re-entering the tab. `.searchable` now lives
+            // on the `Group` so it stays mounted across every branch, exactly so
+            // `ContentUnavailableView.search` (designed to be shown WHILE the search bar is still
+            // present) can do its job.
+            .searchable(text: $searchText, prompt: "Search trips")
             // Was only on the `List` inside the non-empty branch above — pulling down on the empty
             // state (exactly when a user expects a refresh to fix "outdated/missing trips") did
             // nothing at all, not even attempt a sync, because there was no gesture attached there.
@@ -60,6 +74,7 @@ struct TripsListView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     NavigationLink { TripMapView() } label: { Image(systemName: "map") }
+                        .accessibilityLabel("Trip map")
                 }
             }
             .confirmationDialog("Delete this trip?",

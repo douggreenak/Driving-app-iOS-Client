@@ -5,6 +5,7 @@ import CoreLocation
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(ActiveDriveController.self) private var activeDrive
     @Query private var settings: [UserSettings]
     @Query private var vehicles: [Vehicle]
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
@@ -54,6 +55,21 @@ struct SettingsView: View {
     /// that completes, and deliberately does NOT insert, so it can't create a duplicate itself.
     private var currentSettings: UserSettings { settings.first ?? UserSettings() }
 
+    /// Parses a decimal-pad field's text, also accepting a comma decimal separator — the decimal
+    /// pad's own separator key types "," in a comma-decimal locale, for which plain `Double(_:)`
+    /// returns `nil`. `nil` here means genuinely unparseable/empty, not "default to 0".
+    private func parsedAmount(_ s: String) -> Double? { Double(s.replacingOccurrences(of: ",", with: ".")) }
+    private var budgetValue: Double? { parsedAmount(budget) }
+    private var fuelPriceValue: Double? { let v = parsedAmount(fuelPrice); return (v ?? 0) > 0 ? v : nil }
+
+    /// Whether the "Add Vehicle" form's name matches an existing car (case-insensitively) — see the
+    /// Save Vehicle button's doc comment.
+    private var duplicateVehicleName: Bool {
+        let trimmed = vehicleName.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        return vehicles.contains { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -64,10 +80,24 @@ struct SettingsView: View {
                             .keyboardType(.decimalPad)
                     }
                     Button("Save Budget") {
-                        currentSettings.monthlyBudget = Double(budget) ?? 0
+                        guard let v = budgetValue else { return }
+                        currentSettings.monthlyBudget = v
                         try? modelContext.save()
                         Haptics.success()
+                        // Re-render from the saved value so a locale quirk (see `budgetValue`'s doc
+                        // comment) can't leave the field showing something different from what's
+                        // actually stored.
+                        budget = String(format: "%.0f", v)
                     }
+                    // Neither Save button had a `.disabled`, and `Double(_:)` returns `nil` for
+                    // anything that doesn't parse — garbage, an empty field, or (in a comma-decimal
+                    // locale) the decimal-pad's own separator key producing e.g. "3,75". `?? 0`/
+                    // `?? 3.75` swallowed that silently: a success haptic fired, "Saved" flashed
+                    // green, and the field kept showing the unparseable text for the rest of the
+                    // session (a one-time field load blocks reloading it) while the store actually
+                    // held a DIFFERENT number than what was on screen — for budget, silently 0, which
+                    // the very next line says means "disable budget tracking".
+                    .disabled(budgetValue == nil)
                     Text("Set to 0 to disable budget tracking")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -81,8 +111,10 @@ struct SettingsView: View {
                         Text("/ gal").foregroundStyle(.secondary)
                     }
                     Button {
-                        currentSettings.fuelPricePerGallon = Double(fuelPrice) ?? 3.75
+                        guard let v = fuelPriceValue else { return }
+                        currentSettings.fuelPricePerGallon = v
                         try? modelContext.save()
+                        fuelPrice = String(format: "%.2f", v)
                         Haptics.success()
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.6)) { savedFlash = true }
                         Task { @MainActor in
@@ -98,6 +130,7 @@ struct SettingsView: View {
                             Text("Save Price")
                         }
                     }
+                    .disabled(fuelPriceValue == nil)
                 } header: {
                     Text("Fuel Price")
                 } footer: {
@@ -125,6 +158,13 @@ struct SettingsView: View {
                     }
 
                     Button {
+                        // Save already clears these three; Cancel used to just collapse the form and
+                        // leave whatever had been typed sitting in `@State` — reopening the form
+                        // later in the same Settings session (to add a DIFFERENT group) silently
+                        // pre-filled it with the abandoned name/icon/color.
+                        if showingPayerGroupForm {
+                            payerGroupName = ""; payerGroupIcon = "person.fill"; payerGroupColor = "purple"
+                        }
                         showingPayerGroupForm.toggle()
                     } label: {
                         Label(showingPayerGroupForm ? "Cancel" : "Add Payer Group",
@@ -240,8 +280,15 @@ struct SettingsView: View {
                                 Image(systemName: "car.fill")
                                     .foregroundStyle(.blue)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(vehicle.name)
-                                        .fontWeight(.medium)
+                                    HStack(spacing: 6) {
+                                        Text(vehicle.name)
+                                            .fontWeight(.medium)
+                                        if vehicleInUseByActiveDrive(vehicle) {
+                                            Text("In use").font(.caption2.weight(.bold)).foregroundStyle(.blue)
+                                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                                .background(.blue.opacity(0.15), in: .capsule)
+                                        }
+                                    }
                                     if let details = vehicleDetails(vehicle), !details.isEmpty {
                                         Text(details)
                                             .font(.caption)
@@ -266,10 +313,28 @@ struct SettingsView: View {
                         }
                     }
                     .onDelete { indexSet in
-                        if let i = indexSet.first { pendingVehicleDelete = vehicles[i] }
+                        // A currently-tracking (possibly minimized) drive's `LiveTrackingView` holds
+                        // this exact `Vehicle` model object as `selectedVehicle` — deleting it out
+                        // from under an in-progress drive left `TripSummaryView`/`saveTrip` reading
+                        // `vehicle?.name`/`.avgMpg` off an invalidated SwiftData model when the drive
+                        // was finished (crash, or a trip saved with garbage/missing vehicle & MPG).
+                        // Skip it here, same as a swipe landing on a built-in payer group is already
+                        // a no-op above, rather than let the swipe silently do the wrong thing.
+                        if let i = indexSet.first, !vehicleInUseByActiveDrive(vehicles[i]) {
+                            pendingVehicleDelete = vehicles[i]
+                        } else {
+                            Haptics.warning()
+                        }
                     }
 
                     Button {
+                        // Same fix as the payer-group form's Cancel above — abandoned input used to
+                        // stick around in `@State` and silently pre-fill the NEXT vehicle added in
+                        // this Settings session.
+                        if showingVehicleForm {
+                            vehicleName = ""; vehicleMake = ""; vehicleModel = ""
+                            vehicleYear = ""; vehicleTank = ""; vehicleMpg = ""
+                        }
                         showingVehicleForm.toggle()
                     } label: {
                         Label(showingVehicleForm ? "Cancel" : "Add Vehicle", systemImage: showingVehicleForm ? "xmark" : "plus")
@@ -297,14 +362,22 @@ struct SettingsView: View {
                         Text("MPG is used to estimate gas usage during tracked trips")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                        if duplicateVehicleName {
+                            Text("A car with that name already exists.")
+                                .font(.caption2).foregroundStyle(.orange)
+                        }
                         Button("Save Vehicle") {
+                            // A `0`/negative MPG isn't `nil`, so it would slip past every `?? 25`
+                            // fallback elsewhere that only guards a genuinely-missing value — see
+                            // `EditVehicleView.save()`'s doc comment for the concrete fallout.
+                            let parsedMpg = Double(vehicleMpg)
                             let v = Vehicle(
-                                name: vehicleName,
+                                name: vehicleName.trimmingCharacters(in: .whitespaces),
                                 make: vehicleMake.isEmpty ? nil : vehicleMake,
                                 model: vehicleModel.isEmpty ? nil : vehicleModel,
                                 year: Int(vehicleYear),
                                 tankSize: Double(vehicleTank),
-                                avgMpg: Double(vehicleMpg)
+                                avgMpg: (parsedMpg ?? 0) > 0 ? parsedMpg : nil
                             )
                             modelContext.insert(v)
                             try? modelContext.save()
@@ -313,7 +386,14 @@ struct SettingsView: View {
                             vehicleYear = ""; vehicleTank = ""; vehicleMpg = ""
                             showingVehicleForm = false
                         }
-                        .disabled(vehicleName.isEmpty)
+                        // `vehicleName.isEmpty` alone accepted whitespace-only input, AND nothing
+                        // stopped two cars sharing a name — `Vehicle.name` has no uniqueness
+                        // constraint but IS the join key every vehicle `Picker` tags by and every
+                        // by-name lookup (`vehicles.first(where: { $0.name == … })`) resolves through.
+                        // Two "Civic"s make every picker show two identically-tagged, indistinguishable
+                        // rows, and any by-name lookup (fill-up tracking, a schedule's saved vehicle,
+                        // `updateTripsForVehicle`'s rename) picks between them arbitrarily.
+                        .disabled(vehicleName.trimmingCharacters(in: .whitespaces).isEmpty || duplicateVehicleName)
                     }
                 } header: {
                     Text("Vehicles")
@@ -419,6 +499,12 @@ struct SettingsView: View {
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
+    /// Whether `v` is the vehicle a currently-tracking (or minimized) drive is recording with —
+    /// see the `onDelete` guard above.
+    private func vehicleInUseByActiveDrive(_ v: Vehicle) -> Bool {
+        activeDrive.hasActiveDrive && activeDrive.tracker?.plannedVehicleName == v.name
+    }
+
     // MARK: - Database export
 
     /// Exports a COPY of the on-device SwiftData/SQLite store — never touches, moves, or deletes the
@@ -474,6 +560,8 @@ struct EditVehicleView: View {
     @Bindable var vehicle: Vehicle
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
+    @Query private var scheduledDrives: [ScheduledDrive]
+    @Query private var vehicles: [Vehicle]
 
     @State private var name: String
     @State private var make: String
@@ -488,8 +576,14 @@ struct EditVehicleView: View {
         _make = State(initialValue: vehicle.make ?? "")
         _model = State(initialValue: vehicle.model ?? "")
         _year = State(initialValue: vehicle.year.map(String.init) ?? "")
-        _tank = State(initialValue: vehicle.tankSize.map { String(format: "%.0f", $0) } ?? "")
-        _mpg = State(initialValue: vehicle.avgMpg.map { String(format: "%.0f", $0) } ?? "")
+        // `%.0f` rounded a fractional value (the add-vehicle form's own `.decimalPad` field allows
+        // one, e.g. 32.5 MPG) — reopening this screen and tapping Save with no edits at all silently
+        // wrote the ROUNDED value back, permanently perturbing the car's stored MPG/tank size (and,
+        // via `updateTripsForVehicle`, every past trip's fuel estimate) on a pure no-op visit.
+        // `.fractionLength(0...2)` formats losslessly for a value that has no fraction, and up to 2
+        // decimal places for one that does.
+        _tank = State(initialValue: vehicle.tankSize.map { $0.formatted(.number.precision(.fractionLength(0...2))) } ?? "")
+        _mpg = State(initialValue: vehicle.avgMpg.map { $0.formatted(.number.precision(.fractionLength(0...2))) } ?? "")
     }
 
     var body: some View {
@@ -541,27 +635,73 @@ struct EditVehicleView: View {
             } footer: {
                 Text("The gas price only applies to fuel burned since the last fill-up for this car.")
             }
+            if duplicateVehicleName {
+                Text("A car with that name already exists.")
+                    .font(.caption2).foregroundStyle(.orange)
+            }
         }
         .navigationTitle(vehicle.name)
         .navigationBarTitleDisplayMode(.inline)
         .keyboardDismissable()
         .toolbar {
-            ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(name.isEmpty) }
+            // Same reasoning as "Add Vehicle" in `SettingsView` — untrimmed input let a
+            // whitespace-only nickname through, and nothing stopped renaming onto an EXISTING car's
+            // name (worse than the add-form case: `updateTripsForVehicle`'s by-name predicate would
+            // then re-point and re-fuel the OTHER car's whole trip history too, since both share a
+            // name from that point on).
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") { save() }
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || duplicateVehicleName)
+            }
         }
+    }
+
+    /// Whether the edited name matches a DIFFERENT existing car (case-insensitively) — excludes
+    /// `vehicle` itself so leaving the name unchanged (or just correcting its case) is never flagged.
+    private var duplicateVehicleName: Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        return vehicles.contains { $0.persistentModelID != vehicle.persistentModelID
+            && $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }
     }
 
     private func save() {
         let oldName = vehicle.name
-        vehicle.name = name
+        let oldMpg = vehicle.avgMpg
+        let newName = name.trimmingCharacters(in: .whitespaces)
+        vehicle.name = newName.isEmpty ? name : newName
         vehicle.make = make.isEmpty ? nil : make
         vehicle.model = model.isEmpty ? nil : model
         vehicle.year = Int(year)
         vehicle.tankSize = Double(tank)
-        vehicle.avgMpg = Double(mpg)
+        // A `0` (or negative) MPG isn't `nil`, so it slipped past every `?? 25` fallback that only
+        // guards against a genuinely-missing value — `TripDetailView`'s flat-average estimate divided
+        // by it (→ "inf gal"), `RoutePredictView`/`LogMissedDriveView`'s estimates silently used
+        // `FuelModel.mpg`'s `max(1, …)` floor of 1 MPG (a 30 mi route "costing" 30 gallons), and
+        // `TripStore.save`/`FuelModel.gallons`'s own `guard ratedMpg > 0` made every trip in this car
+        // record exactly 0 gallons — contributing $0 to every "Who's paying" total forever.
+        let parsedMpg = Double(mpg)
+        vehicle.avgMpg = (parsedMpg ?? 0) > 0 ? parsedMpg : nil
         try? context.save()
-        // Retroactively re-point + recompute fuel for this car's past trips.
-        TripStore.updateTripsForVehicle(oldName: oldName, newName: vehicle.name,
-                                        newMpg: vehicle.avgMpg, context: context)
+        // Retroactively re-point + recompute fuel for this car's past trips — but only when the
+        // name or MPG actually changed. This used to run unconditionally on every Save (even one
+        // that edited nothing but Make/Model/Year), silently re-rounding every past trip's fuel
+        // estimate to whatever `%.0f`-truncated string this screen happened to be showing.
+        if oldName != vehicle.name || oldMpg != vehicle.avgMpg {
+            TripStore.updateTripsForVehicle(oldName: oldName, newName: vehicle.name,
+                                            newMpg: vehicle.avgMpg, context: context)
+        }
+        // The vehicle name is the join key `ScheduledDrive.vehicleName` also stores (there's no
+        // stable id link) — renaming here without repointing those left every schedule that used to
+        // reference this car pointing at a name nothing resolves to. `LiveTrackingView.setup()`
+        // then fell back to `vehicles.first`, silently starting that scheduled drive with whatever
+        // OTHER car happened to be first — a wrong vehicle, wrong MPG, wrong fuel estimate.
+        if oldName != vehicle.name {
+            for drive in scheduledDrives where drive.vehicleName == oldName {
+                drive.vehicleName = vehicle.name
+            }
+            try? context.save()
+        }
         dismiss()
     }
 }

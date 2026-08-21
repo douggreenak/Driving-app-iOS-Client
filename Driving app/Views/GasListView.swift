@@ -58,6 +58,12 @@ struct GasListView: View {
                         }
                     }
                     .padding(.horizontal).padding(.bottom, 8)
+                    // `.contentTransition(.numericText())` only takes effect inside an animated
+                    // transaction — neither switching the filter nor `loadEntries()` replacing
+                    // `entries` was ever wrapped in one, so the odometer-roll effect never actually
+                    // played; both totals just hard-cut to their new value.
+                    .animation(.snappy, value: filteredTotal)
+                    .animation(.snappy, value: filteredGallons)
                 }
 
                 LastUpdatedBanner(lastUpdated: lastUpdated, isRefreshing: isRefreshing)
@@ -98,7 +104,8 @@ struct GasListView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Button { showingNewEntry = true } label: { Image(systemName: "plus") }
+                    Button { Haptics.tap(); showingNewEntry = true } label: { Image(systemName: "plus") }
+                        .accessibilityLabel("Add fill-up")
                 }
             }
             .sheet(isPresented: $showingNewEntry) {
@@ -118,6 +125,15 @@ struct GasListView: View {
             // revisited or the app returns to the foreground, not just the first time this view is
             // created — otherwise switching tabs and back could show stale entries until a relaunch.
             .task(id: activityToken) { await loadEntries() }
+            // The filter picker's options exclude archived groups, but `filterKey` is free-form
+            // state — archiving the currently-filtered-to group (Settings → swipe to remove) left the
+            // segmented control with NO segment highlighted at all while the list stayed filtered to
+            // the now-orphaned key (still resolvable via `PayerGroup.resolve`'s "Unknown" fallback),
+            // with no way back to a valid state except tapping "All".
+            .onChange(of: payerGroups.map(\.isArchived)) { _, _ in
+                let liveKeys = Set(payerGroups.filter { !$0.isArchived }.map(\.key))
+                if let filterKey, !liveKeys.contains(filterKey) { self.filterKey = nil }
+            }
         }
     }
 
@@ -190,6 +206,11 @@ struct GasListView: View {
             do {
                 try await APIClient.deleteGasEntry(id: entry.id)
                 entries.removeAll { $0.id == entry.id }
+                // The UserDefaults cache (read at next cold launch, before a fresh fetch lands — see
+                // `loadEntries()`) was never updated here, so a deleted fill-up flashed back on next
+                // launch until the follow-up fetch overwrote it — and stuck around for good if that
+                // fetch happened to fail (offline launch).
+                Self.cache(entries, at: lastUpdated ?? .now)
             } catch {
                 // Leave the entry in place; the cache/refresh keeps it consistent with the server.
             }

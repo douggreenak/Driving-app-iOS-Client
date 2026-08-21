@@ -3,6 +3,7 @@ import SwiftData
 
 struct NewGasEntryView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var context
     @Query(sort: \Vehicle.name) private var vehicles: [Vehicle]
     @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
     @Query(sort: \DriveTrip.date) private var trips: [DriveTrip]
@@ -17,6 +18,7 @@ struct NewGasEntryView: View {
     @State private var odometer = ""
     @State private var vehicleName: String?
     @State private var saving = false
+    @State private var saveError: String?
 
     private var totalCost: Double {
         (Double(gallons) ?? 0) * (Double(pricePerGallon) ?? 0)
@@ -109,6 +111,13 @@ struct NewGasEntryView: View {
                             .keyboardType(.numberPad).multilineTextAlignment(.trailing)
                     }
                 }
+
+                if let saveError {
+                    Section {
+                        Label(saveError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
             }
             .navigationTitle("Add Gas")
             .navigationBarTitleDisplayMode(.inline)
@@ -127,7 +136,7 @@ struct NewGasEntryView: View {
 
     private func save() {
         saving = true
-        Haptics.success()
+        saveError = nil
         let f = ISO8601DateFormatter()
         Task {
             let create = APIGasEntryCreate(
@@ -140,7 +149,32 @@ struct NewGasEntryView: View {
                 odometer: Double(odometer),
                 vehicleName: vehicleName
             )
-            _ = try? await APIClient.createGasEntry(create)
+            // Gas entries live entirely on the backend (no local SwiftData record backs them, unlike
+            // trips) — `try?` used to swallow a failed POST silently and dismiss anyway, with a
+            // success haptic already fired before the request even went out. Offline or a server
+            // error meant the fill-up the user just entered was destroyed with zero indication
+            // anything went wrong; they'd only notice later that it was never in the log, with
+            // nothing left to "refresh" back into existence.
+            do {
+                _ = try await APIClient.createGasEntry(create)
+            } catch {
+                saving = false
+                saveError = "Couldn't save this fill-up. Check your connection and try again."
+                return
+            }
+            Haptics.success()
+            // Logging a fill-up is what "Mark Filled Up Now" (Settings → vehicle) does explicitly,
+            // but that was the ONLY place `lastFilledUp` ever got set — going through the actual Gas
+            // tab's own "Add Fill-up" flow never touched it. `DrivingStats` bases every "Who's paying
+            // for gas" dollar figure on gallons burned SINCE a car's last fill-up
+            // (`billable = fillUp == nil || t.date >= fillUp!`), so those totals kept accumulating
+            // across a car's entire history instead of resetting at each real fill-up, and no amount
+            // of refreshing could ever correct them.
+            if let name = vehicleName, let vehicle = vehicles.first(where: { $0.name == name }),
+               (vehicle.lastFilledUp ?? .distantPast) < date {
+                vehicle.lastFilledUp = date
+                try? context.save()
+            }
             await onSaved?()
             dismiss()
         }

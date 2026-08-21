@@ -69,8 +69,17 @@ enum LiveActivityController {
         if Int(a.milesTraveled) != Int(b.milesTraveled) { return true }  // crossed a mile
         let da = (a.delaySeconds ?? 0) / 60, db = (b.delaySeconds ?? 0) / 60
         if da != db { return true }  // delay minute changed
+        // Parked ↔ moving flips the whole "Parked at a stop" line — without this a "Start Next Leg"
+        // tap could sit under the 3s throttle and leave the Lock Screen reading "Parked" for a few
+        // seconds after the car is already moving again.
+        if a.isPaused != b.isPaused { return true }
         return false
     }
+
+    /// True while a just-finished drive's terminal frame is deliberately being held on screen (see
+    /// `endWithFinal`) — lets `end()` tell "nothing to end" apart from "something IS ending, on
+    /// purpose, leave it alone" when it falls through to `endOrphaned()`.
+    private static var finalizing = false
 
     /// Push a final state (e.g. "Arrived, 42.3 mi, on time") and end the activity a couple of
     /// minutes later, so the widget shows a real terminal frame instead of just vanishing —
@@ -79,10 +88,12 @@ enum LiveActivityController {
         guard let activity else { return }
         self.activity = nil
         lastState = nil
+        finalizing = true
         Task {
             await activity.update(.init(state: state, staleDate: nil))
             try? await Task.sleep(for: .seconds(1))
             await activity.end(.init(state: state, staleDate: nil), dismissalPolicy: .after(Date().addingTimeInterval(120)))
+            finalizing = false
         }
     }
 
@@ -90,9 +101,13 @@ enum LiveActivityController {
     /// activity of ours when there's no in-memory `activity` to end directly — e.g. the drive was
     /// recovered (Save/Discard) after a relaunch, so nothing in THIS process ever called `start()`
     /// to populate it, and without this fallback the previous process's activity would never end.
+    /// Skips that sweep while `endWithFinal`'s terminal frame is still deliberately holding — e.g.
+    /// `ActiveDriveController.clear()` (called right after `endWithFinal` when the summary is saved
+    /// or discarded) used to have this immediately sweep away the very "Arrived" frame that was
+    /// supposed to linger for two minutes, so it always vanished the instant the summary closed.
     static func end() {
         guard let activity else {
-            Task { await endOrphaned() }
+            if !finalizing { Task { await endOrphaned() } }
             return
         }
         self.activity = nil
@@ -106,8 +121,17 @@ enum LiveActivityController {
     /// with stale, frozen numbers (potentially until it auto-expires) unless something proactively
     /// ends it. Intended for app launch, when there's no drive actually being recovered — safe to
     /// call any time, including when nothing is orphaned.
+    ///
+    /// Deliberately excludes THIS process's own `activity` (by id) — `ContentView` calls this
+    /// opportunistically on every tab switch/foreground while `LocationTracker.recoverableSession()`
+    /// reads nil, which is also true for the first second or two of a brand-new drive (the crash log
+    /// only becomes "recoverable" once 2 points have landed). Without the exclusion, a tab switch in
+    /// that window ended the activity that had just started — and left `start()`'s `activity == nil`
+    /// guard permanently unable to request a new one for the rest of the process, since the static
+    /// reference was never cleared to match.
     static func endOrphaned() async {
-        for orphan in Activity<DriveActivityAttributes>.activities {
+        let mine = activity?.id
+        for orphan in Activity<DriveActivityAttributes>.activities where orphan.id != mine {
             await orphan.end(nil, dismissalPolicy: .immediate)
         }
     }

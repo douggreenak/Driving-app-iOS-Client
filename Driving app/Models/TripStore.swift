@@ -132,6 +132,9 @@ enum TripStore {
         var vehicleMpg: Double?
         var scheduledDeparture: Date?
         var scheduledArrival: Date?
+        /// Intermediate stops carried over when the missed drive was logged against a scheduled
+        /// drive that has any — empty for a plain start→end entry.
+        var stops: [RouteStop] = []
     }
 
     /// Log a drive after the fact: no track points, so no map-matching — the distance is whatever
@@ -175,6 +178,7 @@ enum TripStore {
             matchedPolyline: matchedData,
             isManualEntry: true
         )
+        trip.stops = input.stops
         context.insert(trip)
         try? context.save()
 
@@ -335,7 +339,14 @@ enum TripStore {
             if recorded.count >= 2 {
                 trip.estimatedGallons = FuelModel.gallons(segments: FuelModel.segments(from: recorded), ratedMpg: mpg)
             } else {
-                trip.estimatedGallons = trip.distance / mpg
+                // No track (a manually-logged entry, `saveManual`) — mirror ITS math exactly
+                // (`TripStore.saveManual`: `distance / FuelModel.mpg(atMph: avgMph, ratedMpg:)`), not
+                // a flat `distance / mpg`. Using the flat average here silently changed a manual
+                // trip's fuel estimate (and every "Who's paying" total downstream) on ANY save in
+                // `EditVehicleView` — including edits that never touched the MPG at all, since this
+                // recompute runs whenever the name changes too — even though nothing about how much
+                // gas that drive burned actually changed.
+                trip.estimatedGallons = trip.distance / FuelModel.mpg(atMph: trip.avgSpeed, ratedMpg: mpg)
             }
         }
         try? context.save()
@@ -418,7 +429,11 @@ enum TripStore {
     static func pullRemoteEdits(context: ModelContext) async -> Int {
         guard let remote = try? await APIClient.fetchTrips(), !remote.isEmpty else { return 0 }
         guard let local = try? context.fetch(FetchDescriptor<DriveTrip>()) else { return 0 }
-        let byRemoteID = Dictionary(uniqueKeysWithValues: local.compactMap { t in t.remoteID.map { ($0, t) } })
+        // `uniqueKeysWithValues:` traps with a fatalError on a duplicate key. Two local trips sharing
+        // a `remoteID` should be impossible given `syncPending`/`syncToBackend`'s `uploading` guard,
+        // but a hard crash on every pull-to-refresh is a bad way to find out that guard ever slipped
+        // — prefer the first match and keep going instead.
+        let byRemoteID = Dictionary(local.compactMap { t in t.remoteID.map { ($0, t) } }, uniquingKeysWith: { a, _ in a })
         var updated = 0
         for r in remote {
             guard let trip = byRemoteID[r.id] else { continue }

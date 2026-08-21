@@ -52,6 +52,7 @@ final class ActiveDriveController {
             return tracker
         }
         let t = LocationTracker()
+        wireLiveUpdates(t)
         tracker = t
         context = Context(scheduled: scheduled, goTo: goTo, asModal: asModal)
         presentation = .full
@@ -63,9 +64,20 @@ final class ActiveDriveController {
     /// `tracker.resume(from:)`; this just gives it somewhere to live.
     func adoptRecovering() {
         guard tracker == nil else { return }
-        tracker = LocationTracker()
+        let t = LocationTracker()
+        wireLiveUpdates(t)
+        tracker = t
         context = Context(scheduled: nil, goTo: nil, asModal: true)
         presentation = .full
+    }
+
+    /// Push the Live Activity/Watch broadcast from the model itself, not just from `ContentView`'s
+    /// `.onChange(of: tracker.fixCount / elapsedSeconds)` — see `LocationTracker.onUpdate`'s doc
+    /// comment for why those view-graph modifiers alone weren't enough to keep a backgrounded Live
+    /// Activity live. Kept here (rather than inline at each `LocationTracker()` call site) since both
+    /// need it and `pushLiveUpdate()` is already throttled, so this stays cheap.
+    private func wireLiveUpdates(_ t: LocationTracker) {
+        t.onUpdate = { [weak self] in self?.pushLiveUpdate() }
     }
 
     /// Minimize: dismiss the full-screen cover but keep the tracker (and everything below) running.

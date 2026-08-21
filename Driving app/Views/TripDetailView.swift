@@ -32,6 +32,18 @@ struct TripDetailView: View {
     /// per trip instead of on every re-render (e.g. when the favorite star is toggled).
     @State private var derived: TripDerived?
 
+    /// `.task(id:)`'s key for recomputing `derived`. `trip.persistentModelID` alone is immutable for
+    /// a model's whole lifetime, so keying on just that made this run exactly ONCE per view instance
+    /// no matter what actually changed — most visibly, `EditVehicleView` retroactively rewrites
+    /// `vehicleMpg`/`estimatedGallons` on every trip in that car (SettingsView's MPG-change flow), but
+    /// the fuel-band breakdown and "Flat-average estimate" here (both baked into `TripDerived`) kept
+    /// showing the OLD MPG's numbers — visibly contradicting the live `trip.estimatedGallons` headline
+    /// right above them — until this page was closed and reopened. Keying on the actual inputs
+    /// `TripDerived.init` reads makes it recompute whenever any of them genuinely changes.
+    private var derivedKey: String {
+        "\(trip.persistentModelID)-\(trip.points.count)-\(trip.vehicleMpg ?? -1)-\(trip.estimatedGallons)-\(trip.legTotal)-\(trip.matchedFraction)"
+    }
+
     var body: some View {
         ScrollView {
             if let derived {
@@ -56,7 +68,7 @@ struct TripDetailView: View {
                 .accessibilityLabel(trip.isFavorite ? "Remove from favorites" : "Add to favorites")
             }
         }
-        .task(id: trip.persistentModelID) { derived = TripDerived(trip: trip); loadJourneyLegs() }
+        .task(id: derivedKey) { derived = TripDerived(trip: trip); loadJourneyLegs() }
         .fullScreenCover(isPresented: $showPlayback) {
             NavigationStack { RoutePlaybackView(trip: trip) }
         }
@@ -354,15 +366,23 @@ struct TripDetailView: View {
                            sub: endName, tint: endTint, align: .trailing)
             }
 
-            // Departure → arrival progress line
+            // Departure → arrival connector. This is a COMPLETED trip (unlike the analogous bar on
+            // `ScheduledDriveDetailView`, which is the correct version to converge on and has no
+            // second layer), so a solid full-width line is right — but this used to also draw a
+            // `Color.secondary.opacity(0.25)` capsule underneath a full-width blue one on top: dead
+            // weight, since the blue capsule's width was unconditionally `geo.size.width` and so
+            // could never leave a single pixel of the gray layer visible.
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.secondary.opacity(0.25)).frame(height: 4)
                     Capsule().fill(.blue).frame(width: geo.size.width, height: 4)
                     Circle().fill(startTint).frame(width: 10, height: 10)
                     Circle().fill(endTint).frame(width: 10, height: 10)
                         .offset(x: geo.size.width - 10)
                 }
+                // `GeometryReader`'s content is top-leading by default and the ZStack's intrinsic
+                // height (10, the circles) sits inside a 12pt frame — without centering, the whole
+                // connector drew ~2pt above center relative to the card's other rows.
+                .frame(height: geo.size.height, alignment: .center)
             }
             .frame(height: 12)
 
@@ -651,7 +671,14 @@ struct TripDerived {
 
         let coords = trip.displayCoordinates
         displayCoords = coords
-        deviationCoords = pts.filter { !$0.onRoad }.map(\.coordinate)
+        // `TrackPoint.onRoad` defaults to `false`, and every `usedRoute: false` path in
+        // `RouteMatcher.match` (offline, or the round-trip/short-connector case its own doc comment
+        // calls out as expected) hands back `onRoad: [false, false, …]` for every point — so whenever
+        // matching didn't succeed, ALL points read as "deviations" and every single one got an orange
+        // `MapCircle` (`TripRouteMap`, ~1 per second of recording), burying the route under a solid
+        // orange blob instead of showing nothing. `matchCard` right below already gates on
+        // `trip.usedRouteMatching`; this overlay just never got the same gate.
+        deviationCoords = trip.usedRouteMatching ? pts.filter { !$0.onRoad }.map(\.coordinate) : []
         region = .enclosing(coords.isEmpty ? [trip.startCoordinate, trip.endCoordinate] : coords)
 
         let start = pts.first?.t ?? trip.date
@@ -707,15 +734,32 @@ struct EditTripScheduleView: View {
                 } footer: {
                     Text("Set the time you were supposed to arrive. The trip is graded on-time or delayed against this.")
                 }
+                // Nothing constrained the two `DatePicker`s relative to each other — Departs 09:00 /
+                // Arrives 08:00 saved cleanly, storing a negative-budget schedule that every
+                // downstream `delaySeconds`/`StatusChip` then reads off. `labeledDelta` above already
+                // displays the resulting nonsense live; this stops it from being saved at all.
+                if !timesValid {
+                    Section {
+                        Label("Scheduled arrival must be after scheduled departure.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
             }
             .navigationTitle("Edit Schedule")
             .navigationBarTitleDisplayMode(.inline)
+            // The only `Form` with a `TextField` in the app that didn't call this — every sibling
+            // editor (NewScheduledDriveView, SettingsView, NewGasEntryView, LogMissedDriveView,
+            // TripSummaryView) does, so this was the one screen with no keyboard "Done" bar and no
+            // interactive-scroll-to-dismiss on its Name field.
+            .keyboardDismissable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { save() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { save() }.disabled(!timesValid) }
             }
         }
     }
+
+    private var timesValid: Bool { !(hasDeparture && hasArrival) || arrival > departure }
 
     /// Shows the actual time and the resulting delay vs. the chosen scheduled time.
     private func labeledDelta(_ label: String, _ actual: Date, _ scheduled: Date) -> some View {
@@ -732,7 +776,8 @@ struct EditTripScheduleView: View {
     }
 
     private func save() {
-        trip.name = name.isEmpty ? nil : name
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        trip.name = trimmed.isEmpty ? nil : trimmed
         trip.scheduledDeparture = hasDeparture ? departure : nil
         trip.scheduledArrival = hasArrival ? arrival : nil
         try? context.save()
@@ -769,6 +814,14 @@ struct TripRouteMap: View {
             Annotation("End", coordinate: end) { pin(endColor) }
         }
         .mapStyle(.standard(elevation: .flat))
+        // `initialPosition` is consumed exactly once, at the map's first layout — `TripRouteMap`
+        // keeps its view identity across re-renders (e.g. toggling the favorite star), so a new
+        // `region` value after that (Trim Trip cutting a stationary tail, or a stop added via
+        // `stopsCard`) was silently ignored: the polyline/pins visibly updated but the camera stayed
+        // framed on the pre-edit bounding box. Keying `.id` on the region forces a fresh map identity
+        // — and a fresh `initialPosition` read — whenever it genuinely changes, without resetting on
+        // every unrelated re-render (the id string stays the same then).
+        .id("\(region.center.latitude),\(region.center.longitude),\(region.span.latitudeDelta),\(region.span.longitudeDelta)")
     }
 
     private func pin(_ color: Color) -> some View {

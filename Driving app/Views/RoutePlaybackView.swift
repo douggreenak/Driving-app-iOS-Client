@@ -112,8 +112,17 @@ struct RoutePlaybackView: View {
     }
 
     var body: some View {
-        map.ignoresSafeArea()
-            .overlay(alignment: .topTrailing) { followButton }
+        // `followButton` used to be an `.overlay` attached to the RESULT of `.ignoresSafeArea()`, so
+        // its alignment container was the expanded full-screen frame, not the safe area — its top
+        // edge ended up in the status-bar/Dynamic-Island band, under this view's own inline nav bar.
+        // A `ZStack` applies `.ignoresSafeArea()` only to the map layer, leaving the button in the
+        // normal (safe-area-respecting) coordinate space, matching every other map screen in the app
+        // (e.g. `LiveTrackingView`, whose recenter button is a sibling ZStack layer for the same
+        // reason).
+        ZStack(alignment: .topTrailing) {
+            map.ignoresSafeArea()
+            followButton
+        }
             .navigationTitle("Route Playback")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -156,6 +165,19 @@ struct RoutePlaybackView: View {
         // Hide the default MapKit controls (the scale bar in particular collided with the clock
         // and notch since the map ignores the safe area); distance is shown in the telemetry bar.
         .mapControls { }
+        // `recenter()` hard-writes the camera on every `index` change — up to 30/s while playing
+        // (`tick()`) — so any pinch/pan/rotate the user made during playback was reverted within
+        // ~33ms with no way to actually inspect the map while a replay runs; toggling `follow` off
+        // was the only escape, and that ALSO immediately re-frames the camera to the whole route
+        // (`followButton`'s action), losing wherever the user was just looking. Mirrors
+        // `LiveTrackingView.mapLayer`'s identical fix: breaking the follow lock on user-initiated
+        // pan/zoom, re-engaged only by explicitly tapping the follow button again.
+        .simultaneousGesture(DragGesture(minimumDistance: 6).onChanged { _ in
+            if follow { follow = false }
+        })
+        .simultaneousGesture(MagnifyGesture().onChanged { _ in
+            if follow { follow = false }
+        })
     }
 
     private var marker: some View {
@@ -320,6 +342,13 @@ struct RoutePlaybackView: View {
         VStack(spacing: 1) {
             Text(value).font(.system(.title3, design: .rounded, weight: .bold))
                 .foregroundStyle(tint == .secondary ? .primary : tint)
+                // No `lineLimit` meant a value that doesn't fit its ~1/4-of-the-row share WRAPPED
+                // instead of truncating — most visibly `clockString`'s 12-hour "10:45 AM" in a US
+                // locale, which reliably wraps to two lines at this row's per-column width. The
+                // `.firstTextBaseline`-aligned row then grows taller only for that one column,
+                // dropping its caption below its three siblings' and shoving the collapsed sheet's
+                // already-tight content down.
+                .lineLimit(1).minimumScaleFactor(0.6)
             Text(unit).font(.system(size: 10)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)

@@ -110,13 +110,26 @@ final class WatchConnectivityManager: NSObject, WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
-        Task { @MainActor in
-            if let data = message["live"] as? Data,
-               let decoded = try? JSONDecoder().decode(WatchSyncPayload.Live.self, from: data) {
-                self.live = decoded
-            } else if message["liveEnded"] != nil {
-                self.live = nil
-            }
+        Task { @MainActor in self.handleLiveMessage(message) }
+    }
+
+    /// The phone's `PhoneWatchConnectivity.sendLive` queues the "drive ended" terminator via
+    /// `transferUserInfo` when the watch isn't reachable at the moment a drive ends (extremely
+    /// common — wrist down, watch app backgrounded) since `sendMessage`'s live frames are fine to
+    /// drop but that terminator is the ONLY thing that ever clears `live` below. Without handling the
+    /// queued-delivery callback too, a delayed terminator was delivered by the system and silently
+    /// ignored, leaving the watch stuck on a frozen "live" drive with dead End/Arrived controls until
+    /// the watch app was force-quit.
+    nonisolated func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any]) {
+        Task { @MainActor in self.handleLiveMessage(userInfo) }
+    }
+
+    private func handleLiveMessage(_ message: [String: Any]) {
+        if let data = message["live"] as? Data,
+           let decoded = try? JSONDecoder().decode(WatchSyncPayload.Live.self, from: data) {
+            live = decoded
+        } else if message["liveEnded"] != nil {
+            live = nil
         }
     }
 

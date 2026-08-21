@@ -136,6 +136,13 @@ struct APIClient {
         req.httpBody = body
         // Fail fast instead of hanging on the default 60s timeout when the backend is slow/unreachable.
         req.timeoutInterval = 12
+        // Every "pull to refresh" in the app ultimately calls a GET here. `URLSessionConfiguration
+        // .default` consults `URLCache.shared` under `.useProtocolCachePolicy`, so if this backend
+        // ever answers with a revalidating/cacheable `Cache-Control`, a refresh could silently be
+        // served the previous response with no network round-trip at all — indistinguishable from
+        // "refreshing does nothing". Reads should always hit the network; writes are unaffected
+        // (POST/PATCH/DELETE responses were never cached to begin with).
+        if method == "GET" { req.cachePolicy = .reloadIgnoringLocalCacheData }
         let (data, response) = try await session.data(for: req)
         // Treat non-2xx as a real failure so error bodies aren't decoded as data and a failed
         // create/delete/patch surfaces to the caller instead of looking like success.

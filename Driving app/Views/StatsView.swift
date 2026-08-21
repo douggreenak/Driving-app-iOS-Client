@@ -40,10 +40,18 @@ struct StatsView: View {
                     }
                 }
                 .sheet(isPresented: $showingEditLayout) { StatsLayoutEditor() }
-                .refreshable { await loadGas() }
+                // `loadGas()` only ever refreshed `/api/stats` (the "Gas spending" card) — every other
+                // card on this page (totals, "Who's paying", records, by-car, by-category, monthly,
+                // latest trip) is computed from `@Query allTrips`, whose only source of server-side
+                // edits (category/notes/favorite/payer changed on the web dashboard) is
+                // `TripStore.pullRemoteEdits` — which pull-to-refresh here never called. Those cards
+                // only ever caught up if some OTHER screen (Trips) happened to pull the edit in first,
+                // which then propagated here for free via the shared `@Query`. Matches this tab
+                // exactly: pull-to-refresh does nothing, but leaving and coming back (via Trips) does.
+                .refreshable { await TripStore.pullRemoteEdits(context: context); await loadGas() }
                 // `.task(id:)` so this refetches on every tab revisit / app-foreground, not just the
                 // first time this view is created (a bare `.task` doesn't refire on a tab switch).
-                .task(id: activityToken) { await loadGas() }
+                .task(id: activityToken) { await TripStore.pullRemoteEdits(context: context); await loadGas() }
         }
     }
 
@@ -249,6 +257,11 @@ struct StatsView: View {
                     .stroke(.green, style: StrokeStyle(lineWidth: 8, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                 Text("\(Int(stats.onTimePercent))%").font(.headline.weight(.bold))
+                    // The container below is hard-fixed at 64×64 with no room to grow; at large
+                    // Dynamic Type sizes `.headline` alone needs far more width than that for "100%",
+                    // drawing straight out of the ring and into the text stacked next to it. `HeroTile`
+                    // right below already guards its own big numbers this way — this one didn't.
+                    .lineLimit(1).minimumScaleFactor(0.5)
             }
             .frame(width: 64, height: 64)
             VStack(alignment: .leading, spacing: 4) {
@@ -387,7 +400,12 @@ private struct HeroTile: View {
             Text(unit).font(.subheadline).foregroundStyle(.secondary)
             Text(sub).font(.caption2).foregroundStyle(.tertiary)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // `maxWidth` alone left `maxHeight` unconstrained, so in the 2-column `LazyVGrid` a tile
+        // whose `unit`/`sub` text happens to wrap (large Dynamic Type, or just a longer string —
+        // "50 MPG effective" vs. "—") grew taller than its row neighbor, whose shorter gray card then
+        // sat vertically centered in the taller row instead of matching it — visibly ragged card
+        // heights across the grid.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .padding()
         .background(Color(.systemGray6), in: .rect(cornerRadius: 14))
     }

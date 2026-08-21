@@ -51,8 +51,12 @@ struct MinimizedDriveBar: View {
                 VStack(spacing: 1) {
                     Image(systemName: "chevron.up")
                         .font(.caption.weight(.bold))
+                    // An absolute point size, unlike every other label in this bar — it stayed frozen
+                    // at 9pt while the name/stat text around it grows at larger Dynamic Type sizes,
+                    // so at accessibility text sizes this becomes the only static-sized label on the
+                    // whole bar. `.caption2` scales like its siblings.
                     Text("Resume")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.caption2.weight(.bold))
                 }
                 .foregroundStyle(.blue)
             }
@@ -61,7 +65,26 @@ struct MinimizedDriveBar: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Resume tracking drive")
+        // `children: .combine` merges the subviews into one element, but the explicit
+        // `.accessibilityLabel` below then REPLACES that combined label rather than adding to it —
+        // so a fixed "Resume tracking drive" was all VoiceOver ever announced. This is the app's only
+        // persistent surface for an in-progress drive while on another tab; build the label from the
+        // same values actually on screen so a VoiceOver user can hear how the drive is going without
+        // first reopening the full screen.
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityHint("Reopens the live tracking screen")
+    }
+
+    private var accessibilityLabel: String {
+        var parts = [tracker.tripName ?? tracker.finalDestinationName ?? tracker.destinationName ?? "Tracking drive"]
+        parts.append(String(format: "%.1f miles", tracker.distanceMiles))
+        parts.append(tracker.formattedElapsed())
+        if let eta = tracker.etaDate {
+            parts.append("ETA \(eta.formatted(.dateTime.hour().minute()))")
+        }
+        if let delay = tracker.delaySeconds {
+            parts.append(TripStatus.live(delaySeconds: delay).headline.capitalized)
+        }
+        return parts.joined(separator: ", ")
     }
 }

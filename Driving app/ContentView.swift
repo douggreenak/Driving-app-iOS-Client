@@ -168,12 +168,26 @@ struct ContentView: View {
             await TripStore.syncPending(context: modelContext)
             await TripStore.backfillPaidBy(context: modelContext)
             #if canImport(ActivityKit) && !os(macOS)
-            if LocationTracker.recoverableSession() == nil {
+            // `!activeDrive.hasActiveDrive` guards the same race `endOrphaned()` now also guards by
+            // id: a brand-new drive's crash log isn't "recoverable" until its 2nd point lands, so
+            // `recoverableSession() == nil` alone stayed true for the first second or two of every
+            // drive — long enough for the tab-switch/foreground bump that drives this `.task(id:)` to
+            // fire mid-drive and sweep the activity that had just started.
+            if !activeDrive.hasActiveDrive, LocationTracker.recoverableSession() == nil {
                 await LiveActivityController.endOrphaned()
             }
             #endif
         }
         .task(id: watchSyncKey) { broadcastToWatch() }
+        // The Live Activity (Lock Screen / Dynamic Island) deep-links here — see
+        // `DriveActivityLiveActivity`'s `.widgetURL` and the `CFBundleURLTypes` entry in Info.plist.
+        // Without this, tapping the activity just opened the app on whatever tab was last selected,
+        // with the currently-tracking drive still minimized and no obvious way back to it.
+        .onOpenURL { url in
+            guard url.host == "active-drive" else { return }
+            selection = .drive
+            if activeDrive.hasActiveDrive { activeDrive.restore() }
+        }
         .onChange(of: selection) { _, _ in activityToken += 1 }
         .onChange(of: scenePhase) { old, new in
             if new == .active, old != .active { activityToken += 1; activeDrive.pushLiveUpdate() }
@@ -282,10 +296,20 @@ struct ContentView: View {
             .prefix(10)
             .map(\.0)
         let price = fuelPrice
-        let payerStats = groups.filter { !$0.isArchived }.map { g in
-            WatchSyncPayload.PayerStat(key: g.key, name: g.name, iconName: g.icon, colorName: g.colorName,
-                                       cost: stats.cost(for: g.key, pricePerGallon: price))
-        }
+        // Mirrors `StatsView.paidBySection`'s key set exactly (see its own doc comment): every payer
+        // that actually appears in the trip history, including one whose group has since been
+        // archived — so an archived group's historical spending isn't silently dropped — but never
+        // one with zero drives. This used to just filter to non-archived groups, which drops an
+        // archived group's real spending AND includes a never-used group at $0; the phone and watch
+        // payer breakdowns wouldn't sum to the same total.
+        let payerKeys = Set(groups.map(\.key)).union(stats.byPayer.keys)
+        let payerStats = payerKeys
+            .map { PayerGroup.resolve(key: $0, in: groups) }
+            .filter { stats.drives(for: $0.key) > 0 }
+            .map { p in
+                WatchSyncPayload.PayerStat(key: p.key, name: p.name, iconName: p.icon, colorName: p.colorName,
+                                           cost: stats.cost(for: p.key, pricePerGallon: price))
+            }
         let payload = WatchSyncPayload(
             drives: Array(drives),
             stats: .init(totalMiles: stats.totalMiles, totalDrives: stats.driveCount,

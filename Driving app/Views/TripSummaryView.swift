@@ -64,7 +64,12 @@ struct TripSummaryView: View {
             } message: {
                 Text("The recorded route and stats won't be saved.")
             }
-            .onAppear { if !didInit { paidBy = initialPaidBy; didInit = true } }
+            // `category` used to just start at its `.other` default and stay there — a scheduled or
+            // "Go to" drive's real category (`tracker.plannedCategory`, set in `LiveTrackingView.setup()`
+            // from the schedule/QuickTrip) never made it here, so every saved trip silently reset to
+            // "Other" unless the user happened to reselect the right one by hand. Seed it alongside
+            // `paidBy`, which already does this correctly.
+            .onAppear { if !didInit { paidBy = initialPaidBy; category = tracker.plannedCategory; didInit = true } }
             .task { await resolveDetails() }
         }
     }
@@ -254,6 +259,16 @@ struct TripSummaryView: View {
 
     // MARK: - Category & Notes
 
+    /// Active groups, plus the currently-selected one even if it's since been archived — a schedule
+    /// or "Go to" seeds `paidBy` from its own saved key (`initialPaidBy`), and if THAT group was
+    /// archived after the schedule was created, filtering it out entirely left the segmented control
+    /// with no segment selected at all (and the header rendered in red, since `PayerGroup.resolve`
+    /// falls back to an "Unknown" display for a key matching no group) — with no way to see or keep
+    /// the payer this drive actually started with.
+    private var paidByOptions: [PayerGroup] {
+        payerGroups.filter { !$0.isArchived || $0.key == paidBy }
+    }
+
     private var paidByPicker: some View {
         let current = PayerGroup.resolve(key: paidBy, in: payerGroups)
         return VStack(alignment: .leading, spacing: 8) {
@@ -261,7 +276,7 @@ struct TripSummaryView: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(current.color)
             Picker("Paid by", selection: $paidBy) {
-                ForEach(payerGroups.filter { !$0.isArchived }) { group in
+                ForEach(paidByOptions) { group in
                     Label(group.name, systemImage: group.icon).tag(group.key)
                 }
             }

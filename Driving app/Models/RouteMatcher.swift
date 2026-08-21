@@ -126,14 +126,18 @@ enum RouteMatcher {
         display.reserveCapacity(coords.count)
         var matched = 0
         var fitSum = 0.0
+        // Tracks how far along `route` the last few accepted points landed, so `nearest` searches
+        // near there instead of the whole polyline — see its doc comment for why.
+        var cursor = 1
 
         for (i, p) in gps.enumerated() {
-            let (dist, proj) = nearest(point: p, on: route)
+            let (dist, proj, seg) = nearest(point: p, on: route, from: cursor)
             fitSum += dist
             if dist <= toleranceMeters {
                 onRoad[i] = true
                 matched += 1
                 display.append(plane.coordinate(x: proj.x, y: proj.y))  // snap to road
+                cursor = max(cursor, seg)
             } else {
                 display.append(coords[i])  // keep the real detour
             }
@@ -169,21 +173,55 @@ enum RouteMatcher {
         return sum / Double(gps.count)
     }
 
-    /// Nearest point on a polyline (in planar meters) to `point`, with the distance to it.
-    private static func nearest(point p: (x: Double, y: Double),
-                                on poly: [(x: Double, y: Double)]) -> (distance: Double, point: (x: Double, y: Double)) {
+    /// How many segments either side of the last match's position `nearest(from:)` searches first.
+    private static let matchWindow = 6
+
+    /// Nearest point on a polyline (in planar meters) to `point`, with the distance to it and the
+    /// index of the segment it landed on (`route[segment - 1]` → `route[segment]`).
+    ///
+    /// When `cursor` is given (> 0), searches a tight window around it FIRST, and only falls back to
+    /// scanning the whole polyline if nothing in that window is within `toleranceMeters`. This is
+    /// what keeps the display-matching loop below from zig-zagging: two branches of a divided road —
+    /// a median U-turn, a cloverleaf/diamond interchange where the route passes back over itself,
+    /// a one-way loop around a block — routinely fall within `toleranceMeters` of EACH OTHER despite
+    /// being far apart in the polyline's point sequence. An unconstrained "closest point anywhere on
+    /// the route" search has no notion of which branch the drive is chronologically on, so ordinary
+    /// GPS jitter alone flips individual points between the two, and the resulting "snapped" polyline
+    /// jumps back and forth across the median instead of tracing the drive. Preferring the window
+    /// keeps consecutive points on the same branch; the full-scan fallback still lets a genuine gap
+    /// (GPS dropped out and reacquired much further down the route) match normally, same as before —
+    /// only the AMBIGUOUS case (a close match nearby AND a close match far away) is resolved
+    /// differently now, in favor of the nearby one.
+    private static func nearest(point p: (x: Double, y: Double), on poly: [(x: Double, y: Double)],
+                                from cursor: Int = 0) -> (distance: Double, point: (x: Double, y: Double), segment: Int) {
+        guard poly.count > 1 else {
+            let pt = poly.first ?? p
+            return (hypot(p.x - pt.x, p.y - pt.y), pt, max(cursor, 1))
+        }
+        if cursor > 0 {
+            let lo = max(1, cursor - matchWindow), hi = min(poly.count, cursor + matchWindow)
+            if lo < hi, let windowed = scanSegments(p, poly, lo..<hi), windowed.distance <= toleranceMeters {
+                return windowed
+            }
+        }
+        return scanSegments(p, poly, 1..<poly.count) ?? (.greatestFiniteMagnitude, poly.first ?? p, max(cursor, 1))
+    }
+
+    /// Nearest projected point to `p` among `poly`'s segments in `range` (1-indexed segment ends),
+    /// or nil if `range` is empty.
+    private static func scanSegments(_ p: (x: Double, y: Double), _ poly: [(x: Double, y: Double)],
+                                     _ range: Range<Int>) -> (distance: Double, point: (x: Double, y: Double), segment: Int)? {
         var bestD = Double.greatestFiniteMagnitude
         var bestPt = poly.first ?? p
-        if poly.count == 1 {
-            return (hypot(p.x - bestPt.x, p.y - bestPt.y), bestPt)
-        }
-        for i in 1..<poly.count {
+        var bestSeg = range.lowerBound
+        var found = false
+        for i in range {
             let a = poly[i - 1], b = poly[i]
             let proj = projectOntoSegment(p, a, b)
             let d = hypot(p.x - proj.x, p.y - proj.y)
-            if d < bestD { bestD = d; bestPt = proj }
+            if d < bestD { bestD = d; bestPt = proj; bestSeg = i; found = true }
         }
-        return (bestD, bestPt)
+        return found ? (bestD, bestPt, bestSeg) : nil
     }
 
     private static func projectOntoSegment(_ p: (x: Double, y: Double),

@@ -19,6 +19,11 @@ struct ScheduledDriveDetailView: View {
     @State private var routeCoords: [CLLocationCoordinate2D] = []
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var loadingRoute = true
+    /// Whether the camera has already been framed to the route once. `loadRoute()` re-seeding
+    /// `cameraPosition` unconditionally on every call meant the newly-added `.refreshable` (and every
+    /// tab-revisit `.task(id:)` re-fetch) discarded any pan/zoom the user had done on the header map —
+    /// only the first successful frame should move the camera.
+    @State private var hasFramedRoute = false
     @State private var showEdit = false
     @State private var showDeleteConfirm = false
     /// See `DriveHomeView.now`'s doc comment — same problem (the ON TIME/DELAYED banner, the dots,
@@ -42,6 +47,17 @@ struct ScheduledDriveDetailView: View {
     }
     // Canceling only cancels the occurrence this page is showing — the repeat keeps going.
     private var isCanceled: Bool { drive.isOccurrenceCanceled(departure) }
+
+    /// `drive.routeCoordinates` filtered to real fixes — a stop created before its address was
+    /// picked (or a malformed one pulled from the backend, see `RouteStop.init(from:)`) defaults to
+    /// (0, 0) "Null Island", same as the guard `LocationTracker.setRoute` already applies for a live
+    /// drive. Without filtering here too, routing through it either drops the WHOLE route (one bad
+    /// leg fails `multiLegRoute` for all of them) or, via the `routeCoords.isEmpty` fallback below,
+    /// zooms the map out to span the Gulf of Guinea with a stop pin in the ocean.
+    private var usableRouteCoordinates: [CLLocationCoordinate2D] {
+        guard drive.startCoordinate.isUsableCoordinate, drive.endCoordinate.isUsableCoordinate else { return [] }
+        return [drive.startCoordinate] + drive.stops.map(\.coordinate).filter(\.isUsableCoordinate) + [drive.endCoordinate]
+    }
     private var status: TripStatus {
         .occurrence(departure: departure, scheduledArrival: arrival, travelSeconds: drive.estimatedTravelTime,
                     isCanceled: isCanceled, startedAt: drive.lastStartedAt, now: now)
@@ -82,10 +98,16 @@ struct ScheduledDriveDetailView: View {
         .task(id: activityToken) { await loadRoute() }
         .task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(30))
                 now = .now
+                try? await Task.sleep(for: .seconds(30))
             }
         }
+        // This page had no pull-to-refresh at all — the only way to force the route/ETA and the
+        // ON TIME→DELAYED banner to catch up was to leave and come back (which re-fires the
+        // `.task(id: activityToken)` above via a tab switch). `now = .now` here matters even though
+        // the 30s ticker above already keeps it moving: a pull is an explicit "fix this now" ask that
+        // shouldn't have to wait up to 30s for the next tick to land.
+        .refreshable { now = .now; await loadRoute() }
         .sheet(isPresented: $showEdit) { NewScheduledDriveView(editing: drive, occurrenceDate: departure) }
     }
 
@@ -100,22 +122,39 @@ struct ScheduledDriveDetailView: View {
                 }
                 Annotation("Departure", coordinate: drive.startCoordinate) { pin(startColor) }
                 ForEach(Array(drive.stops.enumerated()), id: \.element.id) { i, stop in
-                    Annotation(stop.dwellMinutes > 0 ? "Stop \(i + 1) · \(stop.dwellMinutes) min" : "Stop \(i + 1)",
-                               coordinate: stop.coordinate) { stopPin(i + 1, dwell: stop.dwellMinutes) }
+                    if stop.coordinate.isUsableCoordinate {
+                        // `Annotation` centers its content on the coordinate by default. Without a
+                        // dwell badge that centers the 18pt circle correctly, but WITH one the VStack
+                        // grows taller and the whole thing re-centers — shifting the numbered circle
+                        // ~9pt off the actual stop location while the badge hangs below it. Two
+                        // adjacent stops (one with a dwell, one without) then marked their locations
+                        // with visibly different offsets. Anchoring to `.top` keeps the circle's TOP
+                        // (not the whole stack's center) pinned to the coordinate regardless of
+                        // whether the badge is present.
+                        Annotation(stop.dwellMinutes > 0 ? "Stop \(i + 1) · \(stop.dwellMinutes) min" : "Stop \(i + 1)",
+                                   coordinate: stop.coordinate, anchor: .top) { stopPin(i + 1, dwell: stop.dwellMinutes) }
+                    }
                 }
                 Annotation("Arrival", coordinate: drive.endCoordinate) { pin(endColor) }
             }
             .mapStyle(.standard(elevation: .flat))
             .frame(height: 280)
-
-            if loadingRoute {
-                HStack(spacing: 8) {
-                    ProgressView()
-                    Text("Finding optimal route…").font(.caption).foregroundStyle(.secondary)
+            // Was a ZStack layer between the map and the gradient/label row below, so BOTH later
+            // layers painted on top of it — the darkest part of the 85%-black gradient and the white
+            // departure/arrival text landed right where this pill was, washing it out and stamping
+            // text across it for the entire initial `loadRoute()` (every time this page opens, and
+            // every pull-to-refresh). Anchoring it to the map's own top edge as an overlay keeps it
+            // clear of both.
+            .overlay(alignment: .top) {
+                if loadingRoute {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Finding optimal route…").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: .capsule)
+                    .padding(.top, 12)
                 }
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                .background(.ultraThinMaterial, in: .capsule)
-                .padding(.bottom, 12)
             }
 
             LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .center, endPoint: .bottom)
@@ -247,10 +286,11 @@ struct ScheduledDriveDetailView: View {
             // If any stop has dwell time, show a breakdown so the user can see drive vs. stop time.
             let totalDwell = drive.stops.reduce(0) { $0 + $1.dwellMinutes }
             if totalDwell > 0 {
+                let dwellStops = drive.stops.filter { $0.dwellMinutes > 0 }
                 Divider()
                 VStack(spacing: 0) {
-                    ForEach(drive.stops.filter { $0.dwellMinutes > 0 }.indices, id: \.self) { i in
-                        let stop = drive.stops.filter { $0.dwellMinutes > 0 }[i]
+                    ForEach(dwellStops.indices, id: \.self) { i in
+                        let stop = dwellStops[i]
                         let idx = drive.stops.firstIndex(where: { $0.id == stop.id }).map { $0 + 1 } ?? (i + 1)
                         HStack(spacing: 12) {
                             Image(systemName: "clock.badge.fill").foregroundStyle(.orange).frame(width: 24)
@@ -260,7 +300,7 @@ struct ScheduledDriveDetailView: View {
                         }
                         .font(.subheadline)
                         .padding(.vertical, 10)
-                        if i < drive.stops.filter({ $0.dwellMinutes > 0 }).count - 1 { Divider() }
+                        if i < dwellStops.count - 1 { Divider() }
                     }
                 }
             }
@@ -345,6 +385,19 @@ struct ScheduledDriveDetailView: View {
                         .frame(maxWidth: .infinity).padding(.vertical, 12)
                         .background(Color(.systemGray6), in: .capsule)
                 }
+                // A currently-tracking (possibly minimized) drive's `ActiveDriveController.context`
+                // holds a strong reference to THIS `ScheduledDrive` — `LiveTrackingView` reads its
+                // title/addresses and, on Save/Discard, writes `scheduled?.lastCompletedAt` straight
+                // back onto it. Deleting it out from under an in-progress drive left that write
+                // hitting an invalidated SwiftData model (crash, or a resurrected row on save) the
+                // moment the drive was restored and finished. Mirrors the guard the Start button
+                // above already has for "this drive is the active one" — Delete just never had one.
+                .disabled(thisDriveIsActive)
+            }
+            if thisDriveIsActive {
+                Text("This drive is in progress — end it before deleting the schedule.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
         }
         .confirmationDialog("Delete this scheduled drive?",
@@ -380,8 +433,12 @@ struct ScheduledDriveDetailView: View {
 
     private func loadRoute() async {
         loadingRoute = true
-        // Route through every waypoint (start → stops → destination), summing the legs.
-        if let result = await RouteMatcher.multiLegRoute(through: drive.routeCoordinates) {
+        let waypoints = usableRouteCoordinates
+        // Route through every waypoint (start → stops → destination), summing the legs. A drive
+        // with an unusable (0, 0) stop or endpoint has nothing safe to route through at all — fall
+        // straight to the raw-coordinate map fallback below instead of asking MapKit to plot a
+        // course to Null Island.
+        if waypoints.count >= 2, let result = await RouteMatcher.multiLegRoute(through: waypoints) {
             routeCoords = result.coordinates
             // Refresh the stored predicted travel time from the live optimal multi-leg route — but
             // only write (and only when it actually differs) so an ordinary re-visit that fetches
@@ -392,8 +449,11 @@ struct ScheduledDriveDetailView: View {
                 try? context.save()
             }
         }
-        let coords = routeCoords.isEmpty ? drive.routeCoordinates : routeCoords
-        cameraPosition = .region(.enclosing(coords))
+        let coords = routeCoords.isEmpty ? waypoints : routeCoords
+        if !coords.isEmpty, !hasFramedRoute {
+            cameraPosition = .region(.enclosing(coords))
+            hasFramedRoute = true
+        }
         loadingRoute = false
     }
 

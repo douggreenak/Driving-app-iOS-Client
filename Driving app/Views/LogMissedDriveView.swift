@@ -40,6 +40,18 @@ struct LogMissedDriveView: View {
 
     @State private var routeMiles: Double?
     @State private var routeCoordinates: [CLLocationCoordinate2D] = []
+    /// Intermediate stops carried over when a scheduled drive is picked (`pick(_:)`), so a missed
+    /// multi-stop drive routes through the same waypoints it was actually scheduled for instead of
+    /// a direct start→end line. Cleared when the schedule is deselected.
+    @State private var prefilledStops: [RouteStop] = []
+    /// The schedule's OWN departure/arrival, captured at pick time — separate from `departure`/
+    /// `arrival` below, which are the actual (freely editable) times the drive happened. These are
+    /// what the saved trip is graded against; using the edited actuals there instead (as this used
+    /// to) made `delaySeconds` always compute to exactly 0 — every missed drive silently scored a
+    /// perfect ON TIME, pulling `DrivingStats.onTimePercent`/`avgDelaySeconds` toward 100%/0 no
+    /// matter how late the drive actually was.
+    @State private var scheduledDep: Date?
+    @State private var scheduledArr: Date?
     @State private var calculating = false
     @State private var routeError: String?
     @State private var saving = false
@@ -58,7 +70,7 @@ struct LogMissedDriveView: View {
         return miles / FuelModel.mpg(atMph: avgMph, ratedMpg: ratedMpg)
     }
 
-    private var arrivalIsValid: Bool { arrival > departure }
+    private var arrivalIsValid: Bool { arrival > departure && arrival <= .now }
     private var canLog: Bool {
         startCoord != nil && endCoord != nil && routeMiles != nil && arrivalIsValid && !calculating && !saving
     }
@@ -76,8 +88,12 @@ struct LogMissedDriveView: View {
                             .font(.caption).foregroundStyle(.orange)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    if !arrivalIsValid {
+                    if arrival <= departure {
                         Label("Arrival must be after departure.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if arrival > .now {
+                        Label("A missed drive can't arrive in the future.", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.orange)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -133,6 +149,15 @@ struct LogMissedDriveView: View {
                     Button {
                         Haptics.tap()
                         selectedSchedule = nil
+                        prefilledStops = []
+                        scheduledDep = nil
+                        scheduledArr = nil
+                        // The stops just cleared are exactly what `recalcRoute()`'s waypoint list is
+                        // built from — without recomputing, the estimate card (and what actually gets
+                        // saved) kept showing the through-the-stops distance/route with no stops left
+                        // to account for it.
+                        routeMiles = nil; routeCoordinates = []; routeError = nil
+                        Task { await recalcRoute() }
                     } label: {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                     }
@@ -226,12 +251,31 @@ struct LogMissedDriveView: View {
         category = s.category
         paidBy = s.paidByRaw
         vehicleName = s.vehicleName
+        // Carry over the schedule's intermediate stops so the recorded (well, logged) route matches
+        // what was actually driven — `recalcRoute()` used to always request a plain two-point
+        // start→end route here regardless of the schedule having stops, understating the real
+        // distance/fuel/cost for every multi-stop missed drive and showing a route on the map that
+        // skips whatever was actually visited in between.
+        prefilledStops = s.stops.filter(\.coordinate.isUsableCoordinate)
+        // The schedule's real target times — captured once, here, so editing `departure`/`arrival`
+        // below to reflect what actually happened doesn't also move the goalposts it's graded
+        // against (see `scheduledDep`/`scheduledArr`'s doc comment). Prefer the most recent PAST
+        // occurrence: `statusReferenceDeparture()` picks whichever of the previous-or-next occurrence
+        // is nearer to now, which is often the upcoming one for a schedule whose last occurrence
+        // already dropped off (driven, or simply passed) — nonsensical here, since the entire point
+        // of this screen is logging a drive that already happened.
+        let dep = s.previousDeparture(before: .now) ?? s.statusReferenceDeparture()
+        scheduledDep = dep
+        scheduledArr = dep.addingTimeInterval(s.arrivalBudget)
         // Default to the nearest occurrence's time-of-day, clamped to the past (a missed drive
         // can't be in the future) — the DatePickers below are freely editable if it was a
-        // different day.
-        let dep = s.statusReferenceDeparture()
-        departure = min(dep, .now)
-        arrival = departure.addingTimeInterval(max(60, s.arrivalBudget))
+        // different day. Both ends are clamped: clamping only `departure` (as this used to) left
+        // `arrival` — computed by adding the travel budget on top — landing in the future whenever
+        // `dep` itself was, which `arrivalIsValid` didn't catch (it only compared the two fields to
+        // each other, not to `now`).
+        let budget = max(60, s.arrivalBudget)
+        arrival = min(dep.addingTimeInterval(budget), .now)
+        departure = arrival.addingTimeInterval(-budget)
         routeMiles = nil; routeCoordinates = []; routeError = nil
         Task { await recalcRoute() }
     }
@@ -315,7 +359,10 @@ struct LogMissedDriveView: View {
                     .textFieldStyle(.roundedBorder)
             }
             Picker("Paid by", selection: $paidBy) {
-                ForEach(payerGroups.filter { !$0.isArchived }) { group in
+                // Includes the current selection even if archived since — see the identical fix in
+                // `NewScheduledDriveView`. Here `paidBy` is seeded from a picked schedule's own
+                // `paidByRaw` (`pick(_:)`), which can equally reference a since-archived group.
+                ForEach(payerGroups.filter { !$0.isArchived || $0.key == paidBy }) { group in
                     Label(group.name, systemImage: group.icon).tag(group.key)
                 }
             }
@@ -356,7 +403,11 @@ struct LogMissedDriveView: View {
         guard let s = startCoord, let e = endCoord else { return }
         calculating = true; routeError = nil; routeMiles = nil; routeCoordinates = []
         defer { calculating = false }
-        guard let result = await RouteMatcher.multiLegRoute(through: [s, e]) else {
+        // Route through the picked schedule's intermediate stops (if any) — see `prefilledStops`'s
+        // doc comment; a manually-typed start/destination (no schedule picked) has none, so this is
+        // just `[s, e]` in that case, same as before.
+        let waypoints = [s] + prefilledStops.map(\.coordinate) + [e]
+        guard let result = await RouteMatcher.multiLegRoute(through: waypoints) else {
             routeError = "Couldn't find a driving route for these addresses. Check them and your connection."
             return
         }
@@ -378,8 +429,12 @@ struct LogMissedDriveView: View {
             name: name.isEmpty ? nil : name,
             vehicleName: vehicleName,
             vehicleMpg: vehicles.first(where: { $0.name == vehicleName })?.avgMpg,
-            scheduledDeparture: selectedSchedule != nil ? departure : nil,
-            scheduledArrival: selectedSchedule != nil ? arrival : nil
+            // The schedule's OWN times (captured in `pick(_:)`), NOT `departure`/`arrival` — those
+            // are the actual (edited) times the drive happened, and grading the trip against ITSELF
+            // made `delaySeconds` always compute to exactly 0. See `scheduledDep`'s doc comment.
+            scheduledDeparture: scheduledDep,
+            scheduledArrival: scheduledArr,
+            stops: prefilledStops
         )
         guard await TripStore.saveManual(input, context: context) != nil else {
             routeError = "Couldn't save this drive. Double-check the times and try again."

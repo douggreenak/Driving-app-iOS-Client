@@ -45,6 +45,12 @@ struct NewScheduledDriveView: View {
     @State private var calculating = false
     @State private var routeError: String?
     @State private var didPrefill = false
+    /// Bumped on every `recalcETA()` call so a slower, now-superseded fetch (address pickers and the
+    /// stop-remove button each fire their own `Task { await recalcETA() }`, with nothing before this
+    /// serializing them) recognizes it's stale and discards itself instead of overwriting fresher
+    /// results — or, worse, indexing `result.legSeconds` against a `stops` array that has since grown
+    /// past what that particular route actually covers.
+    @State private var etaRequestID = 0
 
     init(editing: ScheduledDrive? = nil, occurrenceDate: Date? = nil) {
         self.editing = editing
@@ -86,9 +92,16 @@ struct NewScheduledDriveView: View {
         return pickedStops.isEmpty && s.distanceMeters(to: e) < 50
     }
 
+    /// A stop row added (`stops.append(RouteStop(address: "", lat: 0, lng: 0))`) but never given an
+    /// address — `drive.stops = pickedStops` (in `apply`/`makeDrive`) silently drops any such row on
+    /// save, discarding whatever dwell time was set on it too, with nothing telling the user their
+    /// stop never made it in.
+    private var hasEmptyStop: Bool { stops.contains { $0.lat == 0 && $0.lng == 0 } }
+
     private var canSave: Bool {
         !title.trimmingCharacters(in: .whitespaces).isEmpty
-            && startCoord != nil && endCoord != nil && travelSeconds != nil && !sameStartAndEnd
+            && startCoord != nil && endCoord != nil && travelSeconds != nil
+            && !sameStartAndEnd && !hasEmptyStop
     }
 
     var body: some View {
@@ -151,6 +164,10 @@ struct NewScheduledDriveView: View {
                         Label("Start and destination are the same place.", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.orange)
                     }
+                    if hasEmptyStop {
+                        Label("Pick an address for every stop, or remove it.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                 }
 
                 Section("Schedule") {
@@ -184,7 +201,12 @@ struct NewScheduledDriveView: View {
 
                 Section("Details") {
                     Picker("Paid by", selection: $paidBy) {
-                        ForEach(payerGroups.filter { !$0.isArchived }) { group in
+                        // Includes the current selection even if archived since — editing an older
+                        // schedule whose payer group has since been removed from pickers otherwise
+                        // left this menu with nothing selected at all (its tag matches none of the
+                        // rows) and silently swapped `paidBy` to whatever the menu's first row
+                        // happened to be the moment the user touched it.
+                        ForEach(payerGroups.filter { !$0.isArchived || $0.key == paidBy }) { group in
                             Label(group.name, systemImage: group.icon).tag(group.key)
                         }
                     }
@@ -262,17 +284,25 @@ struct NewScheduledDriveView: View {
     /// stepper can adjust totals instantly without hitting MapKit again.
     private func recalcETA() async {
         guard let s = startCoord, let e = endCoord else { return }
+        etaRequestID += 1
+        let requestID = etaRequestID
         calculating = true
         routeError = nil
-        defer { calculating = false }
         let waypoints = [s] + pickedStops.map(\.coordinate) + [e]
-        if let result = await RouteMatcher.multiLegRoute(through: waypoints) {
+        let result = await RouteMatcher.multiLegRoute(through: waypoints)
+        // A newer edit (another stop picked, or removed) fired its own `recalcETA()` while this one
+        // was in flight — MapKit's completion order doesn't match request order, so without this a
+        // slower, now-stale response could land last and silently overwrite the fresher one (wrong
+        // predicted travel time saved onto the schedule), or — since `stops` may have grown or
+        // shrunk since this request started — index `result.legSeconds` out of bounds and trap.
+        guard requestID == etaRequestID else { return }
+        calculating = false
+        if let result {
             var legIdx = 0
-            for i in stops.indices {
-                if stops[i].lat != 0 || stops[i].lng != 0 {
-                    stops[i].legDriveSeconds = result.legSeconds[legIdx]
-                    legIdx += 1
-                }
+            for i in stops.indices where stops[i].lat != 0 || stops[i].lng != 0 {
+                guard legIdx < result.legSeconds.count else { break }
+                stops[i].legDriveSeconds = result.legSeconds[legIdx]
+                legIdx += 1
             }
             drivingSeconds = result.seconds
             travelSeconds = result.seconds + totalDwellSeconds

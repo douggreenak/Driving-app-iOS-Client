@@ -49,6 +49,9 @@ struct LiveTrackingView: View {
     @State private var showingVehiclePicker = false
     @State private var showingAddStop = false
     @State private var recovered: DriveLogger.Recovered?
+    /// Measured height of `bottomControls`, so `recenterButton` can sit just above it regardless of
+    /// which of its several states (pre-start / paused / mid-route-with-fuel-chip / …) is showing.
+    @State private var bottomControlsHeight: CGFloat = 160
     @State private var didAutoStart = false
 
     /// The most-efficient (fastest) road route from where the driver is now to the destination,
@@ -177,7 +180,11 @@ struct LiveTrackingView: View {
                         // "change my destination" into a 2-stop route via the discarded old one.
                         tracker.setRoute(stops: [], finalDestination: picked.coordinate, finalName: picked.address)
                     } else {
-                        tracker.appendLiveStop(stop)
+                        // `legProgressStrip` only appears `if tracker.isMultiLeg` — adding the first
+                        // stop to an open/single-destination drive flips that false→true right here,
+                        // which (unlike starting/stopping the drive, both already wrapped) wasn't
+                        // animated: the strip popped in and shoved the HUD down with no transition.
+                        withAnimation(.spring(duration: 0.3)) { tracker.appendLiveStop(stop) }
                     }
                     lastRouteFetchFrom = nil  // force the guide line to re-route to the new next stop
                     refreshEfficientRoute()
@@ -197,7 +204,19 @@ struct LiveTrackingView: View {
             // reflect the ORIGINAL start intent, but `tracker.plannedVehicleName` reflects what's
             // actually been recorded so far — the more reliable source once a drive is under way.
             let wantedVehicle = tracker.plannedVehicleName ?? scheduled?.vehicleName ?? goTo?.vehicleName
-            selectedVehicle = vehicles.first(where: { $0.name == wantedVehicle }) ?? vehicles.first
+            if let wantedVehicle {
+                // A name was actually specified (from a schedule/Go-to/resumed tracker) — if it
+                // doesn't match any current vehicle (e.g. the car was renamed elsewhere and this
+                // schedule's reference is stale), falling back to `vehicles.first` used to silently
+                // start the drive recording against WHATEVER OTHER car happened to be first — wrong
+                // MPG, wrong fuel estimate, wrong car on the saved trip. Leave it unresolved instead;
+                // the picker still lets the user set the right one before starting.
+                selectedVehicle = vehicles.first(where: { $0.name == wantedVehicle })
+            } else {
+                // No vehicle was ever specified (e.g. an ad-hoc "Start a Drive") — defaulting to the
+                // first car on file is a reasonable, honest default here, not a silent wrong guess.
+                selectedVehicle = vehicles.first
+            }
         }
         // Everything below (recovery check, default-payer seed, auto-start) is once-only setup for a
         // BRAND NEW drive. `tracker.startTime` — set only once `startTracking()`/`resume(from:)`
@@ -340,10 +359,36 @@ struct LiveTrackingView: View {
         // would just be a redundant duplicate push while this view happens to be on screen.
         .onChange(of: tracker.fixCount) { _, _ in
             if followUser, let loc = tracker.currentLocation {
-                cameraPosition = .region(MKCoordinateRegion(
-                    center: loc,
-                    span: MKCoordinateSpan(latitudeDelta: 0.008, longitudeDelta: 0.008)))
+                // `cameraPosition` starts (and `startTracking()`/`resumeRecovered()` reset it) as
+                // `.userLocation(followsHeading: true, …)` — heading-up rotation — but this very
+                // first per-fix write always replaced it with a plain, un-rotated `.region`, so
+                // heading-up follow was never actually in effect for a single second of a real
+                // drive. Only rotate to the GPS course when it's both valid (`-1` marks "no course")
+                // AND the car is actually moving fast enough for it to be meaningful — course from
+                // slow/near-stationary fixes is mostly GPS noise, and spinning the map at every red
+                // light would be worse than the north-up camera this replaces. `withAnimation` turns
+                // the previous unanimated ~1 Hz "ratchet" (every other camera write in this view,
+                // e.g. `recenterButton`'s, is already animated) into a smooth glide.
+                let heading = (tracker.currentCourse >= 0 && tracker.currentSpeed > 5) ? tracker.currentCourse : 0
+                withAnimation(.linear(duration: 0.9)) {
+                    cameraPosition = .camera(MapCamera(centerCoordinate: loc, distance: 900,
+                                                       heading: heading, pitch: 0))
+                }
             }
+            refreshEfficientRoute()
+        }
+        // Every IN-APP action that changes the leg target (arrivedButton, "Start Next Trip", adding
+        // a stop, `setup()`'s resync) resets `lastRouteFetchFrom` itself before calling
+        // `refreshEfficientRoute()`. `ActiveDriveController.handleArriveFromWatch`/
+        // `handleStartNextLegFromWatch` change the SAME `currentLegIndex` from a watch tap, but go
+        // through the model, not this view — so without observing it here too, the 250m throttle in
+        // `refreshEfficientRoute` (keyed off the OLD leg's last fetch point) kept the guide line
+        // pointing at the stop just left until the car had driven 250m past it.
+        .onChange(of: tracker.currentLegIndex) { _, _ in
+            lastRouteFetchFrom = nil
+            efficientRoute = []
+            tracker.appleMapsExpectedTravelTime = nil
+            tracker.appleMapsTravelTimeFetchDate = nil
             refreshEfficientRoute()
         }
         .ignoresSafeArea(edges: .top)
@@ -432,7 +477,12 @@ struct LiveTrackingView: View {
     }
 
     /// Custom recenter button — bottom-trailing, clear of the status-bar clock (fixes the old
-    /// control that sat in the top corner underneath the time).
+    /// control that sat in the top corner underneath the time). Its bottom offset tracks
+    /// `bottomControlsHeight` (measured off the actual controls, see `bottomControls`) rather than a
+    /// fixed value — `bottomControls` is far taller than a hardcoded 160pt in three of its four
+    /// states (pre-start, paused-between-legs, mid-route with a fuel estimate chip), so the button
+    /// sat on top of — and stole taps from — whatever was underneath it: the destination row's
+    /// chevron pre-start, the leg recap's mileage while paused, the fuel chip mid-route.
     private var recenterButton: some View {
         VStack {
             Spacer()
@@ -455,7 +505,7 @@ struct LiveTrackingView: View {
                         .shadow(radius: 4, y: 2)
                 }
                 .padding(.trailing, 20)
-                .padding(.bottom, 160)
+                .padding(.bottom, bottomControlsHeight + 12)
             }
         }
     }
@@ -513,20 +563,6 @@ struct LiveTrackingView: View {
             Text(unit).font(.caption2).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
-    }
-
-    private func miniStat(_ value: String, _ unit: String) -> some View {
-        VStack(spacing: 1) {
-            Text(value).font(.subheadline.weight(.semibold)).fontDesign(.rounded)
-            Text(unit).font(.caption2).foregroundStyle(.secondary)
-        }
-    }
-
-    private var movingTimeString: String {
-        let s = tracker.movingSeconds
-        let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
-        if h > 0 { return String(format: "%d:%02d:%02d", h, m, sec) }
-        return String(format: "%d:%02d", m, sec)
     }
 
     // MARK: - Recovery banner
@@ -620,6 +656,9 @@ struct LiveTrackingView: View {
                 startButton
             }
         }
+        // Feeds `recenterButton`'s bottom offset — see its own doc comment for why a fixed offset
+        // was wrong here.
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomControlsHeight = $0 }
     }
 
     /// Shown while parked between legs. Frames the stretch you just finished as its own completed,
@@ -992,19 +1031,33 @@ struct LiveTrackingView: View {
         guard !valid.isEmpty else { return [] }
 
         // 3. Compute scheduled departure/arrival for each logical leg if we have per-leg times.
+        // `legTargets` already INCLUDES the final destination as its last element (`setRoute`
+        // appends it), so there are exactly `legTargets.count` legs, indexed `0..<legTargets.count`
+        // — the segment-building above assigns the final leg exactly this `legIndex`
+        // (`boundaries.count`, which equals `legTargets.count - 1` once every intermediate stop's
+        // been reached). This used to loop `0...legTargets.count` and only read `baseArr` on
+        // `i == legTargets.count` — one past the last real leg, so it was NEVER assigned to any
+        // actual segment. Every leg, including the final one, instead fell into the `i <
+        // legTargets.count` branch and computed its arrival from `legTargets[i].legDriveSeconds` —
+        // which is 0 for the final destination's appended `RouteStop` (only intermediate stops ever
+        // get a `legDriveSeconds`), so the final leg's scheduled arrival collapsed to equal its own
+        // departure. Every multi-stop scheduled drive's LAST leg (the one that actually reaches the
+        // destination) was graded against a zero-length budget — reading wildly DELAYED even when
+        // driven exactly on schedule — and skewed `DrivingStats.totalDelaySeconds`/`onTimeCount`.
         var logicalSchedules: [Int: (dep: Date, arr: Date)] = [:]
         let hasLegTimes = legTargets.isEmpty || legTargets.contains { $0.legDriveSeconds > 0 }
         if hasLegTimes, let baseDep = scheduledDeparture, let baseArr = scheduledArrival {
+            let legCount = max(legTargets.count, 1)
             var currentDep = baseDep
-            for i in 0...legTargets.count {
+            for i in 0..<legCount {
                 let dep = currentDep
                 let arr: Date
-                if i < legTargets.count {
+                if i == legCount - 1 {
+                    arr = baseArr  // the last leg lands on the schedule's own overall arrival
+                } else {
                     let stop = legTargets[i]
                     arr = dep.addingTimeInterval(TimeInterval(stop.legDriveSeconds))
                     currentDep = arr.addingTimeInterval(TimeInterval(stop.dwellMinutes * 60))
-                } else {
-                    arr = baseArr
                 }
                 logicalSchedules[i] = (dep, arr)
             }

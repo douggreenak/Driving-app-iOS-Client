@@ -27,8 +27,9 @@ struct DriveActivityLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 4) {
-                        ProgressView(value: context.state.progress ?? 0)
-                            .tint(delayColor(context))
+                        if let progress = context.state.progress {
+                            ProgressView(value: progress).tint(delayColor(context))
+                        }
                         Text(context.state.destinationName ?? title(context)).font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -39,6 +40,11 @@ struct DriveActivityLiveActivity: Widget {
             } minimal: {
                 Image(systemName: "airplane.departure").foregroundStyle(.blue)
             }
+            // Tapping the Dynamic Island (expanded or compact) or the Lock Screen banner (see
+            // `LockScreenView` below) opens the app straight at the live tracking screen — see
+            // `ContentView.onOpenURL`. Without this the tap just opened the app on whatever tab was
+            // last selected, leaving the currently-tracking drive minimized with no obvious way back.
+            .widgetURL(URL(string: "drivetracker://active-drive"))
         }
     }
 
@@ -55,8 +61,12 @@ struct DriveActivityLiveActivity: Widget {
         guard let eta = c.state.eta else { return "—" }
         return eta.formatted(date: .omitted, time: .shortened)
     }
+    /// `progress` is nil for a destination-less ad-hoc drive (no remaining-distance to measure
+    /// against) — showing "0%" for the whole compact-trailing slot then reads as a frozen/broken
+    /// activity for the entire drive. Fall back to the one number that IS live for that case.
     private func shortProgress(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
-        "\(Int((c.state.progress ?? 0) * 100))%"
+        guard let p = c.state.progress else { return String(format: "%.1f mi", c.state.milesTraveled) }
+        return "\(Int(p * 100))%"
     }
     private func delayColor(_ c: ActivityViewContext<DriveActivityAttributes>) -> Color {
         guard let d = c.state.delaySeconds else { return .green }
@@ -100,7 +110,11 @@ private struct LockScreenView: View {
                 }
             }
 
-            ProgressView(value: context.state.progress ?? 0).tint(delayColor)
+            // Nil (not a permanent 0%) for a destination-less drive — an empty bar for the whole
+            // trip reads as broken, so the bar itself is omitted when there's nothing to measure.
+            if let progress = context.state.progress {
+                ProgressView(value: progress).tint(delayColor)
+            }
 
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 1) {
@@ -127,5 +141,8 @@ private struct LockScreenView: View {
             }
             .font(.caption).foregroundStyle(.secondary)
         }
+        // Tapping the Lock Screen banner opens the app straight at the live tracking screen — see
+        // the Dynamic Island's matching `.widgetURL` above and `ContentView.onOpenURL`.
+        .widgetURL(URL(string: "drivetracker://active-drive"))
     }
 }

@@ -70,8 +70,14 @@ struct TripStatus {
     /// Status for a completed trip given how late it arrived (positive = late).
     static func forTrip(delaySeconds: Int?) -> TripStatus {
         guard let d = delaySeconds else {
+            // `StatusBanner` fills its whole background with `status.color.gradient` and forces
+            // white text over it. `.secondary` is a semantic label color — under this app's locked
+            // `.preferredColorScheme(.dark)` it resolves to ~60%-opacity white, so the banner
+            // rendered as a near-white slab with white text on it (unreadable) on any ad-hoc/Go-to
+            // trip, i.e. any trip with no schedule — the common case. `live(nil)`/`departed` below
+            // already use a solid `.gray` for their own "nothing to show" states; match them.
             return .init(kind: .none, headline: "UNSCHEDULED", detail: "Not linked to a schedule",
-                         color: .secondary, icon: "calendar.badge.minus")
+                         color: .gray, icon: "calendar.badge.minus")
         }
         let mins = max(1, abs(d) / 60)
         if d > tolerance {

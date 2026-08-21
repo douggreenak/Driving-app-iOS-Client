@@ -121,6 +121,17 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     /// MPG used for the live, incrementally-accumulated fuel estimate.
     var ratedMpg: Double?
     private(set) var accumulatedGallons: Double = 0
+
+    /// Fired on every accepted GPS fix and every elapsed-second tick while tracking. Wired by
+    /// `ActiveDriveController` to `pushLiveUpdate()` so the Live Activity/Watch broadcast keeps
+    /// running from the model itself, not just from `ContentView`'s `.onChange(of: tracker.fixCount /
+    /// elapsedSeconds)`. Those `.onChange` modifiers only fire when SwiftUI actually performs a view
+    /// update, which it suspends while the app is backgrounded / the screen is locked — precisely
+    /// the state a Live Activity exists for (phone in a cradle, screen off, still driving).
+    /// Location fixes and the 1s timer keep arriving in the background (the app declares the
+    /// `location` background mode), so without this the Lock Screen froze on whatever numbers were
+    /// last pushed while the app was foregrounded, until the `staleDate` greyed it out.
+    var onUpdate: (() -> Void)?
     /// Small rolling window of recent speeds for a responsive ETA without scanning the whole track.
     private var recentSpeeds: [(t: Date, mph: Double)] = []
 
@@ -269,10 +280,19 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
 
     private func startElapsedTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             guard let self, let start = self.startTime else { return }
             self.elapsedSeconds = Int(Date().timeIntervalSince(start))
+            self.onUpdate?()
         }
+        // `Timer.scheduledTimer` schedules on `.default`, which the run loop stops servicing while a
+        // `UIScrollView` (any `List`/`ScrollView`, e.g. scrolling the departures board while a drive
+        // is minimized) is actively tracking a touch — the live elapsed-time HUD, and everything
+        // downstream of `elapsedSeconds` (the Live Activity/Watch push driven by `ContentView`'s
+        // `.onChange(of: tracker.elapsedSeconds)`), stalls for as long as the scroll gesture lasts.
+        // `.common` keeps firing through both modes.
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     /// Snapshot of the drive's metadata for the crash-safe log (includes multi-leg progress so a
@@ -484,16 +504,22 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
          guard let remaining = remainingMiles else { return nil }
          let now = Date()
          if remaining < 0.05 { return now }
-         
-         // Prefer Apple Maps travel time when available and fresh
-         if let travelTime = appleMapsExpectedTravelTime, let fetchDate = appleMapsTravelTimeFetchDate {
+
+         // Prefer Apple Maps travel time when available and fresh — but only on the final leg.
+         // `appleMapsExpectedTravelTime` is fetched (in `LiveTrackingView.refreshEfficientRoute`) to
+         // `destination`, which for a multi-leg drive is the CURRENT leg's stop, not the ultimate
+         // destination (see `setRoute`/`arriveAtCurrentStop`). On an earlier leg that travel time is
+         // only the drive to the next stop; using it here would report it as the whole trip's ETA —
+         // showing "ETA (final)"/the Live Activity/the Watch minutes away when there are still legs
+         // to go after this stop, and throwing off the on-time/delayed status computed from it.
+         if isOnFinalLeg, let travelTime = appleMapsExpectedTravelTime, let fetchDate = appleMapsTravelTimeFetchDate {
              // Only trust Apple Maps data if it's less than 30 seconds old (still fresh)
              let age = now.timeIntervalSince(fetchDate)
              if age < 30 {
                  return now.addingTimeInterval(travelTime)
              }
          }
-         
+
          // Fallback to speed-based projection
          return eta(forMiles: remaining)
      }
@@ -553,6 +579,12 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
             // horizontalAccuracy (an invalid fix with no real coordinate) is skipped.
             guard location.horizontalAccuracy >= 0, CLLocationCoordinate2DIsValid(coord) else { continue }
             fixCount &+= 1  // tick on every valid fix so views refresh regardless of heading
+            // Placed before the recording guard below so a fix arriving while paused between legs
+            // still pushes (e.g. the Live Activity's "Parked at a stop" state) — `onUpdate` itself
+            // no-ops via `pushLiveUpdate`'s own `tracker.isTracking` check when nothing's actually
+            // under way, so the `isTracking` guard here is purely to skip the call while idle before
+            // a drive even starts (map-dot-only fixes from `activateIdle()`).
+            if isTracking { onUpdate?() }
 
             let mph = location.speed >= 0 ? location.speed * 2.23694 : 0
             if location.speed >= 0 {
@@ -593,10 +625,18 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
                     let segMph = max(0, (prevMph + mph) / 2)
                     accumulatedGallons += (step / 1609.34) / FuelModel.mpg(atMph: segMph, ratedMpg: ratedMpg ?? 25)
                 }
-                // Count an interval as "moving" only when both ends are above the idle threshold,
-                // so time spent stopped (then resuming) isn't folded into moving time.
+                // Count an interval as "moving" using the interval's AVERAGE speed — matches
+                // `TripStore.movingSeconds`'s save-time rule exactly (`(pts[i].speed +
+                // pts[i-1].speed) / 2 > 3`). This used to require BOTH endpoints individually above
+                // the threshold, a stricter rule: an accel-from-stop or decel-to-stop interval (e.g.
+                // 0 → 10 mph — average 5, comfortably "moving", but the 0 mph endpoint fails the
+                // both-ends test) was excluded live but included once the trip was saved, so the
+                // live HUD's moving-time readout (and its `movingAvgSpeedMph`/`etaSpeedMph` fallback
+                // while parked) silently disagreed with the persisted `DriveTrip.movingSeconds` for
+                // any drive with real stop-and-go — visibly jumping on `resume()` too, since recovery
+                // already rebuilds with the save-time (average) rule.
                 let prevMph = last.speed >= 0 ? last.speed * 2.23694 : 0
-                if mph > 3, prevMph > 3, let prev = lastMovingSample {
+                if (mph + prevMph) / 2 > 3, let prev = lastMovingSample {
                     movingSeconds += Int(location.timestamp.timeIntervalSince(prev).rounded())
                 }
                 lastMovingSample = location.timestamp

@@ -8,7 +8,7 @@ import MapKit
 /// recorded trip. Nothing is persisted.
 struct RoutePredictView: View {
     @Environment(\.dismiss) private var dismiss
-    @Query private var vehicles: [Vehicle]
+    @Query(sort: \Vehicle.name) private var vehicles: [Vehicle]
     @Query private var settingsList: [UserSettings]
 
     /// One waypoint in the plan (start, a stop, or the destination).
@@ -38,11 +38,19 @@ struct RoutePredictView: View {
     @State private var cameraPosition: MapCameraPosition = .automatic
 
     private var fuelPrice: Double { settingsList.first?.fuelPricePerGallon ?? 3.75 }
+    /// The MPG actually used for the estimate: the picked vehicle's, or `defaultMpg` when none is
+    /// picked (`vehicleName == nil`, the "Default" row).
     private var ratedMpg: Double {
         if let named = vehicles.first(where: { $0.name == vehicleName })?.avgMpg { return named }
-        if let firstMpg = vehicles.first?.avgMpg { return firstMpg }
-        return 25
+        return defaultMpg
     }
+    /// What picking "Default" actually falls back to — kept separate from `ratedMpg` so the picker's
+    /// "Default (N MPG)" row can describe ITS OWN outcome, not whatever car happens to be currently
+    /// selected. The row's label used to read `ratedMpg`, which — because `ratedMpg` depends on the
+    /// current selection — re-labeled itself to whatever car was JUST picked (e.g. showing "Default
+    /// (35 MPG)" right after selecting a 35 MPG car), so choosing "Default" from that state actually
+    /// fell through to `vehicles.first`, a DIFFERENT car, silently switching the quoted MPG.
+    private var defaultMpg: Double { vehicles.first?.avgMpg ?? 25 }
 
     private var readyWaypoints: [Waypoint] { waypoints.filter { $0.coordinate != nil } }
     /// A waypoint the user typed an address into but never selected a suggestion for (no coordinate).
@@ -118,7 +126,7 @@ struct RoutePredictView: View {
             if !vehicles.isEmpty {
                 Divider().overlay(.secondary.opacity(0.3))
                 Picker("Vehicle", selection: $vehicleName) {
-                    Text("Default (\(Int(ratedMpg)) MPG)").tag(String?.none)
+                    Text("Default (\(Int(defaultMpg)) MPG)").tag(String?.none)
                     ForEach(vehicles) { v in Text(v.name).tag(String?.some(v.name)) }
                 }
                 .onChange(of: vehicleName) { _, _ in legs = [] }
@@ -139,9 +147,15 @@ struct RoutePredictView: View {
         if index == waypoints.count - 1 { return "mappin" }
         return "\(index).circle.fill"
     }
+    /// Bounds-checked so a remove mid-render (the minus button below can shrink `waypoints` while a
+    /// stale binding for the removed row is still being evaluated) can't crash — mirrors
+    /// `NewScheduledDriveView.stopBinding`'s doc comment, which got this treatment and this view
+    /// never did despite the identical remove-a-row-from-a-List setup.
     private func binding(for index: Int) -> (address: Binding<String>, coordinate: Binding<CLLocationCoordinate2D?>) {
-        (Binding(get: { waypoints[index].address }, set: { waypoints[index].address = $0 }),
-         Binding(get: { waypoints[index].coordinate }, set: { waypoints[index].coordinate = $0 }))
+        (Binding(get: { index < waypoints.count ? waypoints[index].address : "" },
+                 set: { if index < waypoints.count { waypoints[index].address = $0 } }),
+         Binding(get: { index < waypoints.count ? waypoints[index].coordinate : nil },
+                 set: { if index < waypoints.count { waypoints[index].coordinate = $0 } }))
     }
 
     // MARK: - Compute
@@ -274,8 +288,16 @@ struct RoutePredictView: View {
             }
             ForEach(Array(readyWaypoints.enumerated()), id: \.element.id) { i, wp in
                 if let c = wp.coordinate {
-                    Annotation(label(for: waypoints.firstIndex(where: { $0.id == wp.id }) ?? i), coordinate: c) {
-                        Image(systemName: "mappin.circle.fill").font(.title2).foregroundStyle(.red)
+                    let idx = waypoints.firstIndex(where: { $0.id == wp.id }) ?? i
+                    // Every waypoint used to render as the same red `mappin.circle.fill` — on a 3+
+                    // stop route there was no way to tell start from destination from an intermediate
+                    // stop on the map itself, or read off the stop order, without tapping each pin's
+                    // callout one at a time. `label(for:)`/`icon(for:)` already distinguish them for
+                    // the list rows below; the map just never used them.
+                    Annotation(label(for: idx), coordinate: c) {
+                        Image(systemName: icon(for: idx))
+                            .font(.title2)
+                            .foregroundStyle(idx == 0 ? .green : (idx == waypoints.count - 1 ? .red : .orange))
                     }
                 }
             }

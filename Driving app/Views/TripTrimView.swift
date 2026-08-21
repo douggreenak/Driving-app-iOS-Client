@@ -33,7 +33,11 @@ struct TripTrimView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if points.count < 2 {
+                // Needs at least 3 points, not 2: with exactly 2 (`lastI == 1`), the Start slider's
+                // range collapses to `0...0` and the End slider's to `1...1` — both degenerate,
+                // zero-width `Slider` ranges (see `sliderRow`'s guard below) that produce a
+                // non-finite thumb position instead of a usable control.
+                if points.count < 3 {
                     ContentUnavailableView("Not enough track", systemImage: "scissors",
                         description: Text("This trip doesn't have enough recorded points to trim."))
                 } else {
@@ -222,7 +226,10 @@ struct TripTrimView: View {
                 Text(time, format: .dateTime.hour().minute().second())
                     .font(.caption.weight(.medium)).foregroundStyle(.secondary).monospacedDigit()
             }
-            Slider(value: value, in: range.lowerBound <= range.upperBound ? range : 0...Double(lastI))
+            // `<=` let a degenerate, zero-width range (`lowerBound == upperBound`) straight through
+            // to `Slider`, which then computes its thumb position as `(value - lower) / (upper -
+            // lower)` — dividing by zero. `<` catches that case too, falling back to the full range.
+            Slider(value: value, in: range.lowerBound < range.upperBound ? range : 0...Double(max(lastI, 1)))
                 .tint(tint)
         }
     }

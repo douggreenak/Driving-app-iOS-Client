@@ -189,6 +189,12 @@ struct LocationSearchSheet: View {
             }
             .onAppear {
                 if !initialQuery.isEmpty { query = initialQuery; completer.query = initialQuery }
+                // `focused` was declared and bound (`.focused($focused)` on the search field above)
+                // but never actually written to anywhere — every address-entry flow in the app
+                // (New Scheduled Drive's Start/stops/Destination, Log a Missed Drive, Add Bookmark,
+                // Live Tracking's Add Stop) opens this sheet to a search field with no keyboard up,
+                // costing an extra tap before typing can even start.
+                focused = true
             }
         }
     }

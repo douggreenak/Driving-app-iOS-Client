@@ -61,10 +61,10 @@ struct DriveHomeView: View {
     /// Is there anything past the current horizon worth loading? Repeating drives generate forever;
     /// a one-time drive only extends the list if it departs beyond the horizon.
     private var hasMoreToLoad: Bool {
-        if drives.contains(where: { $0.repeatRule != .none }) { return true }
+        if drives.contains(where: { $0.isEnabled && $0.repeatRule != .none }) { return true }
         let cal = Calendar.current
         let horizonEnd = cal.date(byAdding: .day, value: horizonDays, to: cal.startOfDay(for: now)) ?? now
-        return drives.contains { $0.repeatRule == .none && $0.departure > horizonEnd }
+        return drives.contains { $0.isEnabled && $0.repeatRule == .none && $0.departure > horizonEnd }
     }
 
     private func loadMore() {
@@ -83,7 +83,11 @@ struct DriveHomeView: View {
         let end = cal.date(byAdding: .day, value: horizonDays, to: start) ?? start
         let promoted = upNext
         var all: [DriveOccurrence] = []
-        for drive in drives {
+        // `upNext`/`hasMoreToLoad`/`broadcastToWatch` all filter on `isEnabled` — this didn't, so a
+        // drive disabled/paused from the web dashboard correctly disappeared from Up Next and the
+        // Watch but kept fully populating the departures board with live ON TIME→DELAYED chips for
+        // every one of its occurrences, for the whole (ever-growing) horizon.
+        for drive in drives where drive.isEnabled {
             for dep in drive.occurrences(in: start...end) {
                 if let promoted, promoted.drive.id == drive.id, promoted.departure == dep { continue }
                 let occ = DriveOccurrence(drive: drive, departure: dep,
@@ -127,7 +131,12 @@ struct DriveHomeView: View {
             .sheet(isPresented: $showingNew) { NewScheduledDriveView() }
             .sheet(isPresented: $showingPredict) { RoutePredictView() }
             .sheet(isPresented: $showingLogMissed) { LogMissedDriveView() }
-            .sheet(isPresented: $showingSettings) { SettingsView() }
+            // Explicit `.environment(activeDrive)` re-application: per `ContentView`'s doc comment on
+            // its own `fullScreenCover`, a presented view's own top-level `NavigationStack` (Settings
+            // has one) doesn't always reliably see environment objects inherited across a
+            // presentation boundary. Settings needs `ActiveDriveController` to keep "delete the
+            // vehicle this drive is using" disabled while a drive is active.
+            .sheet(isPresented: $showingSettings) { SettingsView().environment(activeDrive) }
             .sheet(isPresented: $showingAddPlace) {
                 AddBookmarkView(nextOrder: (savedPlaces.map(\.sortOrder).max() ?? -1) + 1)
             }
@@ -150,21 +159,46 @@ struct DriveHomeView: View {
                      : "This removes the scheduled drive.")
             }
             .refreshable {
+                // `now` used to be untouched by pull-to-refresh entirely — the two syncs below only
+                // ever refresh network-backed data, but the greeting, the Up Next countdown, every
+                // ON TIME/DELAYED chip, and a completed drive dropping off the board all read the
+                // ticking `now` below, not `Date()` directly, so refreshing without also bumping it
+                // left every one of those looking untouched by the pull even though it "worked".
+                now = .now
                 await TripStore.syncPending(context: context)
                 await ScheduledDriveStore.sync(context: context)
             }
             // `.task(id:)` so a schedule edited elsewhere (web dashboard, another device) is pulled
             // in on every revisit to this tab / app-foreground, not just the first time it's shown.
             .task(id: activityToken) { await ScheduledDriveStore.sync(context: context) }
-            .task { recovered = LocationTracker.recoverableSession() }
+            // `.task(id:)` (not a bare `.task`) so this re-checks on every tab revisit / app-foreground
+            // too — a bare `.task` only ever ran once at this view's first appearance, so the orange
+            // "Unsaved drive" banner stuck around after the recovered drive was actually resolved
+            // (Saved/Resumed/Discarded in `LiveTrackingView`) until the app was relaunched, and its
+            // "tap to resume" action was a dead no-op the whole time (`adoptRecovering()` no-ops once
+            // a tracker already exists). Skipping the check entirely while a drive is already active
+            // avoids re-reading and re-decoding the whole crash log on every tick for no reason.
+            .task(id: activityToken) {
+                recovered = activeDrive.hasActiveDrive ? nil : LocationTracker.recoverableSession()
+            }
+            // `activityToken` only bumps on a tab switch or app-foreground — resolving the recovered
+            // drive (tap the banner → `adoptRecovering()` → Save/Discard in `LiveTrackingView`) does
+            // neither when it happens without leaving this tab, so the banner above alone left the
+            // stale "Unsaved drive" card on screen after there was nothing left to recover, with its
+            // "tap to resume" action now a dead no-op. React to the controller itself finishing up.
+            .onChange(of: activeDrive.hasActiveDrive) { _, active in
+                if !active { recovered = LocationTracker.recoverableSession() }
+            }
             // The actual clock `now`/`greeting`/every status chip and countdown on this screen reads
-            // — see `now`'s doc comment. 30s is frequent enough that ON TIME → DELAYED, a countdown,
-            // or a completed drive dropping off the board all catch up within half a minute on their
-            // own, without requiring a tab switch to force a re-render.
+            // — see `now`'s doc comment. Ticks immediately (not after the first 30s sleep) so a
+            // revisit after a long background stint doesn't render against an hours-old `now` while
+            // waiting on the first tick; 30s after that is frequent enough that ON TIME → DELAYED, a
+            // countdown, or a completed drive dropping off the board all catch up within half a
+            // minute on their own, without requiring a tab switch to force a re-render.
             .task {
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(30))
                     now = .now
+                    try? await Task.sleep(for: .seconds(30))
                 }
             }
         }
@@ -579,15 +613,22 @@ struct DepartureRow: View {
                     Circle().fill(occ.startColor).frame(width: 7, height: 7)
                     Text(occ.departure, format: .dateTime.hour().minute())
                         .font(.system(.subheadline, design: .rounded, weight: .bold))
-                        .monospacedDigit().lineLimit(1).fixedSize()
+                        .monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
                 }
                 HStack(spacing: 6) {
                     Circle().fill(occ.endColor).frame(width: 7, height: 7)
                     Text(occ.arrival, format: .dateTime.hour().minute())
-                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
                 }
             }
-            .frame(width: 86, alignment: .leading)
+            // `.frame(width: 86)` paired with the two `Text`s' `.fixedSize()` (which tells them to
+            // ignore the proposed width entirely) meant the column didn't actually clip oversized
+            // content — at large Dynamic Type sizes (`.subheadline` grows well past what "12:30 AM"
+            // needs in 86pt) the bold departure time just drew straight through the divider and into
+            // the drive title next to it. `minWidth` lets the column grow, and swapping `.fixedSize()`
+            // for `.minimumScaleFactor` lets the time shrink to fit instead of overflowing when it
+            // can't.
+            .frame(minWidth: 86, alignment: .leading)
 
             Rectangle().fill(.secondary.opacity(0.25)).frame(width: 1, height: 36)
 
@@ -599,6 +640,7 @@ struct DepartureRow: View {
                         .font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.85)
                     Image(systemName: payer.icon)
                         .font(.caption2).foregroundStyle(payer.color)
+                        .accessibilityLabel("Paid by \(payer.name)")
                 }
                 HStack(spacing: 4) {
                     // Arrival (not departure) plane: this is the destination address, mirroring

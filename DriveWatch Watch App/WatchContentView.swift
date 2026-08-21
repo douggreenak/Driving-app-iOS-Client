@@ -188,14 +188,20 @@ private struct UpNextView: View {
                     Text(drive.endName).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
                 HStack(spacing: 5) {
+                    // `Text` below already carries its own explicit `.font`, so the stray
+                    // `.font(.headline)` that used to sit on this whole HStack couldn't touch it —
+                    // it only ever reached this `Image` (the one element here with no font of its
+                    // own), rendering the status icon at headline size (~17pt) next to caption2
+                    // text, visibly oversized compared to every sibling row's icon (e.g. the
+                    // `mappin` row right above, sized to match its text at 9pt).
                     Image(systemName: started ? "checkmark.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 10))
                         .foregroundStyle(started ? .green : .blue)
                     Text(started ? "Starting on phone…" : relative(drive.departure))
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(started ? .green : (isOverdue(drive.departure) ? .orange : .primary))
                     Spacer()
                 }
-                .font(.headline)
             }
             .padding(hero ? 12 : 10)
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -12,5 +12,20 @@
 	<!-- Injected at build time from Secrets.xcconfig (API_KEY); never hard-coded here. -->
 	<key>APIKey</key>
 	<string>$(API_KEY)</string>
+	<!-- Lets the Live Activity (Lock Screen / Dynamic Island) deep-link back into the app at the
+	     live tracking screen — see DriveActivityLiveActivity's .widgetURL and ContentView's
+	     .onOpenURL. Without this, tapping the activity just opens the app on whatever tab was last
+	     selected, with no way to tell the currently-tracking drive is still minimized underneath. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.drivetracker.deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>drivetracker</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
