@@ -204,7 +204,16 @@ enum RouteMatcher {
                 return windowed
             }
         }
-        return scanSegments(p, poly, 1..<poly.count) ?? (.greatestFiniteMagnitude, poly.first ?? p, max(cursor, 1))
+        // Written as an explicit if/let rather than `scanSegments(...) ?? (fallback tuple)` — on some
+        // Swift compiler versions, `??` (or a ternary) forcing the type checker to unify a bare tuple
+        // literal against a LABELED optional-tuple type nested inside another tuple (`(x: Double, y:
+        // Double)`) can fail to type-check at all ("Failed to produce diagnostic for expression"),
+        // even though other compiler versions accept it fine. Spelling it out avoids relying on that
+        // inference working.
+        if let result = scanSegments(p, poly, 1..<poly.count) {
+            return result
+        }
+        return (.greatestFiniteMagnitude, poly.first ?? p, max(cursor, 1))
     }
 
     /// Nearest projected point to `p` among `poly`'s segments in `range` (1-indexed segment ends),
@@ -221,7 +230,13 @@ enum RouteMatcher {
             let d = hypot(p.x - proj.x, p.y - proj.y)
             if d < bestD { bestD = d; bestPt = proj; bestSeg = i; found = true }
         }
-        return found ? (bestD, bestPt, bestSeg) : nil
+        // Same reasoning as above: an explicit if/else instead of `found ? (bestD, bestPt, bestSeg) :
+        // nil`, which is exactly the ternary-unifying-a-tuple-literal-with-nil shape that trips this
+        // compiler bug.
+        if found {
+            return (bestD, bestPt, bestSeg)
+        }
+        return nil
     }
 
     private static func projectOntoSegment(_ p: (x: Double, y: Double),
