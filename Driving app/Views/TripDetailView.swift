@@ -310,22 +310,22 @@ struct TripDetailView: View {
                 .allowsHitTesting(false)
 
             HStack {
-                endpointLabel(title: startName, time: trip.date, tint: startTint, align: .leading)
-                Spacer(minLength: 8)
-                VStack(spacing: 4) {
-                    Image(systemName: "airplane.departure").font(.subheadline).foregroundStyle(.white.opacity(0.7))
-                    Image(systemName: "airplane.arrival").font(.subheadline).foregroundStyle(.white.opacity(0.7))
-                }
-                Spacer(minLength: 8)
-                endpointLabel(title: endName, time: trip.endDate, tint: endTint, align: .trailing)
+                // Departure glyph at the departure end, arrival glyph at the arrival end — mirrors
+                // every other endpoint label in the app (ApplyScheduleSheet, TripSummaryView,
+                // StatsView's recent-trip card, ScheduledDriveDetailView). This used to stack both
+                // glyphs on top of each other in the middle of the header, which read as a plane
+                // climbing and descending in place rather than marking two separate ends.
+                endpointLabel(title: startName, time: trip.date, tint: startTint, align: .leading, icon: "airplane.departure")
+                Spacer(minLength: 16)
+                endpointLabel(title: endName, time: trip.endDate, tint: endTint, align: .trailing, icon: "airplane.arrival")
             }
             .padding()
         }
     }
 
-    private func endpointLabel(title: String, time: Date, tint: Color, align: HorizontalAlignment) -> some View {
+    private func endpointLabel(title: String, time: Date, tint: Color, align: HorizontalAlignment, icon: String) -> some View {
         VStack(alignment: align, spacing: 2) {
-            Text(title)
+            Label(title, systemImage: icon)
                 .font(.headline)
                 .foregroundStyle(.white)
                 .lineLimit(1)
@@ -355,7 +355,9 @@ struct TripDetailView: View {
                            sub: startName, tint: startTint, align: .leading)
                 Spacer()
                 VStack(spacing: 4) {
-                    Image(systemName: "airplane.departure")
+                    // Level-flight glyph — this sits between the two endpoints, not at either one,
+                    // so neither the climbing "departure" nor the descending "arrival" glyph fits.
+                    Image(systemName: "airplane")
                         .foregroundStyle(.blue)
                     Text(durationString(trip.duration))
                         .font(.caption2)
@@ -515,7 +517,17 @@ struct TripDetailView: View {
             Spacer()
             Menu {
                 ForEach(payerGroups.filter { !$0.isArchived }) { group in
-                    Button { trip.paidByRaw = group.key; try? context.save() } label: {
+                    Button {
+                        trip.paidByRaw = group.key
+                        try? context.save()
+                        // Without this, the edit only lived in this local row: the next pull
+                        // (`TripStore.pullRemoteEdits`, fired by e.g. pull-to-refresh on Trips)
+                        // fetches this trip back from the server still holding the OLD payer and
+                        // overwrites it right back — silently discarding the change just made here.
+                        if let remoteID = trip.remoteID {
+                            Task { try? await APIClient.patchTripPaidBy(id: remoteID, paidBy: group.key) }
+                        }
+                    } label: {
                         Label(group.name, systemImage: group.icon)
                     }
                 }

@@ -38,6 +38,13 @@ struct ScheduledDriveDetailView: View {
     private var departure: Date { occurrence ?? drive.upNextDeparture() ?? drive.statusReferenceDeparture() }
     private var arrival: Date { departure.addingTimeInterval(drive.arrivalBudget) }
 
+    // The scheduled departure/arrival above are the fixed plan; these are what's actually expected
+    // right now given live conditions — equal to the schedule until it's overdue (then "now" instead
+    // of the missed departure) and the routing engine's current best travel-time estimate (refreshed
+    // by `loadRoute()`), so a live delay shows up here before the drive even starts.
+    private var estimatedDeparture: Date { max(departure, now) }
+    private var estimatedArrival: Date { estimatedDeparture.addingTimeInterval(TimeInterval(drive.estimatedTravelTime)) }
+
     // Show a bookmarked place's name ("Home") instead of the street address when one is nearby.
     private var startName: String {
         PlaceNamer.name(for: drive.startCoordinate, fallback: drive.startAddress, in: savedPlaces)
@@ -161,14 +168,14 @@ struct ScheduledDriveDetailView: View {
                 .frame(height: 110).allowsHitTesting(false)
 
             HStack {
-                endpoint(startName, departure, startColor, .leading)
-                Spacer(minLength: 8)
-                VStack(spacing: 4) {
-                    Image(systemName: "airplane.departure").font(.subheadline).foregroundStyle(.white.opacity(0.7))
-                    Image(systemName: "airplane.arrival").font(.subheadline).foregroundStyle(.white.opacity(0.7))
-                }
-                Spacer(minLength: 8)
-                endpoint(endName, arrival, endColor, .trailing)
+                // Departure glyph at the departure end, arrival glyph at the arrival end — mirrors
+                // every other endpoint label in the app (ApplyScheduleSheet, TripSummaryView,
+                // StatsView's recent-trip card, DriveHomeView's DepartureRow). This used to stack
+                // both glyphs on top of each other in the middle of the header, which read as a
+                // plane climbing and descending in place rather than marking two separate ends.
+                endpoint(startName, departure, startColor, .leading, icon: "airplane.departure")
+                Spacer(minLength: 16)
+                endpoint(endName, arrival, endColor, .trailing, icon: "airplane.arrival")
             }
             .padding()
         }
@@ -198,9 +205,10 @@ struct ScheduledDriveDetailView: View {
         }
     }
 
-    private func endpoint(_ title: String, _ time: Date, _ tint: Color, _ align: HorizontalAlignment) -> some View {
+    private func endpoint(_ title: String, _ time: Date, _ tint: Color, _ align: HorizontalAlignment, icon: String) -> some View {
         VStack(alignment: align, spacing: 2) {
-            Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
             Text(time, format: .dateTime.hour().minute()).font(.caption).foregroundStyle(tint)
         }
         .frame(maxWidth: .infinity, alignment: align == .leading ? .leading : .trailing)
@@ -217,14 +225,16 @@ struct ScheduledDriveDetailView: View {
                 Text(drive.repeatRule.label).font(.caption.weight(.medium)).foregroundStyle(.blue)
             }
             HStack(alignment: .top) {
-                timeColumn("DEPARTS", departure, startName, .leading)
+                timeColumn("DEPARTS", departure, estimated: estimatedDeparture, sub: startName, align: .leading)
                 Spacer()
                 VStack(spacing: 4) {
-                    Image(systemName: "airplane.departure").foregroundStyle(.blue)
+                    // Level-flight glyph — this sits between the two endpoints, not at either one,
+                    // so neither the climbing "departure" nor the descending "arrival" glyph fits.
+                    Image(systemName: "airplane").foregroundStyle(.blue)
                     Text(travelString(drive.estimatedTravelTime)).font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
-                timeColumn("ARRIVES", arrival, endName, .trailing)
+                timeColumn("ARRIVES", arrival, estimated: estimatedArrival, sub: endName, align: .trailing)
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -247,11 +257,24 @@ struct ScheduledDriveDetailView: View {
         .background(Color(.systemGray6), in: .rect(cornerRadius: 16))
     }
 
-    private func timeColumn(_ label: String, _ time: Date, _ sub: String, _ align: HorizontalAlignment) -> some View {
-        VStack(alignment: align, spacing: 3) {
+    /// Show the scheduled time prominently; beneath it, the live estimate — gray/plain when it still
+    /// matches the plan, tinted in the status color when live conditions project a delay (or an early
+    /// arrival) before the drive has even happened. Mirrors `TripDetailView.timeColumn`'s
+    /// actual-on-top/scheduled-below pairing for a completed trip, just with the roles reversed:
+    /// here nothing has happened yet, so the schedule is still the plan of record and the estimate is
+    /// the secondary, live-updating figure.
+    private func timeColumn(_ label: String, _ time: Date, estimated: Date, sub: String, align: HorizontalAlignment) -> some View {
+        let differs = abs(estimated.timeIntervalSince(time)) >= 60
+        return VStack(alignment: align, spacing: 3) {
             Text(label).font(.caption2.weight(.bold)).foregroundStyle(.secondary)
             Text(time, format: .dateTime.hour().minute())
                 .font(.system(.title2, design: .rounded, weight: .bold))
+            HStack(spacing: 3) {
+                Text("Est").font(.caption2.weight(.semibold))
+                Text(estimated, format: .dateTime.hour().minute())
+            }
+            .font(.caption2)
+            .foregroundStyle(differs ? status.color : .secondary)
             Text(sub).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: align == .leading ? .leading : .trailing)
