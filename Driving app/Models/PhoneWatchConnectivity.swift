@@ -67,9 +67,37 @@ struct WatchSyncPayload: Codable {
         var isPaused: Bool
         /// True when an intermediate stop can be marked reached (multi-leg, mid-route, moving).
         var canAdvanceLeg: Bool
+        var remainingMiles: Double? = nil
+        var legRemainingMiles: Double? = nil
+        var legEta: Date? = nil
+
+        private enum CodingKeys: String, CodingKey {
+            case tripName, milesTraveled, currentSpeed, elapsedSeconds, eta, delaySeconds
+            case progress, legText, isPaused, canAdvanceLeg
+            case remainingMiles, legRemainingMiles, legEta
+        }
     }
     var drives: [Drive]
     var stats: Stats
+}
+
+extension WatchSyncPayload.Live {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        tripName = try values.decodeIfPresent(String.self, forKey: .tripName) ?? "Drive"
+        milesTraveled = try values.decodeIfPresent(Double.self, forKey: .milesTraveled) ?? 0
+        currentSpeed = try values.decodeIfPresent(Double.self, forKey: .currentSpeed) ?? 0
+        elapsedSeconds = try values.decodeIfPresent(Int.self, forKey: .elapsedSeconds) ?? 0
+        eta = try values.decodeIfPresent(Date.self, forKey: .eta)
+        delaySeconds = try values.decodeIfPresent(Int.self, forKey: .delaySeconds)
+        progress = try values.decodeIfPresent(Double.self, forKey: .progress)
+        legText = try values.decodeIfPresent(String.self, forKey: .legText)
+        isPaused = try values.decodeIfPresent(Bool.self, forKey: .isPaused) ?? false
+        canAdvanceLeg = try values.decodeIfPresent(Bool.self, forKey: .canAdvanceLeg) ?? false
+        remainingMiles = try values.decodeIfPresent(Double.self, forKey: .remainingMiles)
+        legRemainingMiles = try values.decodeIfPresent(Double.self, forKey: .legRemainingMiles)
+        legEta = try values.decodeIfPresent(Date.self, forKey: .legEta)
+    }
 }
 
 /// Phone half of the watch link: pushes drives + stats to the watch and forwards the watch's
