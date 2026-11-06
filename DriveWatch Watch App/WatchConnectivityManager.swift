@@ -57,9 +57,37 @@ struct WatchSyncPayload: Codable {
         var legText: String?
         var isPaused: Bool
         var canAdvanceLeg: Bool
+        var remainingMiles: Double? = nil
+        var legRemainingMiles: Double? = nil
+        var legEta: Date? = nil
+
+        private enum CodingKeys: String, CodingKey {
+            case tripName, milesTraveled, currentSpeed, elapsedSeconds, eta, delaySeconds
+            case progress, legText, isPaused, canAdvanceLeg
+            case remainingMiles, legRemainingMiles, legEta
+        }
     }
     var drives: [Drive]
     var stats: Stats
+}
+
+extension WatchSyncPayload.Live {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        tripName = try values.decodeIfPresent(String.self, forKey: .tripName) ?? "Drive"
+        milesTraveled = try values.decodeIfPresent(Double.self, forKey: .milesTraveled) ?? 0
+        currentSpeed = try values.decodeIfPresent(Double.self, forKey: .currentSpeed) ?? 0
+        elapsedSeconds = try values.decodeIfPresent(Int.self, forKey: .elapsedSeconds) ?? 0
+        eta = try values.decodeIfPresent(Date.self, forKey: .eta)
+        delaySeconds = try values.decodeIfPresent(Int.self, forKey: .delaySeconds)
+        progress = try values.decodeIfPresent(Double.self, forKey: .progress)
+        legText = try values.decodeIfPresent(String.self, forKey: .legText)
+        isPaused = try values.decodeIfPresent(Bool.self, forKey: .isPaused) ?? false
+        canAdvanceLeg = try values.decodeIfPresent(Bool.self, forKey: .canAdvanceLeg) ?? false
+        remainingMiles = try values.decodeIfPresent(Double.self, forKey: .remainingMiles)
+        legRemainingMiles = try values.decodeIfPresent(Double.self, forKey: .legRemainingMiles)
+        legEta = try values.decodeIfPresent(Date.self, forKey: .legEta)
+    }
 }
 
 /// Watch half of the link: receives the mirrored drives + stats from the phone and sends "start
@@ -170,7 +198,8 @@ extension WatchSyncPayload {
         Live(tripName: "Morning Commute", milesTraveled: 4.2, currentSpeed: 38,
              elapsedSeconds: 12 * 60 + 34, eta: Date().addingTimeInterval(9 * 60),
              delaySeconds: 240, progress: 0.55, legText: "Leg 2 of 3 · Spenard Post Office",
-             isPaused: false, canAdvanceLeg: true)
+             isPaused: false, canAdvanceLeg: true, remainingMiles: 12.6,
+             legRemainingMiles: 2.4, legEta: Date().addingTimeInterval(4 * 60))
     }
 }
 #endif

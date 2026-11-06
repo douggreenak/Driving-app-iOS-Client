@@ -19,18 +19,31 @@ struct DriveActivityLiveActivity: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label(miles(context), systemImage: "airplane.departure").font(.caption).foregroundStyle(.blue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label(speed(context), systemImage: "speedometer")
+                            .font(.caption.weight(.semibold)).foregroundStyle(.blue)
+                        Text(elapsed(context)).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Label(arrival(context), systemImage: "airplane.arrival")
-                        .font(.caption).foregroundStyle(delayColor(context))
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Label(arrival(context), systemImage: "airplane.arrival")
+                            .font(.caption.weight(.semibold)).foregroundStyle(delayColor(context))
+                        Text(delayStatus(context)).font(.caption2).foregroundStyle(delayColor(context))
+                    }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 4) {
                         if let progress = context.state.progress {
                             ProgressView(value: progress).tint(delayColor(context))
                         }
-                        Text(context.state.destinationName ?? title(context)).font(.caption2).foregroundStyle(.secondary)
+                        HStack(spacing: 4) {
+                            Text(context.state.destinationName ?? title(context))
+                                .lineLimit(1)
+                            Spacer(minLength: 2)
+                            Text(distanceSummary(context)).monospacedDigit().lineLimit(1)
+                        }
+                        .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
             } compactLeading: {
@@ -56,10 +69,29 @@ struct DriveActivityLiveActivity: Widget {
     private func miles(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
         String(format: "%.1f mi", c.state.milesTraveled)
     }
+    private func speed(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
+        String(format: "%.0f mph", c.state.currentSpeed)
+    }
+    private func elapsed(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
+        let seconds = c.state.elapsedSeconds
+        let hours = seconds / 3600, minutes = (seconds % 3600) / 60
+        return hours > 0 ? String(format: "%d:%02d", hours, minutes) : String(format: "%d min", minutes)
+    }
+    private func distanceSummary(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
+        guard let remaining = c.state.remainingMiles else { return miles(c) }
+        return "\(miles(c)) · \(String(format: "%.1f mi left", remaining))"
+    }
     private func arrival(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
         if c.state.isPaused { return "Parked" }
         guard let eta = c.state.eta else { return "—" }
         return eta.formatted(date: .omitted, time: .shortened)
+    }
+    private func delayStatus(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
+        if c.state.isPaused { return "At stop" }
+        guard let delay = c.state.delaySeconds else { return "Estimated arrival" }
+        if delay > 90 { return "\(max(1, delay / 60))m late" }
+        if delay < -90 { return "\(max(1, abs(delay) / 60))m early" }
+        return "On time"
     }
     /// `progress` is nil for a destination-less ad-hoc drive (no remaining-distance to measure
     /// against) — showing "0%" for the whole compact-trailing slot then reads as a frozen/broken
@@ -69,8 +101,10 @@ struct DriveActivityLiveActivity: Widget {
         return "\(Int(p * 100))%"
     }
     private func delayColor(_ c: ActivityViewContext<DriveActivityAttributes>) -> Color {
+        if c.state.isPaused { return .blue }
         guard let d = c.state.delaySeconds else { return .green }
-        return d > 90 ? Color(red: 1.0, green: 0.62, blue: 0.04) : .green
+        if d > 90 { return Color(red: 1.0, green: 0.62, blue: 0.04) }
+        return d < -90 ? .blue : .green
     }
 }
 
@@ -79,8 +113,10 @@ private struct LockScreenView: View {
     let context: ActivityViewContext<DriveActivityAttributes>
 
     private var delayColor: Color {
+        if context.state.isPaused { return .blue }
         guard let d = context.state.delaySeconds else { return .green }
-        return d > 90 ? Color(red: 1.0, green: 0.62, blue: 0.04) : .green
+        if d > 90 { return Color(red: 1.0, green: 0.62, blue: 0.04) }
+        return d < -90 ? .blue : .green
     }
 
     /// `ContentState.tripTitle`/`scheduledArrival` are the live values — a drive's title and
@@ -129,20 +165,54 @@ private struct LockScreenView: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 1) {
-                    Text("Estimated").font(.caption2).foregroundStyle(.secondary)
-                    Text(context.state.eta.map { $0.formatted(date: .omitted, time: .shortened) } ?? "—")
+                    Text(context.state.isMultiLeg == true ? "Final ETA" : "Estimated")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Text(context.state.isPaused
+                         ? "Parked"
+                         : (context.state.eta.map { $0.formatted(date: .omitted, time: .shortened) } ?? "—"))
                         .font(.subheadline.weight(.semibold)).foregroundStyle(delayColor)
                 }
             }
 
-            HStack(spacing: 14) {
-                Label(String(format: "%.1f mi", context.state.milesTraveled), systemImage: "road.lanes")
-                Label(String(format: "%.0f mph", context.state.currentSpeed), systemImage: "speedometer")
+            HStack(spacing: 8) {
+                metric("Driven", String(format: "%.1f mi", context.state.milesTraveled))
+                metric("Remaining", context.state.remainingMiles.map { String(format: "%.1f mi", $0) } ?? "—")
+                metric("Speed", String(format: "%.0f mph", context.state.currentSpeed))
+                metric("Elapsed", elapsedText)
             }
-            .font(.caption).foregroundStyle(.secondary)
+            .padding(.top, 1)
+
+            if let eta = context.state.legEta {
+                HStack(spacing: 4) {
+                    Image(systemName: "mappin.and.ellipse").foregroundStyle(.blue)
+                    Text("Next: \(context.state.legDestinationName ?? "Stop")")
+                        .lineLimit(1)
+                    Spacer(minLength: 1)
+                    Text(eta.formatted(date: .omitted, time: .shortened))
+                    if let miles = context.state.legRemainingMiles {
+                        Text("· \(String(format: "%.1f mi", miles))")
+                    }
+                }
+                .font(.caption2).foregroundStyle(.secondary)
+            }
         }
         // Tapping the Lock Screen banner opens the app straight at the live tracking screen — see
         // the Dynamic Island's matching `.widgetURL` above and `ContentView.onOpenURL`.
         .widgetURL(URL(string: "drivetracker://active-drive"))
+    }
+
+    private var elapsedText: String {
+        let seconds = context.state.elapsedSeconds
+        let hours = seconds / 3600, minutes = (seconds % 3600) / 60
+        return hours > 0 ? String(format: "%d:%02d", hours, minutes) : String(format: "%d min", minutes)
+    }
+
+    private func metric(_ title: String, _ value: String) -> some View {
+        VStack(spacing: 1) {
+            Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
+            Text(value).font(.caption.weight(.semibold).monospacedDigit()).foregroundStyle(.white)
+                .lineLimit(1).minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity)
     }
 }

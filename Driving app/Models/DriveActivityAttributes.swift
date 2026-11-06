@@ -31,11 +31,47 @@ struct DriveActivityAttributes: ActivityAttributes {
         /// The widget reads these in preference to the attribute fields.
         var tripTitle: String?
         var scheduledArrival: Date?
+        /// Overall distance left to the final destination.
+        var remainingMiles: Double? = nil
+        /// Current leg details are omitted on the final leg to avoid duplicating the overall ETA.
+        var legRemainingMiles: Double? = nil
+        var legEta: Date? = nil
+        var legDestinationName: String? = nil
+        var isMultiLeg: Bool? = nil
+
+        private enum CodingKeys: String, CodingKey {
+            case milesTraveled, currentSpeed, elapsedSeconds, progress, eta, delaySeconds
+            case destinationName, isPaused, tripTitle, scheduledArrival
+            case remainingMiles, legRemainingMiles, legEta, legDestinationName, isMultiLeg
+        }
     }
 
     /// Initial values only — see `ContentState.tripTitle`/`scheduledArrival` for why the live values
     /// live there instead. Kept here too since `Activity.request` requires *something* at creation.
     var tripTitle: String
     var scheduledArrival: Date?
+}
+
+/// ActivityKit may restore snapshots encoded by an older app version. Keep new values optional
+/// and default fields introduced in prior versions so old activities remain renderable.
+extension DriveActivityAttributes.ContentState {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        milesTraveled = try values.decodeIfPresent(Double.self, forKey: .milesTraveled) ?? 0
+        currentSpeed = try values.decodeIfPresent(Double.self, forKey: .currentSpeed) ?? 0
+        elapsedSeconds = try values.decodeIfPresent(Int.self, forKey: .elapsedSeconds) ?? 0
+        progress = try values.decodeIfPresent(Double.self, forKey: .progress)
+        eta = try values.decodeIfPresent(Date.self, forKey: .eta)
+        delaySeconds = try values.decodeIfPresent(Int.self, forKey: .delaySeconds)
+        destinationName = try values.decodeIfPresent(String.self, forKey: .destinationName)
+        isPaused = try values.decodeIfPresent(Bool.self, forKey: .isPaused) ?? false
+        tripTitle = try values.decodeIfPresent(String.self, forKey: .tripTitle)
+        scheduledArrival = try values.decodeIfPresent(Date.self, forKey: .scheduledArrival)
+        remainingMiles = try values.decodeIfPresent(Double.self, forKey: .remainingMiles)
+        legRemainingMiles = try values.decodeIfPresent(Double.self, forKey: .legRemainingMiles)
+        legEta = try values.decodeIfPresent(Date.self, forKey: .legEta)
+        legDestinationName = try values.decodeIfPresent(String.self, forKey: .legDestinationName)
+        isMultiLeg = try values.decodeIfPresent(Bool.self, forKey: .isMultiLeg)
+    }
 }
 #endif

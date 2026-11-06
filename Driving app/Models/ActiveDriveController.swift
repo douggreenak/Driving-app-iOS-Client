@@ -126,12 +126,20 @@ final class ActiveDriveController {
         if tracker.isMultiLeg, let base = name {
             name = "\(base) · Stop \(min(tracker.currentLegIndex + 1, tracker.totalLegs))/\(tracker.totalLegs)"
         }
+        let hasNextStop = tracker.isMultiLeg && !tracker.isOnFinalLeg && !tracker.isPausedBetweenLegs
         return .init(milesTraveled: tracker.distanceMiles, currentSpeed: tracker.currentSpeed,
-                     elapsedSeconds: tracker.elapsedSeconds, progress: progress, eta: tracker.etaDate,
-                     delaySeconds: tracker.delaySeconds, destinationName: name,
+                     elapsedSeconds: tracker.elapsedSeconds, progress: progress,
+                     eta: tracker.isPausedBetweenLegs ? nil : tracker.etaDate,
+                     delaySeconds: tracker.isPausedBetweenLegs ? nil : tracker.delaySeconds,
+                     destinationName: name,
                      isPaused: tracker.isPausedBetweenLegs,
                      tripTitle: tracker.tripName ?? tracker.finalDestinationName ?? "Drive",
-                     scheduledArrival: tracker.scheduledArrival)
+                     scheduledArrival: tracker.scheduledArrival,
+                     remainingMiles: tracker.remainingMiles,
+                     legRemainingMiles: hasNextStop ? tracker.legRemainingMiles : nil,
+                     legEta: hasNextStop ? tracker.legEtaDate : nil,
+                     legDestinationName: hasNextStop ? tracker.currentLegTarget?.address : nil,
+                     isMultiLeg: tracker.isMultiLeg)
     }
     #endif
 
@@ -167,16 +175,27 @@ final class ActiveDriveController {
         }
         var legText: String?
         if tracker.isMultiLeg {
-            var t = "Leg \(min(tracker.currentLegIndex + 1, tracker.totalLegs)) of \(tracker.totalLegs)"
-            if let next = tracker.currentLegTarget, !next.address.isEmpty { t += " · \(next.address)" }
-            legText = t
+            let targetIndex = tracker.currentLegIndex + (tracker.isPausedBetweenLegs ? 1 : 0)
+            let target = tracker.legTargets.indices.contains(targetIndex) ? tracker.legTargets[targetIndex] : nil
+            let legNumber = min(targetIndex + 1, tracker.totalLegs)
+            var text = tracker.isPausedBetweenLegs
+                ? "Next · \(legNumber) of \(tracker.totalLegs)"
+                : "Leg \(legNumber) of \(tracker.totalLegs)"
+            if let address = target?.address, !address.isEmpty { text += " · \(address)" }
+            legText = text
         }
+        let hasNextStop = tracker.isMultiLeg && !tracker.isOnFinalLeg && !tracker.isPausedBetweenLegs
         let live = WatchSyncPayload.Live(
             tripName: tracker.tripName ?? tracker.finalDestinationName ?? "Drive",
             milesTraveled: tracker.distanceMiles, currentSpeed: tracker.currentSpeed,
-            elapsedSeconds: tracker.elapsedSeconds, eta: tracker.etaDate, delaySeconds: tracker.delaySeconds,
+            elapsedSeconds: tracker.elapsedSeconds,
+            eta: tracker.isPausedBetweenLegs ? nil : tracker.etaDate,
+            delaySeconds: tracker.isPausedBetweenLegs ? nil : tracker.delaySeconds,
             progress: progress, legText: legText, isPaused: tracker.isPausedBetweenLegs,
-            canAdvanceLeg: tracker.isMultiLeg && !tracker.isOnFinalLeg && !tracker.isPausedBetweenLegs)
+            canAdvanceLeg: tracker.isMultiLeg && !tracker.isOnFinalLeg && !tracker.isPausedBetweenLegs,
+            remainingMiles: tracker.remainingMiles,
+            legRemainingMiles: hasNextStop ? tracker.legRemainingMiles : nil,
+            legEta: hasNextStop ? tracker.legEtaDate : nil)
         PhoneWatchConnectivity.shared.sendLive(live)
         #endif
     }

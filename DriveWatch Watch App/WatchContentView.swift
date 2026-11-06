@@ -34,9 +34,12 @@ private struct LiveDriveView: View {
                         Text("mph").font(.caption2).foregroundStyle(.secondary)
                     }
 
-                    HStack {
-                        readout(String(format: "%.1f", live.milesTraveled), "mi", .blue)
-                        Divider().frame(height: 30)
+                    VStack(spacing: 4) {
+                        HStack(spacing: 4) {
+                            readout(String(format: "%.1f", live.milesTraveled), "driven mi", .blue)
+                            readout(live.remainingMiles.map { String(format: "%.1f", $0) } ?? "—",
+                                    "remaining mi", .teal)
+                        }
                         readout(elapsed, "elapsed", .orange)
                     }
 
@@ -68,10 +71,16 @@ private struct LiveDriveView: View {
 
     private var etaCard: some View {
         VStack(spacing: 6) {
-            if let eta = live.eta {
+            if live.isPaused {
+                HStack {
+                    Text("Parked at stop").font(.caption.weight(.semibold))
+                    Spacer()
+                }
+            } else if let eta = live.eta {
                 HStack {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("ETA").font(.system(size: 9)).foregroundStyle(.secondary)
+                        Text(live.legText == nil ? "ETA" : "Final ETA")
+                            .font(.system(size: 9)).foregroundStyle(.secondary)
                         Text(eta, format: .dateTime.hour().minute()).font(.caption.weight(.semibold)).monospacedDigit()
                     }
                     Spacer()
@@ -79,6 +88,17 @@ private struct LiveDriveView: View {
                         Text(text).font(.caption2.weight(.bold)).foregroundStyle(delayColor)
                     }
                 }
+            }
+            if let eta = live.legEta {
+                HStack(spacing: 3) {
+                    Text("Next stop").foregroundStyle(.secondary)
+                    Spacer(minLength: 2)
+                    Text(eta, format: .dateTime.hour().minute()).monospacedDigit()
+                    if let miles = live.legRemainingMiles {
+                        Text("· \(String(format: "%.1f mi", miles))").monospacedDigit()
+                    }
+                }
+                .font(.caption2.weight(.medium))
             }
             if let progress = live.progress {
                 ProgressView(value: progress).tint(delayColor)
