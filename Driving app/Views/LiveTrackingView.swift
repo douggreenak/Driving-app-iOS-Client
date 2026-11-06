@@ -57,21 +57,9 @@ struct LiveTrackingView: View {
     @State private var bottomControlsHeight: CGFloat = 160
     @State private var didAutoStart = false
 
-    /// The most-efficient (fastest) road route from where the driver is now to the destination,
-    /// drawn as a dotted light-blue guide line. Refreshed as they drive so it re-routes if they
-    /// deviate. Empty when there's no destination or no route yet.
-    @State private var efficientRoute: [CLLocationCoordinate2D] = []
-    /// Only advances on a SUCCESSFUL fetch — a failed/throttled attempt must not count as "we tried
-    /// from here", or every subsequent fix would silently skip retrying (see `refreshEfficientRoute`).
-    @State private var lastRouteFetchFrom: CLLocationCoordinate2D?
-    /// True while a directions request is in flight — blocks a new one from firing on every ~1 Hz
-    /// GPS fix while the current one is still pending (that produced dozens of concurrent requests
-    /// and got MapKit to throttle us into never drawing a route at all).
-    @State private var routeFetchInFlight = false
-    /// Bumped on every fetch attempt so a late-arriving response from an old (now-irrelevant) leg
-    /// target can recognize it's stale and discard itself instead of overwriting a fresher route.
-    @State private var routeRequestID = 0
-    @State private var lastRouteFetchFailedAt: Date?
+    /// The dotted light-blue guide line + next-turn data. Owned by `ActiveDriveController` so it keeps
+    /// refreshing (and feeding the Watch / Live Activity) while this view is minimized.
+    private var guide: GuideRoute { activeDrive.guide }
 
     /// Designated init: used by `ContentView`'s single shared full-screen cover, which always has a
     /// tracker on hand via `ActiveDriveController` (fresh for a new drive, or the same instance
@@ -119,6 +107,7 @@ struct LiveTrackingView: View {
                             legProgressStrip
                         }
                         unifiedHUD
+                        nextTurnBanner
                     }
                     Spacer()
                     bottomControls
@@ -192,8 +181,8 @@ struct LiveTrackingView: View {
                         // animated: the strip popped in and shoved the HUD down with no transition.
                         withAnimation(.spring(duration: 0.3)) { tracker.appendLiveStop(stop) }
                     }
-                    lastRouteFetchFrom = nil  // force the guide line to re-route to the new next stop
-                    refreshEfficientRoute()
+                    guide.invalidate()
+                    guide.refresh(tracker: tracker)
                     activeDrive.pushLiveUpdate()
                 }
             }
@@ -242,8 +231,8 @@ struct LiveTrackingView: View {
             if tracker.isTracking {
                 // Already under way — resync what a freshly (re)constructed view needs instead of
                 // waiting on the next location fix.
-                lastRouteFetchFrom = nil
-                refreshEfficientRoute()
+                guide.invalidate()
+                guide.refresh(tracker: tracker)
                 activeDrive.pushLiveUpdate()
             } else if !tracker.points.isEmpty, !showingSummary {
                 // Stopped but never shown its summary — e.g. a watch-triggered "End Drive" that fired
@@ -317,8 +306,9 @@ struct LiveTrackingView: View {
             // just a faint dotted variant of it) with bold, legible dashes rather than a near-invisible
             // dotted trace. Drawn first so the traveled track sits on top of it; the two rarely overlap
             // in practice since one trails behind the current position and the other leads ahead of it.
-            if tracker.isTracking, efficientRoute.count >= 2 {
-                MapPolyline(coordinates: efficientRoute)
+            // Also drawn BEFORE the drive starts once a destination is set, as a route preview.
+            if guide.coordinates.count >= 2 {
+                MapPolyline(coordinates: guide.coordinates)
                     .stroke(Color.driveGuideRoute,
                             style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round, dash: [3, 11]))
             }
@@ -401,21 +391,21 @@ struct LiveTrackingView: View {
                                                        heading: heading, pitch: 0))
                 }
             }
-            refreshEfficientRoute()
+            guide.refresh(tracker: tracker)
         }
         // Every IN-APP action that changes the leg target (arrivedButton, "Start Next Trip", adding
         // a stop, `setup()`'s resync) resets `lastRouteFetchFrom` itself before calling
-        // `refreshEfficientRoute()`. `ActiveDriveController.handleArriveFromWatch`/
+        // `guide.refresh(tracker: tracker)`. `ActiveDriveController.handleArriveFromWatch`/
         // `handleStartNextLegFromWatch` change the SAME `currentLegIndex` from a watch tap, but go
         // through the model, not this view — so without observing it here too, the 250m throttle in
         // `refreshEfficientRoute` (keyed off the OLD leg's last fetch point) kept the guide line
         // pointing at the stop just left until the car had driven 250m past it.
         .onChange(of: tracker.currentLegIndex) { _, _ in
-            lastRouteFetchFrom = nil
-            efficientRoute = []
+            guide.invalidate()
+            guide.clear()
             tracker.appleMapsExpectedTravelTime = nil
             tracker.appleMapsTravelTimeFetchDate = nil
-            refreshEfficientRoute()
+            guide.refresh(tracker: tracker)
         }
         .ignoresSafeArea(edges: .top)
     }
@@ -512,11 +502,17 @@ struct LiveTrackingView: View {
     /// How far out the follow camera sits (metres). Roughly 2.5× further than before, and it pulls back
     /// as speed rises so a few blocks of road ahead stay visible at highway speed.
     private var followDistance: Double {
-        switch tracker.currentSpeed {
-        case ..<25: return 2400
-        case ..<45: return 3600
-        default: return 5500
+        // Frame roughly the next ~75 s of travel (never less than ~500 m), but no further than what's
+        // actually left of the route — so approaching the destination or a turn, the map tightens
+        // enough to read, while at highway speed it pulls back to show what's coming. The camera sits
+        // ~2.6× the framed length away (its visible window is about that much taller than the camera
+        // distance), clamped to a readable 1.8–7 km.
+        let mps = max(tracker.currentSpeed, 0) * 0.44704
+        var lookahead = max(500, mps * 75)
+        if let remaining = guide.remainingMeters ?? tracker.legRemainingMiles.map({ $0 / 1.3 * 1609.34 }) {
+            lookahead = min(lookahead, max(remaining, 450))
         }
+        return min(max(lookahead * 2.6, 1800), 7000)
     }
 
     /// Camera centred on the user at the zoomed-out follow distance (falls back to MapKit's own
@@ -627,6 +623,40 @@ struct LiveTrackingView: View {
         .padding(.vertical, 12).padding(.horizontal, 12)
         .background(.ultraThinMaterial, in: .rect(cornerRadius: 16))
         .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    /// The next maneuver on the guide route ("Turn left onto Main St · 0.3 mi").
+    @ViewBuilder
+    private var nextTurnBanner: some View {
+        if let turn = guide.nextTurn, !tracker.isPausedBetweenLegs {
+            HStack(spacing: 12) {
+                Image(systemName: turnSymbol(for: turn))
+                    .font(.title2.weight(.bold)).foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .background(Color.blue.gradient, in: .rect(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 1) {
+                    if let m = guide.nextTurnMeters {
+                        Text(GuideRoute.distanceLabel(m)).font(.headline).fontDesign(.rounded)
+                    }
+                    Text(turn).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: .rect(cornerRadius: 16))
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    /// SF Symbol for a maneuver, from the instruction text.
+    private func turnSymbol(for text: String) -> String {
+        let t = text.lowercased()
+        if t.contains("u-turn") { return "arrow.uturn.left" }
+        if t.contains("left") { return t.contains("slight") || t.contains("bear") ? "arrow.up.left" : "arrow.turn.up.left" }
+        if t.contains("right") { return t.contains("slight") || t.contains("bear") ? "arrow.up.right" : "arrow.turn.up.right" }
+        if t.contains("arrive") || t.contains("destination") { return "mappin.circle.fill" }
+        if t.contains("merge") || t.contains("exit") || t.contains("ramp") { return "arrow.merge" }
+        return "arrow.up"
     }
 
     private func statItem(value: String, unit: String, icon: String) -> some View {
@@ -783,8 +813,8 @@ struct LiveTrackingView: View {
                 Haptics.rigid()
                 withAnimation(.spring(duration: 0.4)) { tracker.startNextLeg() }
                 followUser = true
-                lastRouteFetchFrom = nil
-                refreshEfficientRoute()
+                guide.invalidate()
+                guide.refresh(tracker: tracker)
                 activeDrive.pushLiveUpdate()
             } label: {
                 controlLabel(!tracker.hasActiveTarget ? "Resume Driving"
@@ -815,8 +845,8 @@ struct LiveTrackingView: View {
             Haptics.success()
             withAnimation(.spring(duration: 0.4)) { tracker.arriveAtCurrentStop() }
             // The target advanced to the next stop — re-route the guide line to it.
-            lastRouteFetchFrom = nil
-            refreshEfficientRoute()
+            guide.invalidate()
+            guide.refresh(tracker: tracker)
             activeDrive.pushLiveUpdate()
         } label: {
             let name = tracker.currentLegTarget?.address
@@ -894,9 +924,9 @@ struct LiveTrackingView: View {
 
     private func divert(to stop: RouteStop?) {
         withAnimation(.spring(duration: 0.3)) { tracker.divert(to: stop) }
-        efficientRoute = []
-        lastRouteFetchFrom = nil
-        refreshEfficientRoute()
+        guide.clear()
+        guide.invalidate()
+        guide.refresh(tracker: tracker)
         activeDrive.pushLiveUpdate()
     }
 
@@ -1004,9 +1034,9 @@ struct LiveTrackingView: View {
         tracker.startTracking()
         followUser = true
         cameraPosition = followCameraPosition()
-        efficientRoute = []
-        lastRouteFetchFrom = nil
-        refreshEfficientRoute()
+        guide.clear()
+        guide.invalidate()
+        guide.refresh(tracker: tracker)
         activeDrive.startLiveActivity()
         activeDrive.broadcastLive()
     }
@@ -1020,70 +1050,15 @@ struct LiveTrackingView: View {
         recovered = nil
         followUser = true
         cameraPosition = followCameraPosition()
-        efficientRoute = []
-        lastRouteFetchFrom = nil
-        refreshEfficientRoute()
+        guide.clear()
+        guide.invalidate()
+        guide.refresh(tracker: tracker)
         activeDrive.startLiveActivity()
         activeDrive.broadcastLive()
     }
 
     // Live Activity start/update/end + Watch live-broadcast all live on `ActiveDriveController` now
     // (see its doc comment) so they keep running whether this view is shown full-screen or minimized.
-
-    /// Fetch the fastest road route from the current location to the destination for the
-    /// guide line. Prioritizes Apple Maps' recommended (fastest) route. Throttled: only re-routes
-    /// after the driver has moved ~250 m, keeping well under MapKit's directions rate limit while
-    /// still re-routing on meaningful deviations.
-    ///
-    /// Three failure modes this guards against (each was reproducible and drew a "nonexistent" or
-    /// stale guide line): (1) the 250 m throttle used to only apply once a route existed, so a slow
-    /// first fetch got re-requested on every ~1 Hz GPS fix — dozens of concurrent requests that got
-    /// MapKit to throttle us into never drawing a route; (2) nothing tracked which request was
-    /// newest, so a slow response for a leg the driver already left could land after a fresher one
-    /// and snap the guide line back to a stop they're no longer headed to; (3) a failed attempt still
-    /// advanced `lastRouteFetchFrom`, so one MapKit hiccup left a stale line frozen for the rest of
-    /// the drive instead of retrying.
-    private func refreshEfficientRoute() {
-        guard tracker.isTracking, !tracker.isPausedBetweenLegs,
-              let dest = tracker.destination, let from = tracker.currentLocation, dest.isUsableCoordinate
-        else { return }
-        // A drawn line whose start has drifted far from where we actually are is worse than no line —
-        // most likely a stop we can no longer reach (or a route that failed to refresh for a while).
-        if let first = efficientRoute.first, first.distanceMeters(to: from) > 800 {
-            efficientRoute = []
-        }
-        guard !routeFetchInFlight else { return }
-        if let last = lastRouteFetchFrom, from.distanceMeters(to: last) < 250 { return }
-        // After a failure, back off a few seconds instead of retrying on every single GPS fix.
-        if let failedAt = lastRouteFetchFailedAt, Date().timeIntervalSince(failedAt) < 5 { return }
-
-        routeFetchInFlight = true
-        routeRequestID += 1
-        let requestID = routeRequestID
-        Task {
-            // Fastest of Apple Maps' alternates (by its traffic-aware travel time).
-            let fastest = await RouteMatcher.fastestRoute(from: from, to: dest)
-            let routes = fastest.map { [$0.route] } ?? []
-            await MainActor.run {
-                routeFetchInFlight = false
-                // Stale if a newer request has since been fired, or the leg target changed while
-                // this one was in flight — either way, this response no longer describes where
-                // we're headed and must not overwrite whatever's current.
-                guard requestID == routeRequestID, tracker.isTracking,
-                      tracker.destination.map({ $0.isApproximately(dest) }) == true
-                else { return }
-                guard let best = routes.first, best.polyline.pointCount >= 2 else {
-                    lastRouteFetchFailedAt = Date()
-                    return
-                }
-                lastRouteFetchFrom = from
-                lastRouteFetchFailedAt = nil
-                efficientRoute = best.polyline.coordinates()
-                tracker.appleMapsExpectedTravelTime = best.expectedTravelTime
-                tracker.appleMapsTravelTimeFetchDate = Date()
-            }
-        }
-    }
 
     private func saveTrip(category: TripCategory, paidBy: String, notes: String?) {
         let pts = tracker.points
@@ -1286,8 +1261,8 @@ struct LiveTrackingView: View {
     /// a Track-tab drive resets the tracker and routes to the Dashboard, so the user never sees the
     /// old trip's stale stats flash by on the way out.
     private func finishAndExit() {
-        efficientRoute = []
-        lastRouteFetchFrom = nil
+        guide.clear()
+        guide.invalidate()
         activeDrive.endLiveBroadcast()
         activeDrive.endLiveActivity()
         if isModal {

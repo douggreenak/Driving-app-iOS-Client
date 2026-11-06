@@ -171,6 +171,8 @@ struct DriveHomeView: View {
             // `.task(id:)` so a schedule edited elsewhere (web dashboard, another device) is pulled
             // in on every revisit to this tab / app-foreground, not just the first time it's shown.
             .task(id: activityToken) { await ScheduledDriveStore.sync(context: context) }
+            .onChange(of: activeDrive.pendingGoToPlaceID) { _, _ in startPendingGoTo() }
+            .onAppear { startPendingGoTo() }
             // `.task(id:)` (not a bare `.task`) so this re-checks on every tab revisit / app-foreground
             // too — a bare `.task` only ever ran once at this view's first appearance, so the orange
             // "Unsaved drive" banner stuck around after the recovered drive was actually resolved
@@ -391,6 +393,14 @@ struct DriveHomeView: View {
 
     /// Fetch the current location + MapKit ETA to `place`, then start a recorded drive to it. If the
     /// ETA can't be fetched (offline / no location), the drive still starts, just ungraded.
+    /// Start the drive a Shortcut / Siri asked for (see `ActiveDriveController.pendingGoToPlaceID`).
+    private func startPendingGoTo() {
+        guard let id = activeDrive.pendingGoToPlaceID else { return }
+        activeDrive.pendingGoToPlaceID = nil
+        guard let place = savedPlaces.first(where: { $0.id == id }) else { return }
+        Task { await startGoTo(place) }
+    }
+
     private func startGoTo(_ place: SavedPlace) async {
         guard goToLoadingPlace == nil else { return }
         // A drive already in progress (possibly minimized, possibly for a totally different

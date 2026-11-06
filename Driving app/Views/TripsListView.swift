@@ -105,16 +105,25 @@ struct TripsListView: View {
                     }
                 } else {
                     List {
-                        ForEach(filtered) { trip in
-                            NavigationLink {
-                                TripDetailView(trip: trip)
-                            } label: {
-                                if dense { DenseTripRow(trip: trip) } else { TripRow(trip: trip) }
-                            }
-                            .swipeActions(edge: .trailing) {
-                                Button(role: .destructive) { pendingDelete = trip } label: {
-                                    Label("Delete", systemImage: "trash")
+                        ForEach(listRows) { row in
+                            switch row {
+                            case .trip(let trip):
+                                NavigationLink {
+                                    TripDetailView(trip: trip)
+                                } label: {
+                                    if dense { DenseTripRow(trip: trip) } else { TripRow(trip: trip) }
                                 }
+                                .swipeActions(edge: .trailing) {
+                                    Button(role: .destructive) { pendingDelete = trip } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
+                            case .connection(_, let seconds, let place):
+                                // Layered between the two trips that share this stop, Flighty-style.
+                                ConnectionPill(seconds: seconds, placeName: place, compact: dense)
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(Color.clear)
+                                    .padding(.vertical, -2)
                             }
                         }
                     }
@@ -246,6 +255,35 @@ struct TripsListView: View {
         .buttonStyle(.plain)
     }
 
+    enum ListRow: Identifiable {
+        case trip(DriveTrip)
+        case connection(id: String, seconds: Int, place: String)
+        var id: String {
+            switch self {
+            case .trip(let t): return "t-\(t.persistentModelID.hashValue)"
+            case .connection(let id, _, _): return id
+            }
+        }
+    }
+
+    /// Trips (newest first) with a connection pill slotted between every adjacent pair where the
+    /// older trip ended where the newer one began, under 3 hours apart. Both trips must be visible
+    /// (i.e. survive the current search/filters) for the pill to show.
+    private var listRows: [ListRow] {
+        let items = filtered
+        var rows: [ListRow] = []
+        for (i, later) in items.enumerated() {
+            rows.append(.trip(later))
+            guard i + 1 < items.count else { continue }
+            let earlier = items[i + 1]
+            if let secs = Connection.gap(from: earlier, to: later) {
+                let place = PlaceNamer.name(for: earlier.endCoordinate, fallback: earlier.endAddress, in: savedPlaces)
+                rows.append(.connection(id: "c-\(earlier.persistentModelID.hashValue)", seconds: secs, place: place))
+            }
+        }
+        return rows
+    }
+
     private func refresh() async {
         await TripStore.syncPending(context: context)
         await TripStore.pullRemoteEdits(context: context)
@@ -290,8 +328,7 @@ private struct DenseTripRow: View {
                     Text(dateLabel(trip.date))
                     Text("· \(Fmt.duration(trip.duration))")
                     Image(systemName: trip.category.icon)
-                    if trip.layoverSeconds > 0 { Text("· ⏱ \(Connection.label(trip.layoverSeconds))") }
-                }
+                    }
                 .fixedSize()
                 if let n = trip.name, !n.isEmpty { Text("· \(n)").lineLimit(1) }
                 Spacer(minLength: 4)
@@ -337,11 +374,6 @@ private struct TripRow: View {
                 .foregroundStyle(.purple)
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(.purple.opacity(0.18), in: .capsule)
-                if trip.layoverSeconds > 0 {
-                    Label("Connection · \(Connection.label(trip.layoverSeconds)) before this leg",
-                          systemImage: "clock.arrow.circlepath")
-                        .font(.caption2.weight(.semibold)).foregroundStyle(.purple)
-                }
             }
             if let from = trip.divertedFromName {
                 Label("Diverted from \(from)", systemImage: "arrow.triangle.turn.up.right.diamond.fill")

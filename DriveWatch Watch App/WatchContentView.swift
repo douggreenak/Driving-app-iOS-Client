@@ -25,6 +25,9 @@ private struct LiveDriveView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 9) {
+                    // What to do next: the upcoming turn from the phone's guide route.
+                    if let turn = live.nextTurn, !live.isPaused { turnCard(turn) }
+
                     // Big current speed — the hero readout.
                     VStack(spacing: 0) {
                         Text("\(Int(live.currentSpeed.rounded()))")
@@ -60,6 +63,37 @@ private struct LiveDriveView: View {
         }
     }
 
+    private func turnCard(_ turn: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: turnSymbol(turn)).font(.title3.weight(.bold)).foregroundStyle(.white)
+                .frame(width: 34, height: 34).background(Color.blue.gradient, in: .rect(cornerRadius: 9))
+            VStack(alignment: .leading, spacing: 0) {
+                if let m = live.nextTurnMeters {
+                    Text(turnDistance(m)).font(.system(.headline, design: .rounded)).monospacedDigit()
+                }
+                Text(turn).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .background(.blue.opacity(0.16), in: .rect(cornerRadius: 12))
+    }
+
+    private func turnDistance(_ meters: Double) -> String {
+        let miles = meters / 1609.34
+        if miles >= 0.2 { return String(format: "%.1f mi", miles) }
+        return "\(max(50, Int((meters * 3.28084 / 50).rounded() * 50))) ft"
+    }
+
+    private func turnSymbol(_ text: String) -> String {
+        let t = text.lowercased()
+        if t.contains("u-turn") { return "arrow.uturn.left" }
+        if t.contains("left") { return t.contains("slight") || t.contains("bear") ? "arrow.up.left" : "arrow.turn.up.left" }
+        if t.contains("right") { return t.contains("slight") || t.contains("bear") ? "arrow.up.right" : "arrow.turn.up.right" }
+        if t.contains("arrive") || t.contains("destination") { return "mappin.circle.fill" }
+        return "arrow.up"
+    }
+
     private func readout(_ value: String, _ unit: String, _ tint: Color) -> some View {
         VStack(spacing: 1) {
             Text(value).font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(tint)
@@ -79,8 +113,9 @@ private struct LiveDriveView: View {
             } else if let eta = live.eta {
                 HStack {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(live.legText == nil ? "ETA" : "Final ETA")
-                            .font(.system(size: 9)).foregroundStyle(.secondary)
+                        Text((live.legText == nil ? "ETA" : "Final ETA")
+                             + (live.destinationName.map { " · \($0)" } ?? ""))
+                            .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
                         Text(eta, format: .dateTime.hour().minute()).font(.caption.weight(.semibold)).monospacedDigit()
                     }
                     Spacer()

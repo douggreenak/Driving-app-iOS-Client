@@ -70,11 +70,19 @@ struct WatchSyncPayload: Codable {
         var remainingMiles: Double? = nil
         var legRemainingMiles: Double? = nil
         var legEta: Date? = nil
+        /// Next maneuver and metres to it, from the phone's guide route.
+        var nextTurn: String? = nil
+        var nextTurnMeters: Double? = nil
+        var destinationName: String? = nil
+        var maxSpeed: Double? = nil
+        /// Seconds the car has been (nearly) stopped, so the watch can say "Stopped".
+        var isStopped: Bool? = nil
 
         private enum CodingKeys: String, CodingKey {
             case tripName, milesTraveled, currentSpeed, elapsedSeconds, eta, delaySeconds
             case progress, legText, isPaused, canAdvanceLeg
             case remainingMiles, legRemainingMiles, legEta
+            case nextTurn, nextTurnMeters, destinationName, maxSpeed, isStopped
         }
     }
     var drives: [Drive]
@@ -97,6 +105,11 @@ extension WatchSyncPayload.Live {
         remainingMiles = try values.decodeIfPresent(Double.self, forKey: .remainingMiles)
         legRemainingMiles = try values.decodeIfPresent(Double.self, forKey: .legRemainingMiles)
         legEta = try values.decodeIfPresent(Date.self, forKey: .legEta)
+        nextTurn = try values.decodeIfPresent(String.self, forKey: .nextTurn)
+        nextTurnMeters = try values.decodeIfPresent(Double.self, forKey: .nextTurnMeters)
+        destinationName = try values.decodeIfPresent(String.self, forKey: .destinationName)
+        maxSpeed = try values.decodeIfPresent(Double.self, forKey: .maxSpeed)
+        isStopped = try values.decodeIfPresent(Bool.self, forKey: .isStopped)
     }
 }
 

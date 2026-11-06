@@ -74,7 +74,7 @@ struct StatsView: View {
     /// Whether a card has data to show right now (independent of the user hiding it).
     private func isAvailable(_ widget: StatCard, _ stats: DrivingStats) -> Bool {
         switch widget {
-        case .hero, .paidBy, .records: return !allTrips.isEmpty
+        case .hero, .paidBy, .records, .routes, .patterns: return !allTrips.isEmpty
         case .byCar:    return !stats.byCar.isEmpty
         case .monthly:  return stats.monthly.count > 1
         case .category: return !stats.byCategory.isEmpty
@@ -90,6 +90,8 @@ struct StatsView: View {
         case .hero:     heroStats(stats)
         case .paidBy:   paidBySection(stats)
         case .records:  recordsStrip(stats)
+        case .routes:   TopRoutesCard(trips: allTrips, places: savedPlaces)
+        case .patterns: PatternsCard(trips: allTrips, places: savedPlaces)
         case .byCar:    byCarSection(stats)
         case .monthly:  monthlySection(stats)
         case .category: categorySection(stats)
@@ -415,7 +417,7 @@ private struct HeroTile: View {
 
 /// A rearrangeable/hideable card on the Stats tab. Declaration order is the default layout.
 enum StatCard: String, CaseIterable, Identifiable {
-    case hero, paidBy, records, byCar, monthly, category, onTime, gas, recent
+    case hero, paidBy, records, routes, patterns, byCar, monthly, category, onTime, gas, recent
 
     var id: String { rawValue }
 
@@ -424,6 +426,8 @@ enum StatCard: String, CaseIterable, Identifiable {
         case .hero:     "Totals"
         case .paidBy:   "Who's Paying"
         case .records:  "Records"
+        case .routes:   "Top Routes"
+        case .patterns: "Patterns"
         case .byCar:    "Time in Each Car"
         case .monthly:  "Miles Per Month"
         case .category: "By Category"
@@ -438,6 +442,8 @@ enum StatCard: String, CaseIterable, Identifiable {
         case .hero:     "chart.bar.fill"
         case .paidBy:   "dollarsign.circle.fill"
         case .records:  "trophy.fill"
+        case .routes:   "arrow.triangle.swap"
+        case .patterns: "calendar.badge.clock"
         case .byCar:    "car.fill"
         case .monthly:  "chart.xyaxis.line"
         case .category: "tag.fill"

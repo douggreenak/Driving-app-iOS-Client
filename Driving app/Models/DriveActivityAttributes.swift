@@ -38,11 +38,19 @@ struct DriveActivityAttributes: ActivityAttributes {
         var legEta: Date? = nil
         var legDestinationName: String? = nil
         var isMultiLeg: Bool? = nil
+        /// Next maneuver from the guide route ("Turn left onto Main St") and the metres to it.
+        var nextTurn: String? = nil
+        var nextTurnMeters: Double? = nil
+        /// Richer trip stats for the expanded views.
+        var maxSpeed: Double? = nil
+        var avgSpeed: Double? = nil
+        var gallonsUsed: Double? = nil
 
         private enum CodingKeys: String, CodingKey {
             case milesTraveled, currentSpeed, elapsedSeconds, progress, eta, delaySeconds
             case destinationName, isPaused, tripTitle, scheduledArrival
             case remainingMiles, legRemainingMiles, legEta, legDestinationName, isMultiLeg
+            case nextTurn, nextTurnMeters, maxSpeed, avgSpeed, gallonsUsed
         }
     }
 
@@ -72,6 +80,11 @@ extension DriveActivityAttributes.ContentState {
         legEta = try values.decodeIfPresent(Date.self, forKey: .legEta)
         legDestinationName = try values.decodeIfPresent(String.self, forKey: .legDestinationName)
         isMultiLeg = try values.decodeIfPresent(Bool.self, forKey: .isMultiLeg)
+        nextTurn = try values.decodeIfPresent(String.self, forKey: .nextTurn)
+        nextTurnMeters = try values.decodeIfPresent(Double.self, forKey: .nextTurnMeters)
+        maxSpeed = try values.decodeIfPresent(Double.self, forKey: .maxSpeed)
+        avgSpeed = try values.decodeIfPresent(Double.self, forKey: .avgSpeed)
+        gallonsUsed = try values.decodeIfPresent(Double.self, forKey: .gallonsUsed)
     }
 }
 #endif

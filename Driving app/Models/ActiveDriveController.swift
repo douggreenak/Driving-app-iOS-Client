@@ -34,6 +34,13 @@ final class ActiveDriveController {
         var asModal: Bool
     }
 
+    /// A "drive to this saved place" request from a Shortcut / Siri, picked up by the Drive tab (which
+    /// owns the go-to flow — ETA fetch, vehicle, payer) and cleared once handled.
+    var pendingGoToPlaceID: UUID?
+
+    /// Guide route + next turn (see `GuideRoute`).
+    let guide = GuideRoute()
+
     private(set) var tracker: LocationTracker?
     private(set) var context = Context(scheduled: nil, goTo: nil, asModal: false)
     var presentation: Presentation = .none
@@ -102,6 +109,7 @@ final class ActiveDriveController {
     /// the rest of the process (or, for the Live Activity, until it auto-expired hours later). Both
     /// are safe no-ops when nothing's running.
     func clear() {
+        guide.clear()
         endLiveActivity()
         endLiveBroadcast()
         tracker = nil
@@ -139,7 +147,11 @@ final class ActiveDriveController {
                      legRemainingMiles: hasNextStop ? tracker.legRemainingMiles : nil,
                      legEta: hasNextStop ? tracker.legEtaDate : nil,
                      legDestinationName: hasNextStop ? tracker.currentLegTarget?.address : nil,
-                     isMultiLeg: tracker.isMultiLeg)
+                     isMultiLeg: tracker.isMultiLeg,
+                     nextTurn: tracker.isPausedBetweenLegs ? nil : guide.nextTurn,
+                     nextTurnMeters: tracker.isPausedBetweenLegs ? nil : guide.nextTurnMeters,
+                     maxSpeed: tracker.maxSpeed, avgSpeed: tracker.avgSpeedMph,
+                     gallonsUsed: tracker.accumulatedGallons)
     }
     #endif
 
@@ -155,6 +167,10 @@ final class ActiveDriveController {
     /// elapsed-second tick from `ContentView` — not from `LiveTrackingView`, which may not exist right
     /// now (minimized).
     func pushLiveUpdate() {
+        if let tracker {
+            guide.refresh(tracker: tracker)
+            guide.updateNextTurn(from: tracker.currentLocation)
+        }
         #if canImport(ActivityKit) && !os(macOS)
         if let tracker, tracker.isTracking, let state = liveActivityState() {
             LiveActivityController.update(state)
@@ -195,7 +211,12 @@ final class ActiveDriveController {
             canAdvanceLeg: tracker.isMultiLeg && !tracker.isOnFinalLeg && !tracker.isPausedBetweenLegs,
             remainingMiles: tracker.remainingMiles,
             legRemainingMiles: hasNextStop ? tracker.legRemainingMiles : nil,
-            legEta: hasNextStop ? tracker.legEtaDate : nil)
+            legEta: hasNextStop ? tracker.legEtaDate : nil,
+            nextTurn: tracker.isPausedBetweenLegs ? nil : guide.nextTurn,
+            nextTurnMeters: tracker.isPausedBetweenLegs ? nil : guide.nextTurnMeters,
+            destinationName: tracker.finalDestinationName ?? tracker.destinationName,
+            maxSpeed: tracker.maxSpeed,
+            isStopped: tracker.currentSpeed < 3)
         PhoneWatchConnectivity.shared.sendLive(live)
         #endif
     }

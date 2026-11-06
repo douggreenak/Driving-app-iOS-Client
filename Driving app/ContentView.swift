@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import MapKit
+import AppIntents
 
 @main
 struct DriveTrackerApp: App {
@@ -78,6 +79,21 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
 
     private var fuelPrice: Double { settingsList.first?.fuelPricePerGallon ?? 3.75 }
+
+    private func handleIntentRequests() {
+        for r in IntentBridge.shared.take() {
+            switch r {
+            case .goTo(let id):
+                selection = .drive
+                activeDrive.pendingGoToPlaceID = id
+            case .startOpenDrive:
+                selection = .drive
+                if !activeDrive.hasActiveDrive { activeDrive.start(asModal: true) } else { activeDrive.restore() }
+            case .endDrive:
+                activeDrive.handleEndFromWatch()
+            }
+        }
+    }
 
     var body: some View {
         TabView(selection: $selection) {
@@ -182,6 +198,12 @@ struct ContentView: View {
             #endif
         }
         .task(id: watchSyncKey) { broadcastToWatch() }
+        // Shortcuts / Siri hand-off (see `IntentBridge`): drain on launch and on each new request.
+        .task {
+            IntentBridge.shared.onRequest = { handleIntentRequests() }
+            handleIntentRequests()
+            DriveShortcuts.updateAppShortcutParameters()   // teach Siri the current saved places
+        }
         // The Live Activity (Lock Screen / Dynamic Island) deep-links here — see
         // `DriveActivityLiveActivity`'s `.widgetURL` and the `CFBundleURLTypes` entry in Info.plist.
         // Without this, tapping the activity just opened the app on whatever tab was last selected,

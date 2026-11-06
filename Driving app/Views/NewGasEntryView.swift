@@ -7,7 +7,13 @@ struct NewGasEntryView: View {
     @Query(sort: \Vehicle.name) private var vehicles: [Vehicle]
     @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
     @Query(sort: \DriveTrip.date) private var trips: [DriveTrip]
+    @Query private var settingsList: [UserSettings]
+    /// The most recent fill-up on record. The form starts from ITS car, payer, fuel type and station
+    /// (people usually fill the same car, paid the same way) — never a hardcoded default. Gallons and
+    /// price always start blank.
+    var previous: APIGasEntry? = nil
     var onSaved: (() async -> Void)?
+    @State private var didApplyDefaults = false
 
     @State private var date = Date.now
     @State private var gallons = ""
@@ -122,7 +128,19 @@ struct NewGasEntryView: View {
             .navigationTitle("Add Gas")
             .navigationBarTitleDisplayMode(.inline)
             // Default the picker to the only/most likely car so a fill-up is attributed by default.
-            .onAppear { if vehicleName == nil { vehicleName = vehicles.first?.name } }
+            .onAppear {
+                guard !didApplyDefaults else { return }
+                didApplyDefaults = true
+                if let p = previous {
+                    paidBy = p.paidBy
+                    fuelType = p.fuelTypeEnum
+                    if let name = p.vehicleName, vehicles.contains(where: { $0.name == name }) { vehicleName = name }
+                    if let station = p.stationName { stationName = station }
+                } else {
+                    paidBy = settingsList.first?.defaultPaidByRaw ?? paidBy
+                }
+                if vehicleName == nil { vehicleName = vehicles.first?.name }
+            }
             .keyboardDismissable()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }

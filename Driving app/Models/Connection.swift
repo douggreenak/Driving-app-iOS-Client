@@ -20,3 +20,16 @@ enum Connection {
         return m % 60 == 0 ? "\(m / 60)h" : "\(m / 60)h \(m % 60)m"
     }
 }
+
+extension Connection {
+    /// The connection (layover) between two trips — `earlier` ended where `later` began (within
+    /// ~250 m) and the stop was shorter than `maxLayover`. Works for ANY pair of trips, not just legs
+    /// recorded as one journey: driving to the shop, then home, with a short stop in between is a
+    /// connection however the two trips were saved. Nil when they aren't connected.
+    static func gap(from earlier: DriveTrip, to later: DriveTrip) -> Int? {
+        let seconds = later.date.timeIntervalSince(earlier.endDate)
+        guard seconds >= 0, isConnection(seconds) else { return nil }
+        guard earlier.endCoordinate.distanceMeters(to: later.startCoordinate) < 250 else { return nil }
+        return Int(seconds)
+    }
+}

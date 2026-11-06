@@ -99,6 +99,8 @@ struct TripDetailView: View {
                 if let from = trip.divertedFromName { divertedNotice(from) }
                 StatusBanner(status: .forTrip(delaySeconds: trip.delaySeconds))
                 scheduleCard
+                TripEditCard(trip: trip) { showApplySchedule = true }
+                connectionsCard
                 statsRow
                 if trip.isJourneyLeg { journeyCard } else { stopsCard }
                 if trip.usedRouteMatching { matchCard }
@@ -115,6 +117,41 @@ struct TripDetailView: View {
             }
             .padding()
         }
+    }
+
+    /// Connections to the trips immediately before/after this one (same place, under 3 hours).
+    @ViewBuilder
+    private var connectionsCard: some View {
+        let (before, after) = neighbors
+        if before != nil || after != nil {
+            VStack(spacing: 8) {
+                if let (t, secs) = before {
+                    ConnectionPill(seconds: secs, placeName: legName(trip.startCoordinate, trip.startAddress))
+                    Text("After: \(t.name ?? legName(t.startCoordinate, t.startAddress) + " → " + legName(t.endCoordinate, t.endAddress))")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                if let (t, secs) = after {
+                    ConnectionPill(seconds: secs, placeName: legName(trip.endCoordinate, trip.endAddress))
+                    Text("Then: \(t.name ?? legName(t.startCoordinate, t.startAddress) + " → " + legName(t.endCoordinate, t.endAddress))")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+        }
+    }
+
+    /// The connected trip before (arrived where this began) and after (departs where this ended).
+    private var neighbors: ((DriveTrip, Int)?, (DriveTrip, Int)?) {
+        let day: TimeInterval = Connection.maxLayover
+        let lo = trip.date.addingTimeInterval(-day), hi = trip.endDate.addingTimeInterval(day)
+        let d = FetchDescriptor<DriveTrip>(predicate: #Predicate { $0.date >= lo && $0.date <= hi },
+                                           sortBy: [SortDescriptor(\.date)])
+        let near = (try? context.fetch(d)) ?? []
+        var before: (DriveTrip, Int)?, after: (DriveTrip, Int)?
+        for t in near where t.persistentModelID != trip.persistentModelID {
+            if let g = Connection.gap(from: t, to: trip), before == nil || g < before!.1 { before = (t, g) }
+            if let g = Connection.gap(from: trip, to: t), after == nil || g < after!.1 { after = (t, g) }
+        }
+        return (before, after)
     }
 
     /// Unmissable — the whole point of a manually-logged drive is that it must never be mistaken for

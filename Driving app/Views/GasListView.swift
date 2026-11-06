@@ -88,8 +88,7 @@ struct GasListView: View {
                 } else {
                     List {
                         ForEach(filteredEntries) { entry in
-                            GasRow(entry: entry, payer: entry.payer(in: payerGroups),
-                                  comparison: fuelComparison(for: entry))
+                            gasLink(entry)
                                 .swipeActions(edge: .trailing) {
                                     Button(role: .destructive) { pendingDelete = entry } label: {
                                         Label("Delete", systemImage: "trash")
@@ -109,7 +108,9 @@ struct GasListView: View {
                 }
             }
             .sheet(isPresented: $showingNewEntry) {
-                NewGasEntryView { await loadEntries() }
+                // Start from the previous fill-up's car / payer / fuel type (not a hardcoded default);
+                // price and amount stay blank. See `NewGasEntryView.previous`.
+                NewGasEntryView(previous: entries.max { $0.parsedDate < $1.parsedDate }) { await loadEntries() }
             }
             .confirmationDialog("Delete this fill-up?",
                                 isPresented: Binding(get: { pendingDelete != nil },
@@ -150,6 +151,18 @@ struct GasListView: View {
             vehicleName: vehicleName, since: since, through: entry.parsedDate, trips: trips)
         guard estimated > 0.01 else { return nil }
         return FuelComparison(pumped: entry.gallons, estimated: estimated)
+    }
+
+    /// One tappable fill-up row → its detail page (kept as a helper so the `List` body stays cheap
+    /// for the type-checker).
+    private func gasLink(_ entry: APIGasEntry) -> some View {
+        let payer = entry.payer(in: payerGroups)
+        let comparison = fuelComparison(for: entry)
+        return NavigationLink {
+            GasDetailView(entry: entry, payer: payer, comparison: comparison, allEntries: entries, trips: trips)
+        } label: {
+            GasRow(entry: entry, payer: payer, comparison: comparison)
+        }
     }
 
     private func loadEntries() async {

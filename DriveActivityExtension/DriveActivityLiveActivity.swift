@@ -32,6 +32,17 @@ struct DriveActivityLiveActivity: Widget {
                         Text(delayStatus(context)).font(.caption2).foregroundStyle(delayColor(context))
                     }
                 }
+                DynamicIslandExpandedRegion(.center) {
+                    if let turn = context.state.nextTurn, !context.state.isPaused {
+                        HStack(spacing: 6) {
+                            Image(systemName: turnSymbol(turn)).foregroundStyle(.blue)
+                            if let m = context.state.nextTurnMeters {
+                                Text(turnDistance(m)).font(.caption.weight(.bold)).monospacedDigit()
+                            }
+                            Text(turn).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                    }
+                }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 4) {
                         if let progress = context.state.progress {
@@ -59,6 +70,20 @@ struct DriveActivityLiveActivity: Widget {
             // last selected, leaving the currently-tracking drive minimized with no obvious way back.
             .widgetURL(URL(string: "drivetracker://active-drive"))
         }
+    }
+
+    private func turnDistance(_ meters: Double) -> String {
+        let miles = meters / 1609.34
+        if miles >= 0.2 { return String(format: "%.1f mi", miles) }
+        return "\(max(50, Int((meters * 3.28084 / 50).rounded() * 50))) ft"
+    }
+    private func turnSymbol(_ text: String) -> String {
+        let t = text.lowercased()
+        if t.contains("u-turn") { return "arrow.uturn.left" }
+        if t.contains("left") { return t.contains("slight") || t.contains("bear") ? "arrow.up.left" : "arrow.turn.up.left" }
+        if t.contains("right") { return t.contains("slight") || t.contains("bear") ? "arrow.up.right" : "arrow.turn.up.right" }
+        if t.contains("arrive") || t.contains("destination") { return "mappin.circle.fill" }
+        return "arrow.up"
     }
 
     /// See `LockScreenView.title` — the live title lives in `state`, with the fixed attribute as a
@@ -152,6 +177,21 @@ private struct LockScreenView: View {
                 ProgressView(value: progress).tint(delayColor)
             }
 
+            // Next maneuver from the phone's guide route.
+            if let turn = context.state.nextTurn, !context.state.isPaused {
+                HStack(spacing: 8) {
+                    Image(systemName: turnSymbol(turn)).font(.title3.weight(.bold)).foregroundStyle(.white)
+                        .frame(width: 32, height: 32).background(Color.blue.gradient, in: .rect(cornerRadius: 8))
+                    VStack(alignment: .leading, spacing: 0) {
+                        if let m = context.state.nextTurnMeters {
+                            Text(turnDistance(m)).font(.subheadline.weight(.bold)).foregroundStyle(.white).monospacedDigit()
+                        }
+                        Text(turn).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Scheduled").font(.caption2).foregroundStyle(.secondary)
@@ -182,6 +222,12 @@ private struct LockScreenView: View {
             }
             .padding(.top, 1)
 
+            HStack(spacing: 8) {
+                metric("Avg", context.state.avgSpeed.map { String(format: "%.0f mph", $0) } ?? "—")
+                metric("Top", context.state.maxSpeed.map { String(format: "%.0f mph", $0) } ?? "—")
+                metric("Gas", context.state.gallonsUsed.map { String(format: "%.2f gal", $0) } ?? "—")
+            }
+
             if let eta = context.state.legEta {
                 HStack(spacing: 4) {
                     Image(systemName: "mappin.and.ellipse").foregroundStyle(.blue)
@@ -199,6 +245,20 @@ private struct LockScreenView: View {
         // Tapping the Lock Screen banner opens the app straight at the live tracking screen — see
         // the Dynamic Island's matching `.widgetURL` above and `ContentView.onOpenURL`.
         .widgetURL(URL(string: "drivetracker://active-drive"))
+    }
+
+    private func turnDistance(_ meters: Double) -> String {
+        let miles = meters / 1609.34
+        if miles >= 0.2 { return String(format: "%.1f mi", miles) }
+        return "\(max(50, Int((meters * 3.28084 / 50).rounded() * 50))) ft"
+    }
+    private func turnSymbol(_ text: String) -> String {
+        let t = text.lowercased()
+        if t.contains("u-turn") { return "arrow.uturn.left" }
+        if t.contains("left") { return t.contains("slight") || t.contains("bear") ? "arrow.up.left" : "arrow.turn.up.left" }
+        if t.contains("right") { return t.contains("slight") || t.contains("bear") ? "arrow.up.right" : "arrow.turn.up.right" }
+        if t.contains("arrive") || t.contains("destination") { return "mappin.circle.fill" }
+        return "arrow.up"
     }
 
     private var elapsedText: String {
