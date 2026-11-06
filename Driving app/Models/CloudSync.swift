@@ -154,7 +154,9 @@ enum CloudSync {
         await step("Saved places") { try await syncPlaces(context) }
         await step("Settings") { try await syncSettings(context) }
         await step("Restoring trips") { try await restoreTrips(context) }
-        await step("Uploading trips") { _ = await TripStore.syncPending(context: context) }
+        await step("Uploading trips") { try await TripStore.uploadPending(context: context) }
+        await step("Uploading edits") { try await pushLocalEdits(context) }
+        await step("Scheduled drives") { _ = await ScheduledDriveStore.sync(context: context) }
         await step("Uploading tracks") { await flushPendingPointUploads(context) }
         await step("Restoring tracks") { await restoreMissingPoints(context, limit: deep ? .max : 12) }
 
@@ -170,6 +172,87 @@ enum CloudSync {
             }
         }
         return "\(step): \(error.localizedDescription)"
+    }
+
+    // MARK: Trips — push edits
+
+    private static let editSigKey = "cloud.tripEditSignatures.v1"
+
+    /// A fingerprint of every field of a trip the web API lets a client change after creation.
+    private static func editSignature(_ t: DriveTrip) -> String {
+        let stops = (try? JSONEncoder().encode(t.stops)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        return [t.categoryRaw, t.notes ?? "", t.isFavorite ? "1" : "0", t.paidByRaw,
+                String(Int(t.date.timeIntervalSince1970)), t.startAddress, t.endAddress,
+                String(t.startLat), String(t.startLng), String(t.endLat), String(t.endLng), stops]
+            .joined(separator: "\u{1F}")
+    }
+
+    /// Pushes edits made on the phone (category, notes, favorite, payer, stops, destination…) to trips
+    /// that are already in the cloud. The first time a trip is seen it is only fingerprinted (its
+    /// current state is taken as already-in-sync); after that, any change gets PATCHed up — BEFORE the
+    /// pull step runs, so a phone-side edit can never be reverted by the cloud's older copy.
+    static func recordEditSignature(_ t: DriveTrip) {
+        guard let id = t.remoteID else { return }
+        var sigs = (UserDefaults.standard.dictionary(forKey: editSigKey) as? [String: String]) ?? [:]
+        sigs[id] = editSignature(t)
+        UserDefaults.standard.set(sigs, forKey: editSigKey)
+    }
+
+    static func pushLocalEdits(_ ctx: ModelContext) async throws {
+        let trips = ((try? ctx.fetch(FetchDescriptor<DriveTrip>(predicate: #Predicate { $0.synced }))) ?? [])
+        var sigs = (UserDefaults.standard.dictionary(forKey: editSigKey) as? [String: String]) ?? [:]
+        var firstError: Error?
+        for t in trips {
+            guard let id = t.remoteID else { continue }
+            let sig = editSignature(t)
+            guard let old = sigs[id] else { sigs[id] = sig; continue }
+            if old == sig { continue }
+            do {
+                try await APIClient.patchTripFields(.init(
+                    id: id, isFavorite: t.isFavorite, category: t.categoryRaw, notes: t.notes ?? "",
+                    paidBy: t.paidByRaw, date: stamp(t.date), startAddress: t.startAddress,
+                    endAddress: t.endAddress, startLat: t.startLat, startLng: t.startLng,
+                    endLat: t.endLat, endLng: t.endLng, stops: t.stops))
+                sigs[id] = sig
+            } catch { firstError = firstError ?? error }
+        }
+        UserDefaults.standard.set(sigs, forKey: editSigKey)
+        if let firstError { throw firstError }
+    }
+
+    // MARK: Export / pull-down
+
+    /// Downloads EVERYTHING the cloud holds (trips with full detail, fill-ups, cars, payer groups,
+    /// places, settings, scheduled drives) into one JSON file for sharing/backup. Read-only.
+    static func exportCloudData() async throws -> URL {
+        func raw(_ path: String) async throws -> Any {
+            try JSONSerialization.jsonObject(with: try await APIClient.get(path))
+        }
+        var trips: [Any] = []
+        var page = 1
+        while true {
+            guard let r = try await raw("/api/trips?full=true&page=\(page)&pageSize=50") as? [String: Any],
+                  let items = r["items"] as? [Any], !items.isEmpty else { break }
+            trips += items
+            if let total = r["total"] as? Int, trips.count >= total { break }
+            page += 1
+        }
+        let all: [String: Any] = [
+            "exportedAt": ISO8601DateFormatter().string(from: Date()),
+            "trips": trips,
+            "gas": try await raw("/api/gas"),
+            "vehicles": try await raw("/api/vehicles"),
+            "payerGroups": try await raw("/api/payer-groups"),
+            "savedPlaces": try await raw("/api/saved-places"),
+            "settings": try await raw("/api/settings"),
+            "scheduled": try await raw("/api/scheduled"),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: all, options: [.prettyPrinted, .sortedKeys])
+        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd-HHmm"
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DriveTracker-CloudData-\(df.string(from: Date())).json")
+        try data.write(to: url, options: .atomic)
+        return url
     }
 
     // MARK: JSON helpers
@@ -300,7 +383,11 @@ enum CloudSync {
         let local = (try? ctx.fetch(FetchDescriptor<DriveTrip>())) ?? []
         var knownRemote = Set(local.compactMap(\.remoteID))
         let missing = probe.total - knownRemote.count
-        guard missing > 0 else { return }
+        // Also walk the cloud list when this phone has trips with no cloud id — an upload that landed
+        // on the server but whose reply never got back (weak signal) must be LINKED to its cloud row
+        // rather than uploaded a second time.
+        let hasUnlinked = local.contains { $0.remoteID == nil }
+        guard missing > 0 || hasUnlinked else { return }
 
         // Local trips that never got a remote id but ARE on the server (an upload that succeeded
         // but wasn't recorded) are linked instead of duplicated.
@@ -311,7 +398,7 @@ enum CloudSync {
                                   uniquingKeysWith: { a, _ in a })
         var journeyIDs: [String: UUID] = [:]
         var inserted = 0, page = 1
-        while inserted < missing {
+        while inserted < missing || (!unlinked.isEmpty && (page - 1) * 20 < probe.total) {
             let result: RemoteTripsPage = try await getJSON("/api/trips?full=true&page=\(page)&pageSize=20")
             if result.items.isEmpty { break }
             for r in result.items where !knownRemote.contains(r.id) {

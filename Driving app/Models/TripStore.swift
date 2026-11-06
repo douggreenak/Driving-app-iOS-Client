@@ -39,6 +39,15 @@ enum TripStore {
         var divertedFromName: String? = nil
     }
 
+    /// A trip always gets a title: the one the driver gave it, else "To <destination>" (saved-place
+    /// label if the drive ended at one, otherwise the street address).
+    static func resolvedName(_ given: String?, end: CLLocationCoordinate2D, address: String,
+                             context: ModelContext) -> String {
+        if let g = given?.trimmingCharacters(in: .whitespacesAndNewlines), !g.isEmpty { return g }
+        let places = (try? context.fetch(FetchDescriptor<SavedPlace>())) ?? []
+        return PlaceNamer.autoTitle(end: end, endAddress: address, in: places)
+    }
+
     @discardableResult
     static func save(_ input: Input, context: ModelContext) async -> DriveTrip? {
         let pts = input.points
@@ -77,7 +86,7 @@ enum TripStore {
             maxSpeed: maxSpeed,
             avgSpeed: avgSpeed,
             notes: input.notes,
-            name: input.name,
+            name: resolvedName(input.name, end: CLLocationCoordinate2D(latitude: last.lat, longitude: last.lng), address: input.endAddress, context: context),
             category: input.category,
             paidBy: input.paidBy,
             vehicleName: input.vehicleName,
@@ -171,7 +180,7 @@ enum TripStore {
             maxSpeed: avgMph,
             avgSpeed: avgMph,
             notes: input.notes,
-            name: input.name,
+            name: resolvedName(input.name, end: input.endCoordinate, address: input.endAddress, context: context),
             category: input.category,
             paidBy: input.paidBy,
             vehicleName: input.vehicleName,
@@ -393,9 +402,21 @@ enum TripStore {
     }
 
     static func syncPending(context: ModelContext) async -> Int {
+        (try? await uploadPending(context: context)) ?? 0
+    }
+
+    /// Uploads every trip that isn't in the cloud yet. Throws the first failure (after trying them
+    /// all) so Settings can show *why* something isn't uploading instead of failing silently.
+    @discardableResult
+    static func uploadPending(context: ModelContext) async throws -> Int {
         let descriptor = FetchDescriptor<DriveTrip>(predicate: #Predicate { !$0.synced })
-        guard let pending = try? context.fetch(descriptor), !pending.isEmpty else { return 0 }
+        guard let pending = try? context.fetch(descriptor), !pending.isEmpty else {
+            CloudSyncStatus.shared.pendingUploads = 0
+            return 0
+        }
+        CloudSyncStatus.shared.pendingUploads = pending.count
         var synced = 0
+        var firstError: Error?
         for trip in pending where !uploading.contains(trip.id) {
             uploading.insert(trip.id)
             defer { uploading.remove(trip.id) }
@@ -403,16 +424,21 @@ enum TripStore {
             // this same trip can complete (flipping `synced` and freeing the slot) during an earlier
             // iteration's `await`, so without this a backlog would upload it a second time.
             if trip.synced { continue }
-            let create = makeCreate(for: trip)
-            if let remote = try? await APIClient.createTrip(create) {
+            do {
+                let remote = try await APIClient.createTrip(makeCreate(for: trip))
                 trip.remoteID = remote.id
                 trip.synced = true
                 synced += 1
                 try? context.save()  // persist right away so a crash can't re-upload it
+                CloudSync.recordEditSignature(trip)
                 await CloudSync.uploadPoints(for: trip)
+            } catch {
+                firstError = firstError ?? error
             }
             try? context.save()
         }
+        CloudSyncStatus.shared.pendingUploads = max(0, pending.count - synced)
+        if let firstError { throw firstError }
         return synced
     }
 
@@ -426,6 +452,8 @@ enum TripStore {
     /// anywhere but this phone, no matter how many times you pulled.
     @discardableResult
     static func pullRemoteEdits(context: ModelContext) async -> Int {
+        // Push the phone's own edits first, so the cloud's older copy can never revert them.
+        try? await CloudSync.pushLocalEdits(context)
         guard let remote = try? await APIClient.fetchTrips(), !remote.isEmpty else { return 0 }
         guard let local = try? context.fetch(FetchDescriptor<DriveTrip>()) else { return 0 }
         // `uniqueKeysWithValues:` traps with a fatalError on a duplicate key. Two local trips sharing
@@ -441,7 +469,7 @@ enum TripStore {
             if trip.notes != r.notes { trip.notes = r.notes; changed = true }
             if trip.isFavorite != r.isFavorite { trip.isFavorite = r.isFavorite; changed = true }
             if let paidBy = r.paidBy, trip.paidByRaw != paidBy { trip.paidByRaw = paidBy; changed = true }
-            if changed { updated += 1 }
+            if changed { updated += 1; CloudSync.recordEditSignature(trip) }
         }
         if updated > 0 { try? context.save() }
         return updated
@@ -473,6 +501,7 @@ enum TripStore {
             // Persist the synced flag now so an app kill before SwiftData's autosave can't
             // re-upload this trip on next launch (a second duplicate remote row).
             try? trip.modelContext?.save()
+            CloudSync.recordEditSignature(trip)
             await CloudSync.uploadPoints(for: trip)
         }
     }

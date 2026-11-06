@@ -53,7 +53,7 @@ struct TripDetailView: View {
             }
         }
         .background(.black)
-        .navigationTitle(trip.name ?? "Trip Detail")
+        .navigationTitle(trip.displayTitle(places: savedPlaces))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {

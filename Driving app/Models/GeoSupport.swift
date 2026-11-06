@@ -70,6 +70,16 @@ extension CLLocationCoordinate2D {
 /// Resolves a coordinate to a saved-place label ("Home", "Work") when one is bookmarked nearby,
 /// so the UI can show the friendly name instead of a raw street address.
 enum PlaceNamer {
+    /// "To Home", "To Costco", "To 3569 S Cushman St" — the automatic title for a trip, built from the
+    /// destination: a saved place's label when the drive ends at one, else the street part of the
+    /// address (never the whole "street, city, state, zip" string).
+    static func autoTitle(end: CLLocationCoordinate2D, endAddress: String, in places: [SavedPlace]) -> String {
+        let place = name(for: end, fallback: "", in: places)
+        if !place.isEmpty { return "To \(place)" }
+        let short = endAddress.split(separator: ",").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        return short.isEmpty ? "Drive" : "To \(short)"
+    }
+
     /// The label of the nearest saved place within `maxMeters` of `coordinate`, else `fallback`
     /// (the reverse-geocoded address).
     static func name(for coordinate: CLLocationCoordinate2D, fallback: String,
@@ -135,5 +145,14 @@ enum Polyline {
         }
         out.append(Character(UnicodeScalar(v + 63)!))
         return out
+    }
+}
+
+extension DriveTrip {
+    /// The trip's own title, or "To <destination>" when it has none (older trips, or ones the cloud
+    /// restored without a name). Display only — never written back over stored data.
+    func displayTitle(places: [SavedPlace]) -> String {
+        if let n = name?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty { return n }
+        return PlaceNamer.autoTitle(end: endCoordinate, endAddress: endAddress, in: places)
     }
 }

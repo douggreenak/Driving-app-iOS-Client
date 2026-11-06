@@ -10,6 +10,7 @@ struct GasListView: View {
     /// nil = "All"; otherwise a `PayerGroup.key` to filter to.
     @State private var filterKey: String?
     @State private var pendingDelete: APIGasEntry?
+    @State private var editingEntry: APIGasEntry?
     @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
     @Query(sort: \DriveTrip.date) private var trips: [DriveTrip]
     @Environment(\.tabActivityToken) private var activityToken
@@ -89,6 +90,12 @@ struct GasListView: View {
                     List {
                         ForEach(filteredEntries) { entry in
                             gasLink(entry)
+                                .swipeActions(edge: .leading) {
+                                    Button { Haptics.tap(); editingEntry = entry } label: {
+                                        Label("Edit", systemImage: "pencil")
+                                    }
+                                    .tint(.blue)
+                                }
                                 .swipeActions(edge: .trailing) {
                                     Button(role: .destructive) { pendingDelete = entry } label: {
                                         Label("Delete", systemImage: "trash")
@@ -111,6 +118,9 @@ struct GasListView: View {
                 // Start from the previous fill-up's car / payer / fuel type (not a hardcoded default);
                 // price and amount stay blank. See `NewGasEntryView.previous`.
                 NewGasEntryView(previous: entries.max { $0.parsedDate < $1.parsedDate }) { await loadEntries() }
+            }
+            .sheet(item: $editingEntry) { entry in
+                NewGasEntryView(editing: entry) { await loadEntries() }
             }
             .confirmationDialog("Delete this fill-up?",
                                 isPresented: Binding(get: { pendingDelete != nil },
@@ -159,7 +169,8 @@ struct GasListView: View {
         let payer = entry.payer(in: payerGroups)
         let comparison = fuelComparison(for: entry)
         return NavigationLink {
-            GasDetailView(entry: entry, payer: payer, comparison: comparison, allEntries: entries, trips: trips)
+            GasDetailView(entry: entry, payer: payer, comparison: comparison, allEntries: entries, trips: trips,
+                          onChanged: { await loadEntries() })
         } label: {
             GasRow(entry: entry, payer: payer, comparison: comparison)
         }

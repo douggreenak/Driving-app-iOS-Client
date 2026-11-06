@@ -10,6 +10,10 @@ struct GasDetailView: View {
     /// Every fill-up (to find this car's previous one) and all trips (to total what was driven since).
     let allEntries: [APIGasEntry]
     let trips: [DriveTrip]
+    /// Called after an edit is saved so the list reloads.
+    var onChanged: (() async -> Void)? = nil
+    @Environment(\.dismiss) private var dismiss
+    @State private var editing = false
 
     private var previous: APIGasEntry? {
         guard let car = entry.vehicleName else { return nil }
@@ -80,6 +84,18 @@ struct GasDetailView: View {
         .background(.black)
         .navigationTitle("Fill-up")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Edit") { Haptics.tap(); editing = true }
+            }
+        }
+        .sheet(isPresented: $editing) {
+            NewGasEntryView(editing: entry) {
+                await onChanged?()
+                // The row this page shows is the pre-edit copy; go back to the refreshed list.
+                dismiss()
+            }
+        }
     }
 
     @ViewBuilder

@@ -309,7 +309,7 @@ private struct DenseTripRow: View {
     @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 if trip.isJourneyLeg {
                     Image(systemName: "arrow.triangle.branch").font(.caption2).foregroundStyle(.purple)
@@ -318,35 +318,39 @@ private struct DenseTripRow: View {
                     Image(systemName: "arrow.triangle.turn.up.right.diamond.fill")
                         .font(.caption2).foregroundStyle(.orange)
                 }
-                Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                Spacer(minLength: 4)
+                // Long titles truncate; the distance never does.
+                Text(trip.displayTitle(places: savedPlaces))
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1).truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Text(String(format: "%.1f mi", trip.distance))
                     .font(.subheadline.weight(.semibold)).monospacedDigit()
+                    .fixedSize().layoutPriority(2)
             }
             HStack(spacing: 6) {
-                Group {
-                    Text(dateLabel(trip.date))
-                    Text("· \(Fmt.duration(trip.duration))")
-                    Image(systemName: trip.category.icon)
-                    }
-                .fixedSize()
-                if let n = trip.name, !n.isEmpty { Text("· \(n)").lineLimit(1) }
-                Spacer(minLength: 4)
-                if trip.delaySeconds != nil {
-                    StatusChip(status: .forTrip(delaySeconds: trip.delaySeconds), compact: true)
+                Text("\(dateLabel(trip.date)) · \(Fmt.duration(trip.duration))")
+                    .lineLimit(1).fixedSize().layoutPriority(1)
+                Image(systemName: trip.category.icon).fixedSize()
+                Spacer(minLength: 2)
+                // The chips are the first things to give way on a narrow row.
+                ViewThatFits(in: .horizontal) {
+                    trailing(showStatus: true)
+                    trailing(showStatus: false)
                 }
-                if !trip.synced { Image(systemName: "icloud.slash") }
-                PayerChip(PayerGroup.resolve(key: trip.paidByRaw, in: payerGroups), compact: true)
             }
-            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            .font(.caption2).foregroundStyle(.secondary)
         }
-        .padding(.vertical, 0)
     }
 
-    private var title: String {
-        let a = PlaceNamer.name(for: trip.startCoordinate, fallback: trip.startAddress, in: savedPlaces)
-        let b = PlaceNamer.name(for: trip.endCoordinate, fallback: trip.endAddress, in: savedPlaces)
-        return "\(a) → \(b)"
+    private func trailing(showStatus: Bool) -> some View {
+        HStack(spacing: 6) {
+            if showStatus, trip.delaySeconds != nil {
+                StatusChip(status: .forTrip(delaySeconds: trip.delaySeconds), compact: true)
+            }
+            if !trip.synced { Image(systemName: "icloud.slash") }
+            PayerChip(PayerGroup.resolve(key: trip.paidByRaw, in: payerGroups), compact: true)
+        }
+        .fixedSize()
     }
 
     private func dateLabel(_ date: Date) -> String {
@@ -389,10 +393,8 @@ private struct TripRow: View {
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(.orange.opacity(0.18), in: .capsule)
             }
-            if let name = trip.name, !name.isEmpty {
-                Text(name)
-                    .font(.headline).fontWeight(.semibold).foregroundStyle(.primary).lineLimit(1)
-            }
+            Text(trip.displayTitle(places: savedPlaces))
+                .font(.headline).fontWeight(.semibold).foregroundStyle(.primary).lineLimit(1)
             HStack(spacing: 6) {
                 Text(dateLabel(trip.date))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -427,7 +429,7 @@ private struct TripRow: View {
     private func stat(_ icon: String, _ text: String) -> some View {
         HStack(spacing: 3) {
             Image(systemName: icon).font(.caption2)
-            Text(text).font(.caption2)
+            Text(text).font(.caption2).lineLimit(1).fixedSize()
         }
         .foregroundStyle(.tertiary)
     }

@@ -37,6 +37,9 @@ struct SettingsView: View {
     @State private var exportError: String?
     @State private var exportedFiles: [URL] = []
     @State private var showingExportShare = false
+    @State private var cloudBusy: String?
+    @State private var cloudMessage: String?
+    @Query private var allTrips: [DriveTrip]
 
     /// Active (non-archived) groups, in display order — everywhere in this view that needs "the
     /// current list of payers" reads this instead of the raw query.
@@ -88,6 +91,10 @@ struct SettingsView: View {
             if let err = s.lastError {
                 Text(err).font(.caption).foregroundStyle(.orange)
             }
+            let unsynced = allTrips.filter { !$0.synced }.count
+            Text("\(allTrips.count) trips on this phone · \(s.remoteTripTotal) in the cloud" +
+                 (unsynced > 0 ? " · \(unsynced) waiting to upload" : " · all uploaded"))
+                .font(.caption).foregroundStyle(unsynced > 0 ? Color.orange : Color.secondary)
             if s.remoteTripTotal > 0 {
                 Text("\(s.remoteTripTotal) trips in the cloud" +
                      (s.tripsRestoredThisRun > 0 ? " · restored \(s.tripsRestoredThisRun) this pass" : "") +
@@ -98,7 +105,7 @@ struct SettingsView: View {
                 Haptics.tap()
                 Task { await CloudSync.run(context: modelContext, force: true, deep: true) }
             } label: {
-                Label("Sync & Restore Now", systemImage: "arrow.clockwise.icloud")
+                Label("Sync Now", systemImage: "arrow.clockwise.icloud")
             }
             .disabled(s.isRunning)
         } header: {
@@ -466,6 +473,45 @@ struct SettingsView: View {
                         }
                     }
                     .disabled(exporting)
+                    Button {
+                        Haptics.tap()
+                        cloudBusy = "pull"; cloudMessage = nil
+                        Task {
+                            await CloudSync.run(context: modelContext, force: true, deep: true)
+                            cloudBusy = nil
+                            cloudMessage = CloudSyncStatus.shared.lastError ?? "Pulled down everything the cloud has that this phone was missing."
+                        }
+                    } label: {
+                        if cloudBusy == "pull" {
+                            HStack { ProgressView().controlSize(.small); Text("Pulling Down Cloud Data…") }
+                        } else {
+                            Label("Pull Down Cloud Data", systemImage: "icloud.and.arrow.down")
+                        }
+                    }
+                    .disabled(cloudBusy != nil)
+                    Button {
+                        Haptics.tap()
+                        cloudBusy = "export"; cloudMessage = nil
+                        Task {
+                            do {
+                                exportedFiles = [try await CloudSync.exportCloudData()]
+                                showingExportShare = true
+                            } catch {
+                                cloudMessage = "Couldn't export the cloud data: \(error.localizedDescription)"
+                            }
+                            cloudBusy = nil
+                        }
+                    } label: {
+                        if cloudBusy == "export" {
+                            HStack { ProgressView().controlSize(.small); Text("Downloading Cloud Data…") }
+                        } else {
+                            Label("Export Cloud Data", systemImage: "icloud.and.arrow.up")
+                        }
+                    }
+                    .disabled(cloudBusy != nil)
+                    if let cloudMessage {
+                        Text(cloudMessage).font(.caption).foregroundStyle(.secondary)
+                    }
                     if let exportError {
                         Label(exportError, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.orange)
@@ -473,7 +519,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Data")
                 } footer: {
-                    Text("Saves a copy of everything on this phone — trips, schedules, vehicles, and settings — as SQLite database files you can back up or open elsewhere. This only reads a copy; nothing here is deleted or changed.")
+                    Text("Pull Down Cloud Data adds anything the cloud has that this phone is missing (it never deletes or overwrites). Export Cloud Data saves everything the cloud holds as one JSON file. Export Database saves a copy of everything on this phone as SQLite files. All three only read or add — nothing is deleted or changed.")
                 }
             }
             .navigationTitle("Settings")

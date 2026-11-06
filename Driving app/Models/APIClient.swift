@@ -36,6 +36,25 @@ struct APIClient {
     /// Update just the payer on an already-synced trip (used to backfill `paidBy` onto historical
     /// trips that were uploaded before the server had the column). Non-destructive: updates the
     /// existing row by id, never creates or deletes.
+    /// Every trip field the web API lets a client edit after creation.
+    struct TripFieldsPatch: Codable {
+        let id: String
+        let isFavorite: Bool
+        let category: String
+        let notes: String
+        let paidBy: String
+        let date: String
+        let startAddress: String
+        let endAddress: String
+        let startLat: Double, startLng: Double, endLat: Double, endLng: Double
+        let stops: [RouteStop]
+    }
+
+    static func patchTripFields(_ patch: TripFieldsPatch) async throws {
+        let body = try JSONEncoder.api.encode(patch)
+        _ = try await request("PATCH", "/api/trips", body: body)
+    }
+
     static func patchTripPaidBy(id: String, paidBy: String) async throws {
         let body = try JSONEncoder.api.encode(["id": id, "paidBy": paidBy])
         _ = try await request("PATCH", "/api/trips", body: body)
@@ -79,6 +98,24 @@ struct APIClient {
         let body = try JSONEncoder.api.encode(entry)
         let data = try await post("/api/gas", body: body)
         return try JSONDecoder.api.decode(APIGasEntry.self, from: data)
+    }
+
+    struct GasPatch: Codable {
+        let id: String
+        let date: String
+        let gallons: Double
+        let pricePerGallon: Double
+        let paidBy: String
+        let fuelType: String
+        let stationName: String?
+        let odometer: Double?
+    }
+
+    /// Edit a fill-up in place. The web API's PATCH only accepts the built-in SELF/PARENTS payers, so
+    /// a custom payer group is saved by re-creating the row instead (see `GasEditView`).
+    static func patchGasEntry(_ patch: GasPatch) async throws {
+        let body = try JSONEncoder.api.encode(patch)
+        _ = try await request("PATCH", "/api/gas", body: body)
     }
 
     static func deleteGasEntry(id: String) async throws {
@@ -155,8 +192,12 @@ struct APIClient {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         req.httpBody = body
-        // Fail fast instead of hanging on the default 60s timeout when the backend is slow/unreachable.
-        req.timeoutInterval = 12
+        // Reads of small lists fail fast; anything that carries a payload (trip + track uploads, full
+        // restores) gets room to finish. A 12 s limit used to cut full-fidelity uploads off mid-flight
+        // on a weak cell connection — the server often still saved the row, the phone never heard
+        // back, and the retry then uploaded the same drive a second time.
+        let heavy = method != "GET" || path.contains("full=true") || path.contains("/points")
+        req.timeoutInterval = heavy ? 60 : 15
         // Every "pull to refresh" in the app ultimately calls a GET here. `URLSessionConfiguration
         // .default` consults `URLCache.shared` under `.useProtocolCachePolicy`, so if this backend
         // ever answers with a revalidating/cacheable `Cache-Control`, a refresh could silently be
@@ -164,7 +205,7 @@ struct APIClient {
         // "refreshing does nothing". Reads should always hit the network; writes are unaffected
         // (POST/PATCH/DELETE responses were never cached to begin with).
         if method == "GET" { req.cachePolicy = .reloadIgnoringLocalCacheData }
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await (heavy ? heavySession : session).data(for: req)
         // Treat non-2xx as a real failure so error bodies aren't decoded as data and a failed
         // create/delete/patch surfaces to the caller instead of looking like success.
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
@@ -172,6 +213,14 @@ struct APIClient {
         }
         return data
     }
+
+    private static let heavySession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 120
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
 
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default

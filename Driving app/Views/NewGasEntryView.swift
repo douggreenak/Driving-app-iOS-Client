@@ -12,6 +12,8 @@ struct NewGasEntryView: View {
     /// (people usually fill the same car, paid the same way) — never a hardcoded default. Gallons and
     /// price always start blank.
     var previous: APIGasEntry? = nil
+    /// When set, the form edits this existing fill-up (same screen, pre-filled) instead of adding one.
+    var editing: APIGasEntry? = nil
     var onSaved: (() async -> Void)?
     @State private var didApplyDefaults = false
 
@@ -125,12 +127,23 @@ struct NewGasEntryView: View {
                     }
                 }
             }
-            .navigationTitle("Add Gas")
+            .navigationTitle(editing == nil ? "Add Gas" : "Edit Gas")
             .navigationBarTitleDisplayMode(.inline)
             // Default the picker to the only/most likely car so a fill-up is attributed by default.
             .onAppear {
                 guard !didApplyDefaults else { return }
                 didApplyDefaults = true
+                if let e = editing {
+                    date = e.parsedDate
+                    gallons = Self.trim(e.gallons)
+                    pricePerGallon = Self.trim(e.pricePerGallon)
+                    paidBy = e.paidBy
+                    fuelType = e.fuelTypeEnum
+                    stationName = e.stationName ?? ""
+                    odometer = e.odometer.map { Self.trim($0) } ?? ""
+                    vehicleName = e.vehicleName
+                    return
+                }
                 if let p = previous {
                     paidBy = p.paidBy
                     fuelType = p.fuelTypeEnum
@@ -145,14 +158,19 @@ struct NewGasEntryView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { save() }
+                    Button(editing == nil ? "Save" : "Update") { save() }
                         .disabled(!canSave)
                 }
             }
         }
     }
 
+    private static func trim(_ v: Double) -> String {
+        v == v.rounded() ? String(Int(v)) : String(format: "%g", (v * 1000).rounded() / 1000)
+    }
+
     private func save() {
+        if let editing { saveEdit(editing); return }
         saving = true
         saveError = nil
         let f = ISO8601DateFormatter()
@@ -196,5 +214,45 @@ struct NewGasEntryView: View {
             await onSaved?()
             dismiss()
         }
+    }
+
+    /// Update an existing fill-up in the cloud. The web API's PATCH only accepts the built-in
+    /// payers, so when the entry is paid by a custom group the row is replaced instead — the new
+    /// copy is created FIRST and the old one deleted only after that succeeded, so a failure can
+    /// never lose the entry.
+    private func saveEdit(_ old: APIGasEntry) {
+        saving = true
+        saveError = nil
+        let f = ISO8601DateFormatter()
+        Task {
+            let g = Double(gallons) ?? 0, p = Double(pricePerGallon) ?? 0
+            do {
+                if paidBy == "SELF" || paidBy == "PARENTS" {
+                    try await APIClient.patchGasEntry(.init(
+                        id: old.id, date: f.string(from: date), gallons: g, pricePerGallon: p,
+                        paidBy: paidBy, fuelType: fuelType.rawValue,
+                        stationName: stationName.isEmpty ? nil : stationName, odometer: Double(odometer)))
+                    // `vehicleName` isn't patchable on the server; replace the row when it changed.
+                    if vehicleName != old.vehicleName { try await replace(old, f: f, g: g, p: p) }
+                } else {
+                    try await replace(old, f: f, g: g, p: p)
+                }
+            } catch {
+                saving = false
+                saveError = "Couldn't save your changes. Check your connection and try again."
+                return
+            }
+            Haptics.success()
+            await onSaved?()
+            dismiss()
+        }
+    }
+
+    private func replace(_ old: APIGasEntry, f: ISO8601DateFormatter, g: Double, p: Double) async throws {
+        _ = try await APIClient.createGasEntry(APIGasEntryCreate(
+            date: f.string(from: date), gallons: g, pricePerGallon: p, paidBy: paidBy,
+            fuelType: fuelType.rawValue, stationName: stationName.isEmpty ? nil : stationName,
+            odometer: Double(odometer), vehicleName: vehicleName))
+        try await APIClient.deleteGasEntry(id: old.id)
     }
 }
