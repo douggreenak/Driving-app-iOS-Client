@@ -407,7 +407,7 @@ struct LogMissedDriveView: View {
         // doc comment; a manually-typed start/destination (no schedule picked) has none, so this is
         // just `[s, e]` in that case, same as before.
         let waypoints = [s] + prefilledStops.map(\.coordinate) + [e]
-        guard let result = await RouteMatcher.multiLegRoute(through: waypoints) else {
+        guard let result = await RouteMatcher.multiLegRoute(through: waypoints, departure: departure) else {
             routeError = "Couldn't find a driving route for these addresses. Check them and your connection."
             return
         }

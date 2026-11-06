@@ -416,9 +416,8 @@ struct DriveHomeView: View {
         // they stay consistent regardless of how long this fetch takes.
         var travelSeconds: Int?
         if let here = await goToLocator.current()?.coordinate {
-            let routes = await RouteMatcher.candidateRoutes(from: here, to: place.coordinate)
-            if let best = routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) {
-                travelSeconds = Int(best.expectedTravelTime)
+            if let best = await RouteMatcher.fastestRoute(from: here, to: place.coordinate) {
+                travelSeconds = Int(best.route.expectedTravelTime)
             }
         }
         let target = QuickTrip(name: place.label, coordinate: place.coordinate, travelSeconds: travelSeconds,
@@ -607,7 +606,7 @@ struct DepartureRow: View {
 
     var body: some View {
         let payer = PayerGroup.resolve(key: occ.drive.paidByRaw, in: payerGroups)
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Circle().fill(occ.startColor).frame(width: 7, height: 7)
@@ -628,7 +627,7 @@ struct DepartureRow: View {
             // the drive title next to it. `minWidth` lets the column grow, and swapping `.fixedSize()`
             // for `.minimumScaleFactor` lets the time shrink to fit instead of overflowing when it
             // can't.
-            .frame(minWidth: 86, alignment: .leading)
+            .frame(minWidth: 70, alignment: .leading)
 
             Rectangle().fill(.secondary.opacity(0.25)).frame(width: 1, height: 36)
 
@@ -637,7 +636,7 @@ struct DepartureRow: View {
                     Image(systemName: occ.drive.category.icon)
                         .font(.caption).foregroundStyle(.secondary)
                     Text(occ.drive.title)
-                        .font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.85)
+                        .font(.subheadline.weight(.semibold)).lineLimit(2).minimumScaleFactor(0.85)
                     Image(systemName: payer.icon)
                         .font(.caption2).foregroundStyle(payer.color)
                         .accessibilityLabel("Paid by \(payer.name)")

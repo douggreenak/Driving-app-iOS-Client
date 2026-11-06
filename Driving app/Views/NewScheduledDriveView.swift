@@ -289,7 +289,10 @@ struct NewScheduledDriveView: View {
         calculating = true
         routeError = nil
         let waypoints = [s] + pickedStops.map(\.coordinate) + [e]
-        let result = await RouteMatcher.multiLegRoute(through: waypoints)
+        // Predict with traffic as of the chosen departure time, and let each stop's dwell push the next
+        // leg's start later (rush hour at 8am ≠ midday).
+        let result = await RouteMatcher.multiLegRoute(through: waypoints, departure: departure,
+                                                      dwellSeconds: pickedStops.map { $0.dwellMinutes * 60 })
         // A newer edit (another stop picked, or removed) fired its own `recalcETA()` while this one
         // was in flight — MapKit's completion order doesn't match request order, so without this a
         // slower, now-stale response could land last and silently overwrite the fresher one (wrong

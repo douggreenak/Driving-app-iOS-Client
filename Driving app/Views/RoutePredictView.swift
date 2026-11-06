@@ -26,6 +26,7 @@ struct RoutePredictView: View {
         var miles: Double
         var seconds: Int
         var gallons: Double
+        var alternatives: Int = 1
         var coordinates: [CLLocationCoordinate2D]
         var avgMph: Double { seconds > 0 ? miles / (Double(seconds) / 3600) : 0 }
     }
@@ -36,6 +37,11 @@ struct RoutePredictView: View {
     @State private var calculating = false
     @State private var routeError: String?
     @State private var cameraPosition: MapCameraPosition = .automatic
+    /// Predict for leaving later (Apple Maps forecasts traffic for that time) instead of right now.
+    @State private var leaveLater = false
+    @State private var leaveAt = Date.now.addingTimeInterval(3600)
+    /// How many alternate routes Apple Maps offered across all legs (best of each was used).
+    @State private var alternativesCompared = 0
 
     private var fuelPrice: Double { settingsList.first?.fuelPricePerGallon ?? 3.75 }
     /// The MPG actually used for the estimate: the picked vehicle's, or `defaultMpg` when none is
@@ -123,6 +129,16 @@ struct RoutePredictView: View {
             }
             .buttonStyle(.plain).foregroundStyle(.blue)
 
+            Divider().overlay(.secondary.opacity(0.3))
+            Toggle(isOn: $leaveLater.animation()) {
+                Label("Leave at a specific time", systemImage: "clock")
+            }
+            .onChange(of: leaveLater) { _, _ in legs = [] }
+            if leaveLater {
+                DatePicker("Depart", selection: $leaveAt, in: Date.now...)
+                    .onChange(of: leaveAt) { _, _ in legs = [] }
+            }
+
             if !vehicles.isEmpty {
                 Divider().overlay(.secondary.opacity(0.3))
                 Picker("Vehicle", selection: $vehicleName) {
@@ -189,18 +205,18 @@ struct RoutePredictView: View {
         defer { calculating = false }
 
         var built: [Leg] = []
+        // Each leg departs when the previous one arrives, so traffic is forecast for the right time.
+        var legStart: Date? = leaveLater ? leaveAt : nil
         for i in 1..<stops.count {
             guard let from = stops[i - 1].coordinate, let to = stops[i].coordinate else { continue }
-            let request = MKDirections.Request()
-            request.source = MKMapItem(placemark: .init(coordinate: from))
-            request.destination = MKMapItem(placemark: .init(coordinate: to))
-            request.transportType = .automobile
             do {
-                let response = try await MKDirections(request: request).calculate()
-                guard let route = response.routes.first else {
+                // Apple Maps' fastest route among its alternates, by its own traffic-aware estimate.
+                guard let (route, alternatives) = await RouteMatcher.fastestRoute(from: from, to: to, departure: legStart)
+                else {
                     routeError = "Couldn't find a driving route for one of the legs."
                     return
                 }
+                legStart = legStart?.addingTimeInterval(route.expectedTravelTime)
                 let miles = route.distance / 1609.34
                 let seconds = Int(route.expectedTravelTime)
                 let avgMph = seconds > 0 ? miles / (Double(seconds) / 3600) : 0
@@ -210,13 +226,12 @@ struct RoutePredictView: View {
                 built.append(Leg(fromLabel: shortAddress(stops[i - 1].address),
                                  toLabel: shortAddress(stops[i].address),
                                  miles: miles, seconds: seconds, gallons: gallons,
+                                 alternatives: alternatives,
                                  coordinates: route.polyline.coordinates()))
-            } catch {
-                routeError = "Couldn't calculate the route. Check the addresses and your connection."
-                return
             }
         }
         legs = built
+        alternativesCompared = built.map(\.alternatives).max() ?? 1
         if let first = built.first?.coordinates.first {
             let coords = built.flatMap(\.coordinates)
             cameraPosition = .region(regionFitting(coords) ?? MKCoordinateRegion(
@@ -240,6 +255,17 @@ struct RoutePredictView: View {
                 metric(timeString(totalSeconds), "drive time")
                 Divider().frame(height: 34)
                 metric(String(format: "%.2f", totalGallons), "gallons")
+            }
+            Label(leaveLater
+                  ? "Apple Maps traffic forecast for \(leaveAt.formatted(date: .abbreviated, time: .shortened))"
+                  : "Apple Maps live traffic, leaving now",
+                  systemImage: "car.fill")
+                .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if alternativesCompared > 1 {
+                Text("Fastest of \(alternativesCompared) routes Apple Maps offered.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             Text("At \(fuelPrice, format: .currency(code: "USD"))/gal · \(Int(ratedMpg)) MPG (speed-adjusted per leg). Estimate only — not a recorded trip.")
                 .font(.caption2).foregroundStyle(.secondary)

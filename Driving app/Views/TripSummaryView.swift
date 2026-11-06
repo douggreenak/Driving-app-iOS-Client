@@ -9,6 +9,8 @@ struct TripSummaryView: View {
     let onSave: (TripCategory, String, String?) -> Void
     let onDiscard: () -> Void
     @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
+    @Query private var settingsList: [UserSettings]
+    @Environment(\.modelContext) private var modelContext
 
     @State private var category: TripCategory = .other
     @State private var paidBy: String = PayerGroup.selfKey
@@ -39,6 +41,7 @@ struct TripSummaryView: View {
                     paidByPicker
                     categoryPicker
                     notesField
+                    dontShowAgainToggle
                 }
                 .padding()
             }
@@ -78,9 +81,22 @@ struct TripSummaryView: View {
 
     /// A multi-stop drive is saved as one linked trip per leg, not a single trip with pauses.
     private var linkedTripsBanner: some View {
-        HStack(spacing: 10) {
+        let layovers = tracker.recordedLayovers
+        let connections = layovers.filter { Connection.isConnection($0) }
+        let splits = layovers.count - connections.count
+        var text = "Saved as one journey of \(connections.count + 1) linked trips"
+        if !connections.isEmpty {
+            text += " · connections: " + connections.map(Connection.label).joined(separator: ", ")
+        }
+        if splits > 0 {
+            text += ". \(splits) stop\(splits == 1 ? "" : "s") of 3h+ saved as separate trips."
+        }
+        if connections.isEmpty {
+            text = "Stops of 3h+ are saved as separate trips, not a journey."
+        }
+        return HStack(spacing: 10) {
             Image(systemName: "arrow.triangle.branch").foregroundStyle(.purple)
-            Text("Saved as \(tracker.recordedLegCount) linked trips — one per stop.")
+            Text(text)
                 .font(.caption).foregroundStyle(.secondary)
             Spacer()
         }
@@ -313,6 +329,23 @@ struct TripSummaryView: View {
                 }
             }
         }
+    }
+
+    /// "Don't show again": future drives save immediately on stop. Written straight to Settings, and
+    /// reversible there ("Trip Summary").
+    private var dontShowAgainToggle: some View {
+        Toggle(isOn: Binding(
+            get: { settingsList.first?.skipTripSummary ?? false },
+            set: { settingsList.first?.skipTripSummary = $0; try? modelContext.save() }
+        )) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Don't show this again").font(.subheadline)
+                Text("Drives will save automatically when you stop. Change anytime in Settings.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6), in: .rect(cornerRadius: 12))
     }
 
     private var notesField: some View {

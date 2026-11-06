@@ -45,9 +45,12 @@ struct LiveTrackingView: View {
     @State private var selectedVehicle: Vehicle?
     @State private var cameraPosition: MapCameraPosition = .userLocation(followsHeading: true, fallback: .automatic)
     @State private var followUser = true
+    /// The map camera's current heading (degrees from north) — drives the custom compass below.
+    @State private var mapHeading: Double = 0
     @State private var showingSummary = false
     @State private var showingVehiclePicker = false
     @State private var showingAddStop = false
+    @State private var showingDivertSearch = false
     @State private var recovered: DriveLogger.Recovered?
     /// Measured height of `bottomControls`, so `recenterButton` can sit just above it regardless of
     /// which of its several states (pre-start / paused / mid-route-with-fuel-chip / …) is showing.
@@ -112,7 +115,7 @@ struct LiveTrackingView: View {
                         recoveryBanner(recovered)
                     }
                     if tracker.isTracking {
-                        if tracker.isMultiLeg {
+                        if tracker.isMultiLeg, tracker.hasActiveTarget {
                             legProgressStrip
                         }
                         unifiedHUD
@@ -145,7 +148,10 @@ struct LiveTrackingView: View {
                     }
                 }
             }
-            .onAppear(perform: setup)
+            .onAppear {
+                setup()
+                if followUser, tracker.currentLocation != nil { cameraPosition = followCameraPosition() }
+            }
             // Bring CoreLocation up off the first-render path so the tab appears instantly the
             // first time; the map's user dot fills in a moment later. Also re-runs (harmlessly) every
             // time this view is reconstructed — e.g. restoring from minimized — since
@@ -189,6 +195,12 @@ struct LiveTrackingView: View {
                     lastRouteFetchFrom = nil  // force the guide line to re-route to the new next stop
                     refreshEfficientRoute()
                     activeDrive.pushLiveUpdate()
+                }
+            }
+            .sheet(isPresented: $showingDivertSearch) {
+                LocationSearchSheet(title: "Divert To") { picked in
+                    Haptics.tap()
+                    divert(to: RouteStop(address: picked.address, coordinate: picked.coordinate))
                 }
             }
         }
@@ -236,7 +248,7 @@ struct LiveTrackingView: View {
             } else if !tracker.points.isEmpty, !showingSummary {
                 // Stopped but never shown its summary — e.g. a watch-triggered "End Drive" that fired
                 // while this view was minimized (see `ActiveDriveController.handleEndFromWatch`).
-                showingSummary = true
+                presentSummaryOrAutoSave()
             }
             return
         }
@@ -327,14 +339,14 @@ struct LiveTrackingView: View {
             // Multi-leg: draw every intermediate stop — reached ones checked green, upcoming ones
             // dimmed & numbered — plus the final destination pin.
             ForEach(Array(tracker.legTargets.enumerated()), id: \.element.id) { i, target in
-                if i < tracker.legTargets.count - 1 {
+                if i < tracker.legTargets.count - 1 || !tracker.hasActiveTarget {
                     Annotation(target.address.isEmpty ? "Stop \(i + 1)" : target.address,
                                coordinate: target.coordinate) {
                         legStopPin(index: i)
                     }
                 }
             }
-            if let dest = tracker.legTargets.last?.coordinate ?? tracker.destination {
+            if tracker.hasActiveTarget, let dest = tracker.legTargets.last?.coordinate ?? tracker.destination {
                 Annotation(tracker.finalDestinationName ?? tracker.destinationName ?? "Destination", coordinate: dest) {
                     Image(systemName: "mappin.circle.fill")
                         .font(.title)
@@ -343,6 +355,20 @@ struct LiveTrackingView: View {
             }
         }
         .mapStyle(.standard(elevation: .flat))
+        // The system compass/user-location controls anchor to the top safe area — directly underneath
+        // the leg strip and stats HUD this screen stacks there, so they were drawn behind (or poking
+        // out of) those cards. Hidden in favour of `compassButton` / `recenterButton` at the bottom.
+        .mapControls { }
+        // Keep MapKit's logo / Legal link (and the camera's visual centre) clear of the bottom
+        // controls, which used to be drawn directly over them.
+        .safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: bottomControlsHeight + 8) }
+        // The very first location fix: set the (zoomed-out) follow camera right away. Waiting for a
+        // fix COUNT change left the pre-start map on MapKit's default street-level zoom until the phone
+        // moved, which it never does while parked.
+        .onChange(of: tracker.currentLocation != nil) { _, known in
+            if known, followUser { cameraPosition = followCameraPosition() }
+        }
+        .onMapCameraChange(frequency: .continuous) { ctx in mapHeading = ctx.camera.heading }
         // Apple-Maps behavior: panning or pinching the map breaks the follow lock; the recenter
         // button re-engages it.
         .simultaneousGesture(DragGesture(minimumDistance: 6).onChanged { _ in
@@ -371,7 +397,7 @@ struct LiveTrackingView: View {
                 // e.g. `recenterButton`'s, is already animated) into a smooth glide.
                 let heading = (tracker.currentCourse >= 0 && tracker.currentSpeed > 5) ? tracker.currentCourse : 0
                 withAnimation(.linear(duration: 0.9)) {
-                    cameraPosition = .camera(MapCamera(centerCoordinate: loc, distance: 900,
+                    cameraPosition = .camera(MapCamera(centerCoordinate: loc, distance: followDistance,
                                                        heading: heading, pitch: 0))
                 }
             }
@@ -483,18 +509,65 @@ struct LiveTrackingView: View {
     /// states (pre-start, paused-between-legs, mid-route with a fuel estimate chip), so the button
     /// sat on top of — and stole taps from — whatever was underneath it: the destination row's
     /// chevron pre-start, the leg recap's mileage while paused, the fuel chip mid-route.
+    /// How far out the follow camera sits (metres). Roughly 2.5× further than before, and it pulls back
+    /// as speed rises so a few blocks of road ahead stay visible at highway speed.
+    private var followDistance: Double {
+        switch tracker.currentSpeed {
+        case ..<25: return 2400
+        case ..<45: return 3600
+        default: return 5500
+        }
+    }
+
+    /// Camera centred on the user at the zoomed-out follow distance (falls back to MapKit's own
+    /// user-location camera until the first fix arrives).
+    private func followCameraPosition() -> MapCameraPosition {
+        guard let loc = tracker.currentLocation else {
+            return .userLocation(followsHeading: true, fallback: .automatic)
+        }
+        return .camera(MapCamera(centerCoordinate: loc, distance: followDistance, heading: 0, pitch: 0))
+    }
+
+    /// Appears only while the map is rotated (like the system compass); tap to snap back to north-up.
+    @ViewBuilder
+    private var compassButton: some View {
+        if abs(mapHeading.truncatingRemainder(dividingBy: 360)) > 1 {
+            Button {
+                Haptics.tap()
+                followUser = false
+                let center = tracker.currentLocation ?? .init(latitude: 0, longitude: 0)
+                withAnimation(.easeInOut(duration: 0.4)) {
+                    cameraPosition = .camera(MapCamera(centerCoordinate: center, distance: followDistance,
+                                                       heading: 0, pitch: 0))
+                }
+            } label: {
+                Image(systemName: "location.north.fill")
+                    .font(.title3)
+                    .foregroundStyle(.red)
+                    .rotationEffect(.degrees(-mapHeading))
+                    .padding(12)
+                    .background(.ultraThinMaterial, in: .circle)
+                    .shadow(radius: 4, y: 2)
+            }
+            .accessibilityLabel("Compass — reset to north")
+            .transition(.scale.combined(with: .opacity))
+        }
+    }
+
     private var recenterButton: some View {
         VStack {
             Spacer()
             HStack {
                 Spacer()
+                VStack(spacing: 10) {
+                compassButton
                 Button {
                     followUser = true
                     if let loc = tracker.currentLocation {
-                        withAnimation { cameraPosition = .region(MKCoordinateRegion(
-                            center: loc, span: MKCoordinateSpan(latitudeDelta: 0.008, longitudeDelta: 0.008))) }
+                        withAnimation { cameraPosition = .camera(MapCamera(
+                            centerCoordinate: loc, distance: followDistance, heading: 0, pitch: 0)) }
                     } else {
-                        cameraPosition = .userLocation(followsHeading: true, fallback: .automatic)
+                        cameraPosition = followCameraPosition()
                     }
                 } label: {
                     Image(systemName: "location.fill")
@@ -503,6 +576,7 @@ struct LiveTrackingView: View {
                         .padding(12)
                         .background(.ultraThinMaterial, in: .circle)
                         .shadow(radius: 4, y: 2)
+                }
                 }
                 .padding(.trailing, 20)
                 .padding(.bottom, bottomControlsHeight + 12)
@@ -636,11 +710,21 @@ struct LiveTrackingView: View {
                     // Mid-route legs get an "Arrived" primary that advances; the final leg ends the drive.
                     if tracker.isMultiLeg, !tracker.isOnFinalLeg {
                         arrivedButton
-                        endDriveButton(prominent: false)
+                        HStack(spacing: 8) {
+                            divertMenu(compact: false)
+                            endDriveButton(prominent: false)
+                        }
                     } else {
                         // A plain open or single-destination drive can still gain a destination or a
                         // stop on the fly — adding one turns it into a linked multi-stop journey.
-                        addStopButton
+                        if tracker.hasActiveTarget {
+                            HStack(spacing: 8) {
+                                addStopButton
+                                divertMenu(compact: false)
+                            }
+                        } else {
+                            addStopButton
+                        }
                         stopButton
                     }
                 }
@@ -672,6 +756,7 @@ struct LiveTrackingView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Leg \(tracker.reachedStopCount) complete").font(.subheadline.weight(.semibold))
                         Text("Logged as a separate linked trip").font(.caption2).foregroundStyle(.secondary)
+                        connectionTimer
                     }
                     Spacer()
                     if let s = tracker.lastLegStats {
@@ -702,19 +787,22 @@ struct LiveTrackingView: View {
                 refreshEfficientRoute()
                 activeDrive.pushLiveUpdate()
             } label: {
-                controlLabel(tracker.isOnFinalLeg ? "Start Final Leg" : "Start Next Trip", "location.fill", .blue)
+                controlLabel(!tracker.hasActiveTarget ? "Resume Driving"
+                             : (tracker.isOnFinalLeg ? "Start Final Leg" : "Start Next Trip"),
+                             "location.fill", .blue)
             }
 
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button { Haptics.tap(); showingAddStop = true } label: {
                     Label("Add stop", systemImage: "plus")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.blue)
+                        .font(.footnote.weight(.semibold)).foregroundStyle(.blue)
                         .frame(maxWidth: .infinity).padding(.vertical, 12)
                         .background(Color(.systemGray6), in: .capsule)
                 }
+                if tracker.hasActiveTarget { divertMenu(compact: true) }
                 Button { Haptics.rigid(); endDrive() } label: {
                     Label("End drive", systemImage: "stop.fill")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.red)
+                        .font(.footnote.weight(.semibold)).foregroundStyle(.red)
                         .frame(maxWidth: .infinity).padding(.vertical, 12)
                         .background(Color(.systemGray6), in: .capsule)
                 }
@@ -754,7 +842,62 @@ struct LiveTrackingView: View {
         withAnimation(.spring(duration: 0.4)) { tracker.stopTracking() }
         activeDrive.endLiveActivityWithFinalState()
         activeDrive.endLiveBroadcast()
-        showingSummary = true
+        presentSummaryOrAutoSave()
+    }
+
+    /// Show the "Trip Complete" sheet — unless the user turned it off in Settings ("Don't show
+    /// again"), in which case save straight away with the drive's planned category and payer.
+    private func presentSummaryOrAutoSave() {
+        if settingsList.first?.skipTripSummary == true {
+            saveTrip(category: tracker.plannedCategory, paidBy: tracker.plannedPaidBy, notes: nil)
+        } else {
+            showingSummary = true
+        }
+    }
+
+    /// Live connection timer shown while parked at a stop — time since arrival, flagged once the
+    /// stop is long enough that it'll be saved as the end of the trip rather than a connection.
+    @ViewBuilder
+    private var connectionTimer: some View {
+        if let since = tracker.parkedSince {
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                let secs = max(0, Int(ctx.date.timeIntervalSince(since)))
+                let isConn = Connection.isConnection(secs)
+                Label(isConn ? "Connection · \(Connection.label(secs))"
+                             : "Stopped \(Connection.label(secs)) · saves as separate trips",
+                      systemImage: "clock.arrow.circlepath")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(isConn ? Color.purple : Color.orange)
+                    .contentTransition(.numericText())
+            }
+        }
+    }
+
+    /// "Divert" — change where you're headed after the drive has started: pick another destination,
+    /// or drop the destination and just keep tracking.
+    private func divertMenu(compact: Bool) -> some View {
+        Menu {
+            Button { showingDivertSearch = true } label: {
+                Label("Choose New Destination…", systemImage: "mappin.and.ellipse")
+            }
+            Button(role: .destructive) { Haptics.tap(); divert(to: nil) } label: {
+                Label("No Destination (Just Track)", systemImage: "location.slash")
+            }
+        } label: {
+            Label("Divert", systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                .font(compact ? .footnote.weight(.semibold) : .subheadline.weight(.semibold))
+                .foregroundStyle(.orange)
+                .frame(maxWidth: .infinity).padding(.vertical, compact ? 12 : 13)
+                .background(Color(.systemGray6), in: .capsule)
+        }
+    }
+
+    private func divert(to stop: RouteStop?) {
+        withAnimation(.spring(duration: 0.3)) { tracker.divert(to: stop) }
+        efficientRoute = []
+        lastRouteFetchFrom = nil
+        refreshEfficientRoute()
+        activeDrive.pushLiveUpdate()
     }
 
     private func vehicleChip(_ vehicle: Vehicle) -> some View {
@@ -792,7 +935,7 @@ struct LiveTrackingView: View {
             endDrive()
         } label: {
             // "End Drive" for a routed (destination/multi-leg) drive; plain "Stop" for an open drive.
-            controlLabel(tracker.legTargets.isEmpty ? "Stop" : "End Drive", "stop.fill", .red)
+            controlLabel(!tracker.hasActiveTarget ? "Stop" : "End Drive", "stop.fill", .red)
         }
     }
 
@@ -822,8 +965,8 @@ struct LiveTrackingView: View {
     /// on the fly. The route becomes a linked multi-stop journey the moment a stop is added.
     private var addStopButton: some View {
         Button { Haptics.tap(); showingAddStop = true } label: {
-            Label(tracker.legTargets.isEmpty ? "Set destination" : "Add a stop",
-                  systemImage: tracker.legTargets.isEmpty ? "mappin.and.ellipse" : "plus.circle.fill")
+            Label(!tracker.hasActiveTarget ? "Set destination" : "Add a stop",
+                  systemImage: !tracker.hasActiveTarget ? "mappin.and.ellipse" : "plus.circle.fill")
                 .font(.subheadline.weight(.semibold)).foregroundStyle(.blue)
                 .frame(maxWidth: .infinity).padding(.vertical, 13)
                 .background(Color(.systemGray6), in: .capsule)
@@ -832,7 +975,7 @@ struct LiveTrackingView: View {
     }
 
     /// Sheet title reflects whether we're setting the first destination or adding a later stop.
-    private var addStopSheetTitle: String { tracker.legTargets.isEmpty ? "Set Destination" : "Add Stop" }
+    private var addStopSheetTitle: String { !tracker.hasActiveTarget ? "Set Destination" : "Add Stop" }
 
     /// Compact duration for a single leg's recap ("8m 12s" / "1h 4m").
     private func legDurationString(_ seconds: Int) -> String {
@@ -860,7 +1003,7 @@ struct LiveTrackingView: View {
         tracker.ratedMpg = selectedVehicle?.avgMpg
         tracker.startTracking()
         followUser = true
-        cameraPosition = .userLocation(followsHeading: true, fallback: .automatic)
+        cameraPosition = followCameraPosition()
         efficientRoute = []
         lastRouteFetchFrom = nil
         refreshEfficientRoute()
@@ -876,7 +1019,7 @@ struct LiveTrackingView: View {
         tracker.resume(from: rec)
         recovered = nil
         followUser = true
-        cameraPosition = .userLocation(followsHeading: true, fallback: .automatic)
+        cameraPosition = followCameraPosition()
         efficientRoute = []
         lastRouteFetchFrom = nil
         refreshEfficientRoute()
@@ -918,7 +1061,9 @@ struct LiveTrackingView: View {
         routeRequestID += 1
         let requestID = routeRequestID
         Task {
-            let routes = await RouteMatcher.candidateRoutes(from: from, to: dest)
+            // Fastest of Apple Maps' alternates (by its traffic-aware travel time).
+            let fastest = await RouteMatcher.fastestRoute(from: from, to: dest)
+            let routes = fastest.map { [$0.route] } ?? []
             await MainActor.run {
                 routeFetchInFlight = false
                 // Stale if a newer request has since been fired, or the leg target changed while
@@ -950,6 +1095,8 @@ struct LiveTrackingView: View {
         let vehMpg = selectedVehicle?.avgMpg
         let legTargets = tracker.legTargets
         let boundaries = tracker.legPointBoundaries
+        let divertedFrom = tracker.divertedFromName
+        let divertLeg = tracker.divertLegIndex
         // A simple A→B drive always adopts its destination name; a multi-leg drive that ends early —
         // parked at the last stop, or miles short of the endpoint — reverse-geocodes where it
         // actually stopped instead of claiming the final destination.
@@ -958,7 +1105,8 @@ struct LiveTrackingView: View {
             reachedFinal = tracker.isOnFinalLeg && !tracker.isPausedBetweenLegs
                 && (tracker.legRemainingMiles ?? .infinity) < 0.25
         } else {
-            reachedFinal = true
+            // A diverted-to-nowhere drive has no destination to claim — name where it really ended.
+            reachedFinal = tracker.hasActiveTarget
         }
         let finalName = tracker.finalDestinationName ?? tracker.destinationName
         // Dismiss + clear the crash log *synchronously* so the trip can't be saved twice (a second
@@ -980,7 +1128,8 @@ struct LiveTrackingView: View {
                 firstLegStart: schedStart, reachedFinal: reachedFinal, finalName: finalName,
                 category: category, paidBy: paidBy, notes: notes, tripName: tripName,
                 vehName: vehName, vehMpg: vehMpg,
-                scheduledDeparture: scheduledDeparture, scheduledArrival: scheduledArrival)
+                scheduledDeparture: scheduledDeparture, scheduledArrival: scheduledArrival,
+                divertedFrom: divertedFrom, divertLegIndex: divertLeg)
             await saveInputs(inputs)
         }
         finishAndExit()
@@ -990,10 +1139,24 @@ struct LiveTrackingView: View {
     /// drive had no leg with ≥2 points (not a recordable trip), so nothing is saved.
     @MainActor
     private func saveInputs(_ inputs: [TripStore.Input]) async {
-        switch inputs.count {
-        case 0: break
-        case 1: await TripStore.save(inputs[0], context: context)
-        default: await TripStore.saveJourney(inputs, context: context)
+        // A stop shorter than `Connection.maxLayover` is a *connection* inside one journey; a longer
+        // one ends the trip, so the legs on either side are saved as separate groups.
+        var groups: [[TripStore.Input]] = []
+        for input in inputs {
+            if !groups.isEmpty, Connection.isConnection(input.layoverSeconds) {
+                groups[groups.count - 1].append(input)
+            } else {
+                var first = input
+                first.layoverSeconds = 0
+                groups.append([first])
+            }
+        }
+        for group in groups {
+            if group.count == 1 {
+                await TripStore.save(group[0], context: context)
+            } else {
+                await TripStore.saveJourney(group, context: context)
+            }
         }
     }
 
@@ -1006,7 +1169,8 @@ struct LiveTrackingView: View {
         firstLegStart: String?, reachedFinal: Bool, finalName: String?,
         category: TripCategory, paidBy: String, notes: String?, tripName: String?,
         vehName: String?, vehMpg: Double?,
-        scheduledDeparture: Date?, scheduledArrival: Date?
+        scheduledDeparture: Date?, scheduledArrival: Date?,
+        divertedFrom: String? = nil, divertLegIndex: Int = 0
     ) async -> [TripStore.Input] {
         struct Seg { let legIndex: Int; let lo: Int; let hi: Int; let fromName: String?; let toName: String? }
         func stopName(_ idx: Int) -> String? {
@@ -1065,6 +1229,7 @@ struct LiveTrackingView: View {
 
         // 4. Build the inputs, reverse-geocoding any endpoint with no known name.
         var inputs: [TripStore.Input] = []
+        var prevLastTime: Date?
         for seg in valid {
             let legPts = Array(pts[seg.lo..<seg.hi])
             guard let first = legPts.first, let last = legPts.last else { continue }
@@ -1082,7 +1247,17 @@ struct LiveTrackingView: View {
                 input.scheduledDeparture = sched.dep
                 input.scheduledArrival = sched.arr
             }
+            // Connection time = parked gap since the previous surviving leg's last fix.
+            if let prevLast = prevLastTime {
+                input.layoverSeconds = max(0, Int(first.t.timeIntervalSince(prevLast)))
+            }
+            prevLastTime = last.t
             inputs.append(input)
+        }
+        // Mark the leg during which the driver changed course (else the last one).
+        if let divertedFrom, !inputs.isEmpty {
+            let idx = valid.firstIndex(where: { $0.legIndex == divertLegIndex }) ?? inputs.count - 1
+            inputs[min(idx, inputs.count - 1)].divertedFromName = divertedFrom
         }
 
         // 5. Pin journey-level notes to the first leg, and handle legacy schedules.
@@ -1152,14 +1327,15 @@ struct LiveTrackingView: View {
             firstLegStart: nil, reachedFinal: false, finalName: nil,
             category: category, paidBy: paidBy, notes: "Recovered drive", tripName: meta.tripName,
             vehName: meta.vehicleName, vehMpg: veh?.avgMpg,
-            scheduledDeparture: meta.scheduledDeparture, scheduledArrival: meta.scheduledArrival)
+            scheduledDeparture: meta.scheduledDeparture, scheduledArrival: meta.scheduledArrival,
+            divertedFrom: meta.divertedFromName, divertLegIndex: meta.divertLegIndex)
         await saveInputs(inputs)
     }
 
     private func stopIfNeededAndDismiss() {
         if tracker.isTracking {
             tracker.stopTracking()
-            showingSummary = true
+            presentSummaryOrAutoSave()
         } else {
             dismiss()
         }

@@ -7,13 +7,13 @@ struct TripMapView: View {
 
     var body: some View {
         Group {
-            if trips.isEmpty {
+            if trips.isEmpty || allCoords.isEmpty {
                 ContentUnavailableView("No Trips on Map", systemImage: "map",
                                        description: Text("Log trips to see them here"))
             } else {
                 Map(initialPosition: .region(.enclosing(allCoords))) {
                     ForEach(trips) { trip in
-                        let coords = trip.displayCoordinates
+                        let coords = trip.displayCoordinates.filter(\.isUsableCoordinate)
                         if coords.count >= 2 {
                             MapPolyline(coordinates: coords)
                                 .stroke(.blue.opacity(0.8), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
@@ -36,6 +36,15 @@ struct TripMapView: View {
     /// edges. Most obviously broken for a round trip, whose start and end are the same point (a
     /// degenerate zero-span "pair") despite the polyline actually drawn covering real ground.
     private var allCoords: [CLLocationCoordinate2D] {
-        trips.flatMap(\.displayCoordinates)
+        trips.flatMap(routeCoords(for:))
+    }
+
+    /// A trip's recorded route, or — when it has no stored track (e.g. imported / pre-update records) —
+    /// just its start and end points. Unusable (0, 0) coordinates are dropped: framing the camera on
+    /// an empty or all-zero list parked the whole map on the equator in the middle of the Atlantic.
+    private func routeCoords(for trip: DriveTrip) -> [CLLocationCoordinate2D] {
+        let route = trip.displayCoordinates.filter(\.isUsableCoordinate)
+        if route.count >= 2 { return route }
+        return [trip.startCoordinate, trip.endCoordinate].filter(\.isUsableCoordinate)
     }
 }

@@ -93,6 +93,7 @@ struct TripDetailView: View {
             mapHeader(d)
             VStack(spacing: 16) {
                 if trip.isManualEntry { manualEntryNotice }
+                if let from = trip.divertedFromName { divertedNotice(from) }
                 StatusBanner(status: .forTrip(delaySeconds: trip.delaySeconds))
                 scheduleCard
                 statsRow
@@ -181,6 +182,17 @@ struct TripDetailView: View {
     /// Shows every leg of the linked multi-stop journey this trip belongs to — the current leg
     /// highlighted, the others tappable — plus the journey totals. This is what makes the stops read
     /// as "separate trips that are linked" rather than one trip with pauses.
+    private func divertedNotice(_ from: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.triangle.turn.up.right.diamond.fill").foregroundStyle(.orange)
+            Text("Diverted from \(from) — this drive changed destination after it started.")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(.orange.opacity(0.14), in: .rect(cornerRadius: 12))
+    }
+
     private var journeyCard: some View {
         let legs = journeyLegs
         let totalMiles = legs.reduce(0) { $0 + $1.distance }
@@ -192,7 +204,7 @@ struct TripDetailView: View {
                 Text("\(legs.count) legs · \(String(format: "%.1f mi", totalMiles)) · \(durationString(totalSecs))")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text("One leg of a linked multi-stop trip. Each stop is recorded as its own trip.")
+            Text("One leg of a linked multi-stop trip. Stops under 3 hours are connections.")
                 .font(.caption2).foregroundStyle(.secondary)
             VStack(spacing: 0) {
                 ForEach(Array(legs.enumerated()), id: \.element.id) { i, leg in
@@ -221,7 +233,19 @@ struct TripDetailView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(isCurrent)
-                    if i < legs.count - 1 { Divider() }
+                    if i < legs.count - 1 {
+                        if legs[i + 1].layoverSeconds > 0 {
+                            HStack(spacing: 6) {
+                                Image(systemName: "clock.arrow.circlepath").font(.caption2)
+                                Text("Connection · \(Connection.label(legs[i + 1].layoverSeconds))")
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .foregroundStyle(.purple)
+                            .padding(.leading, 34).padding(.vertical, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        Divider()
+                    }
                 }
             }
         }
@@ -328,7 +352,8 @@ struct TripDetailView: View {
             Label(title, systemImage: icon)
                 .font(.headline)
                 .foregroundStyle(.white)
-                .lineLimit(1)
+                .lineLimit(2)
+                .minimumScaleFactor(0.85)
                 .multilineTextAlignment(align == .leading ? .leading : .trailing)
             Text(time, format: .dateTime.hour().minute())
                 .font(.subheadline)
@@ -826,6 +851,10 @@ struct TripRouteMap: View {
             Annotation("End", coordinate: end) { pin(endColor) }
         }
         .mapStyle(.standard(elevation: .flat))
+        // Reserve the strip the endpoint labels sit on: without this the labels were painted straight
+        // over the map's own End pin and the Apple Maps logo / Legal link (which MapKit requires stay
+        // visible). An inset moves both the attribution and the framed camera above the labels.
+        .safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: 78) }
         // `initialPosition` is consumed exactly once, at the map's first layout — `TripRouteMap`
         // keeps its view identity across re-renders (e.g. toggling the favorite star), so a new
         // `region` value after that (Trim Trip cutting a stationary tail, or a stop added via

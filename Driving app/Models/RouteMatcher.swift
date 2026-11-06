@@ -35,12 +35,16 @@ enum RouteMatcher {
     /// Set `allowAlternates` to false for live navigation (avoid slower alternate routes).
     static func candidateRoutes(from start: CLLocationCoordinate2D,
                                 to end: CLLocationCoordinate2D,
-                                allowAlternates: Bool = false) async -> [MKRoute] {
+                                allowAlternates: Bool = false,
+                                departure: Date? = nil) async -> [MKRoute] {
         let request = MKDirections.Request()
         request.source = MKMapItem(placemark: MKPlacemark(coordinate: start))
         request.destination = MKMapItem(placemark: MKPlacemark(coordinate: end))
         request.transportType = .automobile
         request.requestsAlternateRoutes = allowAlternates
+        // A departure time makes Apple Maps predict traffic for THAT time (rush hour vs. midnight)
+        // instead of just "typical". It must not be in the past, so it's clamped to now.
+        if let departure { request.departureDate = max(departure, Date()) }
         do {
             return try await MKDirections(request: request).calculate().routes
         } catch {
@@ -48,30 +52,43 @@ enum RouteMatcher {
         }
     }
 
+    /// Apple Maps' best driving route for a trip: asks for alternates (and for traffic at `departure`),
+    /// then takes the one with the lowest *expected travel time*, which MapKit computes with its traffic
+    /// model. Returns the route plus how many alternatives were compared.
+    static func fastestRoute(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D,
+                             departure: Date? = nil) async -> (route: MKRoute, alternatives: Int)? {
+        let routes = await candidateRoutes(from: start, to: end, allowAlternates: true, departure: departure)
+        guard let best = routes.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) else { return nil }
+        return (best, routes.count)
+    }
+
     /// Total expected travel seconds and the combined road polyline across an ordered list of
     /// waypoints (start → stops → destination), summing the fastest route for each leg. Returns nil
     /// if any leg has no available route (e.g. offline). Used for multi-stop scheduled drives and
     /// route cost prediction.
-    static func multiLegRoute(through waypoints: [CLLocationCoordinate2D])
+    ///
+    /// Each leg uses the FASTEST of Apple Maps' alternates (not just whichever it lists first), with
+    /// traffic predicted for when that leg would actually start: `departure` for the first leg, then
+    /// the previous leg's arrival (plus `dwellSeconds[i-1]` parked at the stop) for each next one.
+    static func multiLegRoute(through waypoints: [CLLocationCoordinate2D], departure: Date? = nil,
+                              dwellSeconds: [Int] = [])
         async -> (seconds: Int, coordinates: [CLLocationCoordinate2D], legSeconds: [Int], miles: Double)? {
         guard waypoints.count >= 2 else { return nil }
         var totalSeconds = 0
         var totalMeters = 0.0
         var coords: [CLLocationCoordinate2D] = []
         var legSeconds: [Int] = []
+        var legStart = departure
         for i in 1..<waypoints.count {
-            let request = MKDirections.Request()
-            request.source = MKMapItem(placemark: MKPlacemark(coordinate: waypoints[i - 1]))
-            request.destination = MKMapItem(placemark: MKPlacemark(coordinate: waypoints[i]))
-            request.transportType = .automobile
-            guard let response = try? await MKDirections(request: request).calculate(),
-                  let route = response.routes.first
+            guard let (route, _) = await fastestRoute(from: waypoints[i - 1], to: waypoints[i], departure: legStart)
             else { return nil }
             let s = Int(route.expectedTravelTime)
             totalSeconds += s
             totalMeters += route.distance
             legSeconds.append(s)
             coords.append(contentsOf: route.polyline.coordinates())
+            let dwell = (i - 1) < dwellSeconds.count ? dwellSeconds[i - 1] : 0
+            legStart = legStart?.addingTimeInterval(TimeInterval(s + dwell))
         }
         return (totalSeconds, coords, legSeconds, totalMeters / 1609.34)
     }

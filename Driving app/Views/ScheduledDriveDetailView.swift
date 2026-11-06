@@ -145,6 +145,10 @@ struct ScheduledDriveDetailView: View {
                 Annotation("Arrival", coordinate: drive.endCoordinate) { pin(endColor) }
             }
             .mapStyle(.standard(elevation: .flat))
+        // Reserve the strip the endpoint labels sit on: without this the labels were painted straight
+        // over the map's own End pin and the Apple Maps logo / Legal link (which MapKit requires stay
+        // visible). An inset moves both the attribution and the framed camera above the labels.
+        .safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: 78) }
             .frame(height: 280)
             // Was a ZStack layer between the map and the gradient/label row below, so BOTH later
             // layers painted on top of it — the darkest part of the 85%-black gradient and the white
@@ -208,7 +212,7 @@ struct ScheduledDriveDetailView: View {
     private func endpoint(_ title: String, _ time: Date, _ tint: Color, _ align: HorizontalAlignment, icon: String) -> some View {
         VStack(alignment: align, spacing: 2) {
             Label(title, systemImage: icon)
-                .font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(2).minimumScaleFactor(0.85)
             Text(time, format: .dateTime.hour().minute()).font(.caption).foregroundStyle(tint)
         }
         .frame(maxWidth: .infinity, alignment: align == .leading ? .leading : .trailing)
@@ -461,7 +465,9 @@ struct ScheduledDriveDetailView: View {
         // with an unusable (0, 0) stop or endpoint has nothing safe to route through at all — fall
         // straight to the raw-coordinate map fallback below instead of asking MapKit to plot a
         // course to Null Island.
-        if waypoints.count >= 2, let result = await RouteMatcher.multiLegRoute(through: waypoints) {
+        if waypoints.count >= 2, let result = await RouteMatcher.multiLegRoute(
+            through: waypoints, departure: departure,
+            dwellSeconds: drive.stops.map { $0.dwellMinutes * 60 }) {
             routeCoords = result.coordinates
             // Refresh the stored predicted travel time from the live optimal multi-leg route — but
             // only write (and only when it actually differs) so an ordinary re-visit that fetches

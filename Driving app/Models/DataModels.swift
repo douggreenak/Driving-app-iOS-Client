@@ -174,6 +174,15 @@ final class DriveTrip {
     var legIndex: Int = 0
     var legTotal: Int = 1
 
+    /// Seconds spent parked at this leg's starting stop before it began — the *connection* time
+    /// between the previous leg and this one (0 for the first leg / a standalone trip). Only legs
+    /// whose layover is under `Connection.maxLayover` are linked into a journey at all.
+    var layoverSeconds: Int = 0
+
+    /// Set when the driver changed course mid-drive: the name of the destination they originally
+    /// set out for. The trip's own end address is wherever they actually ended up.
+    var divertedFromName: String?
+
     var vehicleName: String?
     var vehicleMpg: Double?
     /// Speed-aware fuel estimate (gallons).
@@ -736,6 +745,9 @@ final class UserSettings {
     /// start here. Scheduled drives carry their own payer instead of using this. Stores a
     /// `PayerGroup.key`.
     var defaultPaidByRaw: String = PayerGroup.selfKey
+    /// When true, stopping a drive saves it straight away (using the drive's planned category and
+    /// payer) instead of presenting the "Trip Complete" summary sheet.
+    var skipTripSummary: Bool = false
 
     init(monthlyBudget: Double = 0, distanceUnit: String = "miles") {
         self.monthlyBudget = monthlyBudget

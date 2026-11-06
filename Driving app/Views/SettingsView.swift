@@ -229,6 +229,17 @@ struct SettingsView: View {
                     Text("The default payer for drives you start ad-hoc (Start a Drive or Go to). Scheduled drives use the payer set on the schedule, and you can still change any drive's payer afterward. Removing a group hides it from pickers but keeps its name on drives/fill-ups already logged with it.")
                 }
 
+                Section {
+                    Toggle("Show summary after each drive", isOn: Binding(
+                        get: { !currentSettings.skipTripSummary },
+                        set: { currentSettings.skipTripSummary = !$0; try? modelContext.save() }
+                    ))
+                } header: {
+                    Text("Trip Summary")
+                } footer: {
+                    Text("When off, stopping a drive saves it immediately using its planned category and payer, skipping the Trip Complete screen. You can still edit the trip afterward.")
+                }
+
                 Section("Distance Unit") {
                     Picker("Unit", selection: $unit) {
                         Text("Miles").tag("miles")

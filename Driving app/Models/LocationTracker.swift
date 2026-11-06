@@ -69,6 +69,19 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     /// paused between legs, so a parked errand isn't recorded as a stationary blob.
     private(set) var isRecording = false
 
+    /// Set once the driver changes course mid-drive (see `divert(to:)`): the destination they
+    /// originally set out for, and the leg that was under way when they changed it. Carried onto the
+    /// saved trip as "diverted from …".
+    var divertedFromName: String?
+    var divertLegIndex: Int = 0
+
+    /// True while there is somewhere to navigate to — false for an open drive, and after a diversion
+    /// to "no destination".
+    var hasActiveTarget: Bool { destination != nil }
+
+    /// When the current stop began (nil unless parked between legs) — the running connection timer.
+    var parkedSince: Date? { isPausedBetweenLegs ? legArrivals.last : nil }
+
     var isMultiLeg: Bool { legTargets.count > 1 }
     var totalLegs: Int { max(legTargets.count, 1) }
     /// The leg target we're currently driving toward, if any.
@@ -93,6 +106,23 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         }
         if points.count - prev >= 2 { count += 1 }
         return max(count, 1)
+    }
+
+    /// Seconds parked between each pair of consecutive recorded legs (so `count == recordedLegCount - 1`).
+    /// Measured from the recorded fixes: last fix of one leg to the first fix of the next. Drives the
+    /// connection-vs-separate-trip split at save time and the summary banner.
+    var recordedLayovers: [Int] {
+        var segs: [(lo: Int, hi: Int)] = []
+        var prev = 0
+        for b in legPointBoundaries where b > prev && b <= points.count {
+            if b - prev >= 2 { segs.append((prev, b)) }
+            prev = b
+        }
+        if points.count - prev >= 2 { segs.append((prev, points.count)) }
+        guard segs.count > 1 else { return [] }
+        return (1..<segs.count).map { i in
+            max(0, Int(points[segs[i].lo].t.timeIntervalSince(points[segs[i - 1].hi - 1].t)))
+        }
     }
 
     /// Distance (miles) and elapsed seconds of the most recently completed leg — the stretch between
@@ -200,6 +230,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         guard finalDestination.isUsableCoordinate else { return }
         var targets = stops.filter(\.coordinate.isUsableCoordinate)
         targets.append(RouteStop(address: finalName ?? "Destination", coordinate: finalDestination))
+        heldEta = nil
         legTargets = targets
         currentLegIndex = 0
         legArrivals = []
@@ -213,8 +244,10 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     /// but after everything already passed. With no route yet, the stop becomes the destination.
     func appendLiveStop(_ stop: RouteStop) {
         guard stop.coordinate.isUsableCoordinate else { return }
-        if legTargets.isEmpty {
-            legTargets = [stop]
+        heldEta = nil
+        if currentLegIndex >= legTargets.count {
+            // Open drive, or one diverted to "no destination": the new stop becomes the destination.
+            legTargets.append(stop)
             finalDestinationName = stop.address
         } else {
             legTargets.insert(stop, at: legTargets.count - 1)
@@ -223,10 +256,40 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         persistLegState()
     }
 
+    /// Change course mid-drive. Stops already reached are kept; everything still ahead is replaced by
+    /// `stop`, or dropped entirely when `stop` is nil — the drive then carries on as a plain tracked
+    /// drive with no destination. The original destination is remembered for the saved trip, and the
+    /// schedule's arrival time no longer applies, so the drive stops being graded on-time/late.
+    func divert(to stop: RouteStop?) {
+        guard isTracking else { return }
+        heldEta = nil
+        if divertedFromName == nil {
+            divertedFromName = finalDestinationName ?? destinationName ?? "Original destination"
+        }
+        divertLegIndex = currentLegIndex
+        var targets = Array(legTargets.prefix(min(currentLegIndex, legTargets.count)))
+        if let stop, stop.coordinate.isUsableCoordinate { targets.append(stop) }
+        legTargets = targets
+        scheduledArrival = nil
+        appleMapsExpectedTravelTime = nil
+        appleMapsTravelTimeFetchDate = nil
+        if let t = currentLegTarget {
+            destination = t.coordinate
+            destinationName = t.address
+            finalDestinationName = t.address
+        } else {
+            destination = nil
+            destinationName = nil
+            finalDestinationName = nil
+        }
+        persistLegState()
+    }
+
     /// Mark arrival at the current intermediate stop and pause before the next leg. No-op on the
     /// final leg (use `stopTracking()` there to end the drive).
     func arriveAtCurrentStop() {
         guard isMultiLeg, !isOnFinalLeg else { return }
+        heldEta = nil
         legArrivals.append(Date())
         // Close off this leg's recorded points so the finished drive can be split into per-leg trips.
         legPointBoundaries.append(points.count)
@@ -242,6 +305,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     /// Resume recording toward the next leg's target after a pause at a stop.
     func startNextLeg() {
         guard isPausedBetweenLegs else { return }
+        heldEta = nil
         isPausedBetweenLegs = false
         isRecording = true
         // Don't bridge the parked gap into distance/moving time or teleport the fuel estimate.
@@ -269,6 +333,8 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         isRecording = true
         isPausedBetweenLegs = false
         legPointBoundaries = []
+        divertedFromName = nil
+        divertLegIndex = 0
 
         logger.begin(meta: currentMeta())
 
@@ -283,6 +349,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             guard let self, let start = self.startTime else { return }
             self.elapsedSeconds = Int(Date().timeIntervalSince(start))
+            self.refreshHeldEta()
             self.onUpdate?()
         }
         // `Timer.scheduledTimer` schedules on `.default`, which the run loop stops servicing while a
@@ -312,7 +379,9 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
             currentLegIndex: currentLegIndex,
             legArrivals: legArrivals,
             isPaused: isPausedBetweenLegs,
-            legPointBoundaries: legPointBoundaries
+            legPointBoundaries: legPointBoundaries,
+            divertedFromName: divertedFromName,
+            divertLegIndex: divertLegIndex
         )
     }
 
@@ -374,7 +443,9 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         currentLegIndex = m.currentLegIndex
         legArrivals = m.legArrivals
         legPointBoundaries = m.legPointBoundaries
-        if let t = currentLegTarget { destination = t.coordinate }
+        divertedFromName = m.divertedFromName
+        divertLegIndex = m.divertLegIndex
+        if let t = currentLegTarget { destination = t.coordinate } else { destination = nil }
         isTracking = true
         isPausedBetweenLegs = m.isPaused
         isRecording = !m.isPaused
@@ -418,6 +489,9 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         isRecording = false
         legArrivals = []
         legPointBoundaries = []
+        divertedFromName = nil
+        divertLegIndex = 0
+        heldEta = nil
         finalDestinationName = nil
         appleMapsExpectedTravelTime = nil
         appleMapsTravelTimeFetchDate = nil
@@ -465,7 +539,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     /// the remaining legs (here → current target → … → final), inflated slightly to approximate
     /// roads. Drives the overall trip ETA and the scheduled-arrival delay.
     var remainingMiles: Double? {
-        guard let here = currentLocation else { return nil }
+        guard let here = currentLocation, destination != nil else { return nil }
         if legTargets.isEmpty {
             guard let destination else { return nil }
             return here.distanceMeters(to: destination) / 1609.34 * 1.3
@@ -500,7 +574,31 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
      }
 
      /// Overall arrival at the final destination, primarily using Apple Maps when available.
+     ///
+     /// While the car is stopped (red light, parked at a connection) this holds the last estimate made
+     /// while moving instead of recomputing it. A live estimate is `now + remaining / speed`, and with
+     /// the remaining distance unchanged `now` alone makes the arrival creep a second later every
+     /// second — the ETA "grew" for as long as the car sat still. Held, it only moves when the car does
+     /// (never earlier than now, so a very long stop can't leave it in the past).
      var etaDate: Date? {
+         guard let live = liveEtaDate else { return nil }
+         if isStoppedForEta, let held = heldEta { return max(held, Date()) }
+         return live
+     }
+
+     /// Last ETA computed while moving (or the first one computed before moving at all) — see `etaDate`.
+     private(set) var heldEta: Date?
+     /// True while recording and (nearly) motionless.
+     private var isStoppedForEta: Bool { isRecording && currentSpeed < 3 }
+
+     /// Re-seed/refresh the held ETA. Called every second and on every fix: while moving it tracks the
+     /// live estimate; while stopped it only seeds once (so the first estimate doesn't drift either).
+     private func refreshHeldEta() {
+         guard let live = liveEtaDate else { heldEta = nil; return }
+         if !isStoppedForEta || heldEta == nil { heldEta = live }
+     }
+
+     private var liveEtaDate: Date? {
          guard let remaining = remainingMiles else { return nil }
          let now = Date()
          if remaining < 0.05 { return now }
@@ -513,10 +611,12 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
          // showing "ETA (final)"/the Live Activity/the Watch minutes away when there are still legs
          // to go after this stop, and throwing off the on-time/delayed status computed from it.
          if isOnFinalLeg, let travelTime = appleMapsExpectedTravelTime, let fetchDate = appleMapsTravelTimeFetchDate {
-             // Only trust Apple Maps data if it's less than 30 seconds old (still fresh)
+             // Anchor on WHEN it was fetched (fetch time + Apple's travel time), not on `now`: the old
+             // `now + travelTime` slid later by a full second every second between refetches.
+             // Trust it for up to 3 minutes; the guide route refetches every ~250 m of driving.
              let age = now.timeIntervalSince(fetchDate)
-             if age < 30 {
-                 return now.addingTimeInterval(travelTime)
+             if age < 180 {
+                 return fetchDate.addingTimeInterval(travelTime)
              }
          }
 
@@ -533,8 +633,8 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
          // Prefer Apple Maps travel time when available and fresh
          if let travelTime = appleMapsExpectedTravelTime, let fetchDate = appleMapsTravelTimeFetchDate {
              let age = now.timeIntervalSince(fetchDate)
-             if age < 30 {
-                 return now.addingTimeInterval(travelTime)
+             if age < 180 {
+                 return fetchDate.addingTimeInterval(travelTime)
              }
          }
          
@@ -584,7 +684,7 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
             // no-ops via `pushLiveUpdate`'s own `tracker.isTracking` check when nothing's actually
             // under way, so the `isTracking` guard here is purely to skip the call while idle before
             // a drive even starts (map-dot-only fixes from `activateIdle()`).
-            if isTracking { onUpdate?() }
+            if isTracking { refreshHeldEta(); onUpdate?() }
 
             let mph = location.speed >= 0 ? location.speed * 2.23694 : 0
             if location.speed >= 0 {
@@ -678,6 +778,9 @@ final class DriveLogger {
         var isPaused: Bool = false
         /// Per-leg point-count boundaries so a recovered multi-stop drive still splits into legs.
         var legPointBoundaries: [Int] = []
+        /// Mid-drive diversion bookkeeping (see `LocationTracker.divert(to:)`).
+        var divertedFromName: String? = nil
+        var divertLegIndex: Int = 0
     }
 
     struct Recovered {
@@ -752,7 +855,7 @@ extension DriveLogger.Meta {
     enum CodingKeys: String, CodingKey {
         case start, destinationName, scheduledArrival, scheduledDeparture, category, vehicleName,
              tripName, paidBy, finalDestinationName, legTargets, currentLegIndex, legArrivals,
-             isPaused, legPointBoundaries
+             isPaused, legPointBoundaries, divertedFromName, divertLegIndex
     }
 
     /// Tolerant decode: synthesized `Decodable` throws `keyNotFound` for any missing key regardless
@@ -776,5 +879,7 @@ extension DriveLogger.Meta {
         legArrivals = try c.decodeIfPresent([Date].self, forKey: .legArrivals) ?? []
         isPaused = try c.decodeIfPresent(Bool.self, forKey: .isPaused) ?? false
         legPointBoundaries = try c.decodeIfPresent([Int].self, forKey: .legPointBoundaries) ?? []
+        divertedFromName = try c.decodeIfPresent(String.self, forKey: .divertedFromName)
+        divertLegIndex = try c.decodeIfPresent(Int.self, forKey: .divertLegIndex) ?? 0
     }
 }

@@ -33,6 +33,10 @@ enum TripStore {
         var journeyID: UUID? = nil
         var legIndex: Int = 0
         var legTotal: Int = 1
+        /// Seconds parked before this leg began (a connection), 0 for a first leg / standalone trip.
+        var layoverSeconds: Int = 0
+        /// Original destination, when the driver diverted away from it mid-drive.
+        var divertedFromName: String? = nil
     }
 
     @discardableResult
@@ -89,6 +93,8 @@ enum TripStore {
         trip.journeyID = input.journeyID
         trip.legIndex = input.legIndex
         trip.legTotal = input.legTotal
+        trip.layoverSeconds = input.layoverSeconds
+        trip.divertedFromName = input.divertedFromName
         context.insert(trip)
 
         // Attach the full track for playback / analysis.
@@ -221,9 +227,14 @@ enum TripStore {
                                               sortBy: [SortDescriptor(\.legIndex)])
         guard let legs = try? context.fetch(desc) else { return }
         if legs.count <= 1 {
-            for t in legs { t.journeyID = nil; t.legIndex = 0; t.legTotal = 1 }
+            for t in legs { t.journeyID = nil; t.legIndex = 0; t.legTotal = 1; t.layoverSeconds = 0 }
         } else {
-            for (i, t) in legs.enumerated() { t.legIndex = i; t.legTotal = legs.count }
+            for (i, t) in legs.enumerated() {
+                t.legIndex = i; t.legTotal = legs.count
+                // Connection time = gap since the previous surviving leg ended (a deleted leg in
+                // between merges into it); the first leg has no connection.
+                t.layoverSeconds = i == 0 ? 0 : max(0, Int(t.date.timeIntervalSince(legs[i - 1].endDate)))
+            }
         }
         try? context.save()
     }

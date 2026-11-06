@@ -6,12 +6,74 @@ struct TripsListView: View {
     @Environment(\.tabActivityToken) private var activityToken
     @Query(sort: \DriveTrip.date, order: .reverse) private var trips: [DriveTrip]
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
     @State private var searchText = ""
     @State private var pendingDelete: DriveTrip?
+    /// Compact one-and-a-half-line rows instead of the full card rows; remembered across launches.
+    @AppStorage("tripsDenseMode") private var dense = false
+    @State private var categoryFilter: TripCategory?
+    @State private var payerFilter: String?
+    @State private var period: Period = .all
+    @State private var kindFilter: Kind = .all
+
+    enum Period: String, CaseIterable, Identifiable {
+        case all = "All time", week = "Past 7 days", month = "Past 30 days", year = "Past year"
+        var id: String { rawValue }
+        var cutoff: Date? {
+            let cal = Calendar.current
+            switch self {
+            case .all: return nil
+            case .week: return cal.date(byAdding: .day, value: -7, to: .now)
+            case .month: return cal.date(byAdding: .day, value: -30, to: .now)
+            case .year: return cal.date(byAdding: .year, value: -1, to: .now)
+            }
+        }
+    }
+
+    enum Kind: String, CaseIterable, Identifiable {
+        case all = "All trips", journeys = "Journeys", diverted = "Diverted", favorites = "Favorites",
+             manual = "Logged manually"
+        var id: String { rawValue }
+        var icon: String {
+            switch self {
+            case .all: "road.lanes"
+            case .journeys: "arrow.triangle.branch"
+            case .diverted: "arrow.triangle.turn.up.right.diamond.fill"
+            case .favorites: "star.fill"
+            case .manual: "square.and.pencil"
+            }
+        }
+        func matches(_ t: DriveTrip) -> Bool {
+            switch self {
+            case .all: true
+            case .journeys: t.isJourneyLeg
+            case .diverted: t.divertedFromName != nil
+            case .favorites: t.isFavorite
+            case .manual: t.isManualEntry
+            }
+        }
+    }
+
+    private var hasActiveFilters: Bool {
+        categoryFilter != nil || payerFilter != nil || period != .all || kindFilter != .all
+    }
+
+    private func clearFilters() {
+        categoryFilter = nil; payerFilter = nil; period = .all; kindFilter = .all
+    }
 
     private var filtered: [DriveTrip] {
-        if searchText.isEmpty { return trips }
-        return trips.filter {
+        let cutoff = period.cutoff
+        let base = trips.filter { t in
+            (categoryFilter == nil || t.category == categoryFilter)
+                && (payerFilter == nil || t.paidByRaw == payerFilter)
+                && (cutoff == nil || t.date >= cutoff!)
+                && kindFilter.matches(t)
+        }
+        if searchText.isEmpty { return base }
+        return base.filter {
+            $0.category.label.localizedCaseInsensitiveContains(searchText) ||
+            ($0.notes?.localizedCaseInsensitiveContains(searchText) ?? false) ||
             $0.startAddress.localizedCaseInsensitiveContains(searchText) ||
             $0.endAddress.localizedCaseInsensitiveContains(searchText) ||
             ($0.name?.localizedCaseInsensitiveContains(searchText) ?? false) ||
@@ -30,14 +92,24 @@ struct TripsListView: View {
                     ContentUnavailableView("No Trips Yet", systemImage: "road.lanes",
                                            description: Text("Record a drive from the Drive tab and it'll show up here."))
                 } else if filtered.isEmpty {
-                    ContentUnavailableView.search(text: searchText)
+                    if hasActiveFilters {
+                        ContentUnavailableView {
+                            Label("No Matching Trips", systemImage: "line.3.horizontal.decrease.circle")
+                        } description: {
+                            Text("No trips match the current filters.")
+                        } actions: {
+                            Button("Clear Filters") { clearFilters() }
+                        }
+                    } else {
+                        ContentUnavailableView.search(text: searchText)
+                    }
                 } else {
                     List {
                         ForEach(filtered) { trip in
                             NavigationLink {
                                 TripDetailView(trip: trip)
                             } label: {
-                                TripRow(trip: trip)
+                                if dense { DenseTripRow(trip: trip) } else { TripRow(trip: trip) }
                             }
                             .swipeActions(edge: .trailing) {
                                 Button(role: .destructive) { pendingDelete = trip } label: {
@@ -49,6 +121,9 @@ struct TripsListView: View {
                 }
             }
             .background(.black)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if hasActiveFilters { activeFilterBar }
+            }
             .navigationTitle("Trips")
             .navigationBarTitleDisplayMode(.inline)
             // Was on the `List` inside the non-empty `else` branch above — the moment a search query
@@ -72,7 +147,15 @@ struct TripsListView: View {
             // `TripStore.pullRemoteEdits`), but edits to those few fields now sync both ways.
             .task(id: activityToken) { await refresh() }
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        Haptics.tap()
+                        withAnimation(.snappy) { dense.toggle() }
+                    } label: {
+                        Image(systemName: dense ? "list.bullet.below.rectangle" : "list.bullet")
+                    }
+                    .accessibilityLabel(dense ? "Switch to detailed rows" : "Switch to dense rows")
+                    filterMenu
                     NavigationLink { TripMapView() } label: { Image(systemName: "map") }
                         .accessibilityLabel("Trip map")
                 }
@@ -89,6 +172,78 @@ struct TripsListView: View {
                 Text("This permanently removes the recorded drive and its track.")
             }
         }
+    }
+
+    // MARK: - Filters
+
+    private var filterMenu: some View {
+        Menu {
+            Picker("Period", selection: $period) {
+                ForEach(Period.allCases) { Text($0.rawValue).tag($0) }
+            }
+            Picker("Type", selection: $kindFilter) {
+                ForEach(Kind.allCases) { Label($0.rawValue, systemImage: $0.icon).tag($0) }
+            }
+            Menu("Category") {
+                Picker("Category", selection: $categoryFilter) {
+                    Text("Any category").tag(TripCategory?.none)
+                    ForEach(TripCategory.allCases, id: \.self) { c in
+                        Label(c.label, systemImage: c.icon).tag(TripCategory?.some(c))
+                    }
+                }
+            }
+            Menu("Paid by") {
+                Picker("Paid by", selection: $payerFilter) {
+                    Text("Anyone").tag(String?.none)
+                    ForEach(payerGroups) { g in
+                        Label(g.name, systemImage: g.icon).tag(String?.some(g.key))
+                    }
+                }
+            }
+            if hasActiveFilters {
+                Divider()
+                Button("Clear Filters", role: .destructive) { clearFilters() }
+            }
+        } label: {
+            Image(systemName: hasActiveFilters
+                  ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+        }
+        .accessibilityLabel("Filter trips")
+    }
+
+    /// Chips for whatever filters are on, plus a live result count and a one-tap clear.
+    private var activeFilterBar: some View {
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    if period != .all { chip(period.rawValue, "calendar") { period = .all } }
+                    if kindFilter != .all { chip(kindFilter.rawValue, kindFilter.icon) { kindFilter = .all } }
+                    if let c = categoryFilter { chip(c.label, c.icon) { categoryFilter = nil } }
+                    if let k = payerFilter {
+                        let g = PayerGroup.resolve(key: k, in: payerGroups)
+                        chip(g.name, g.icon) { payerFilter = nil }
+                    }
+                }
+            }
+            Text("\(filtered.count) trip\(filtered.count == 1 ? "" : "s")")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Button("Clear") { clearFilters() }.font(.caption.weight(.semibold))
+        }
+        .padding(.horizontal).padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    private func chip(_ text: String, _ icon: String, remove: @escaping () -> Void) -> some View {
+        Button(action: remove) {
+            HStack(spacing: 4) {
+                Image(systemName: icon).font(.caption2)
+                Text(text).font(.caption.weight(.medium))
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+            }
+            .padding(.horizontal, 9).padding(.vertical, 5)
+            .background(Color.accentColor.opacity(0.2), in: .capsule)
+        }
+        .buttonStyle(.plain)
     }
 
     private func refresh() async {
@@ -109,6 +264,63 @@ struct TripsListView: View {
     }
 }
 
+/// Dense variant: route on the first line with distance, one caption line for everything else.
+private struct DenseTripRow: View {
+    let trip: DriveTrip
+    @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
+    @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                if trip.isJourneyLeg {
+                    Image(systemName: "arrow.triangle.branch").font(.caption2).foregroundStyle(.purple)
+                }
+                if trip.divertedFromName != nil {
+                    Image(systemName: "arrow.triangle.turn.up.right.diamond.fill")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+                Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                Spacer(minLength: 4)
+                Text(String(format: "%.1f mi", trip.distance))
+                    .font(.subheadline.weight(.semibold)).monospacedDigit()
+            }
+            HStack(spacing: 6) {
+                Group {
+                    Text(dateLabel(trip.date))
+                    Text("· \(Fmt.duration(trip.duration))")
+                    Image(systemName: trip.category.icon)
+                    if trip.layoverSeconds > 0 { Text("· ⏱ \(Connection.label(trip.layoverSeconds))") }
+                }
+                .fixedSize()
+                if let n = trip.name, !n.isEmpty { Text("· \(n)").lineLimit(1) }
+                Spacer(minLength: 4)
+                if trip.delaySeconds != nil {
+                    StatusChip(status: .forTrip(delaySeconds: trip.delaySeconds), compact: true)
+                }
+                if !trip.synced { Image(systemName: "icloud.slash") }
+                PayerChip(PayerGroup.resolve(key: trip.paidByRaw, in: payerGroups), compact: true)
+            }
+            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+        }
+        .padding(.vertical, 0)
+    }
+
+    private var title: String {
+        let a = PlaceNamer.name(for: trip.startCoordinate, fallback: trip.startAddress, in: savedPlaces)
+        let b = PlaceNamer.name(for: trip.endCoordinate, fallback: trip.endAddress, in: savedPlaces)
+        return "\(a) → \(b)"
+    }
+
+    private func dateLabel(_ date: Date) -> String {
+        let cal = Calendar.current
+        let time = date.formatted(.dateTime.hour().minute())
+        if cal.isDateInToday(date) { return "Today \(time)" }
+        if cal.isDateInYesterday(date) { return "Yest. \(time)" }
+        return date.formatted(.dateTime.month(.abbreviated).day())
+    }
+}
+
 private struct TripRow: View {
     let trip: DriveTrip
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
@@ -125,6 +337,15 @@ private struct TripRow: View {
                 .foregroundStyle(.purple)
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(.purple.opacity(0.18), in: .capsule)
+                if trip.layoverSeconds > 0 {
+                    Label("Connection · \(Connection.label(trip.layoverSeconds)) before this leg",
+                          systemImage: "clock.arrow.circlepath")
+                        .font(.caption2.weight(.semibold)).foregroundStyle(.purple)
+                }
+            }
+            if let from = trip.divertedFromName {
+                Label("Diverted from \(from)", systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                    .font(.caption2.weight(.semibold)).foregroundStyle(.orange).lineLimit(1)
             }
             if trip.isManualEntry {
                 HStack(spacing: 5) {
