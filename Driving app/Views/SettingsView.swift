@@ -70,9 +70,49 @@ struct SettingsView: View {
         return vehicles.contains { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }
     }
 
+    private var cloudSyncSection: some View {
+        let s = CloudSyncStatus.shared
+        return Section {
+            HStack {
+                Label(s.isRunning ? (s.step.isEmpty ? "Syncing…" : s.step) : "Cloud sync",
+                      systemImage: s.isRunning ? "arrow.triangle.2.circlepath" : "icloud")
+                Spacer()
+                if s.isRunning { ProgressView() }
+                else if s.lastError != nil { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
+                else if s.lastRun != nil { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+            }
+            if let last = s.lastRun {
+                Text("Last synced \(last.formatted(.relative(presentation: .named)))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let err = s.lastError {
+                Text(err).font(.caption).foregroundStyle(.orange)
+            }
+            if s.remoteTripTotal > 0 {
+                Text("\(s.remoteTripTotal) trips in the cloud" +
+                     (s.tripsRestoredThisRun > 0 ? " · restored \(s.tripsRestoredThisRun) this pass" : "") +
+                     (s.pendingPointDownloads > 0 ? " · \(s.pendingPointDownloads) tracks still to download" : ""))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Button {
+                Haptics.tap()
+                Task { await CloudSync.run(context: modelContext, force: true, deep: true) }
+            } label: {
+                Label("Sync & Restore Now", systemImage: "arrow.clockwise.icloud")
+            }
+            .disabled(s.isRunning)
+        } header: {
+            Text("Cloud Sync")
+        } footer: {
+            Text("Everything is mirrored to your cloud database. Restoring only ever adds missing trips, tracks, cars, places and payer groups — it never deletes or overwrites anything on this phone.")
+        }
+    }
+
     var body: some View {
         NavigationStack {
             Form {
+                cloudSyncSection
+
                 Section("Monthly Gas Budget") {
                     HStack {
                         Text("$")

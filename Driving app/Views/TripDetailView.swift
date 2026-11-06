@@ -69,6 +69,9 @@ struct TripDetailView: View {
             }
         }
         .task(id: derivedKey) { derived = TripDerived(trip: trip); loadJourneyLegs() }
+        // A trip restored from the cloud arrives without its GPS track; fetch it the first time it's
+        // opened (the derived stats/map above refresh themselves when the points land).
+        .task { await CloudSync.restorePoints(for: trip) }
         .fullScreenCover(isPresented: $showPlayback) {
             NavigationStack { RoutePlaybackView(trip: trip) }
         }

@@ -165,6 +165,9 @@ struct ContentView: View {
         // drive is running right now" (its log file makes it "recoverable" too) regardless of how
         // many times this runs, not just at first launch.
         .task(id: activityToken) {
+            // Cloud sync first: it restores anything the cloud has that this device doesn't and links
+            // already-uploaded trips BEFORE `syncPending` could upload a duplicate.
+            await CloudSync.run(context: modelContext)
             await TripStore.syncPending(context: modelContext)
             await TripStore.backfillPaidBy(context: modelContext)
             #if canImport(ActivityKit) && !os(macOS)

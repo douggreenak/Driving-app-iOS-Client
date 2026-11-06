@@ -118,18 +118,39 @@ struct APIClient {
 
     // MARK: - HTTP Helpers
 
-    private static func get(_ path: String) async throws -> Data {
+    static func get(_ path: String) async throws -> Data {
         try await request("GET", path, body: nil)
     }
 
-    private static func post(_ path: String, body: Data) async throws -> Data {
+    static func post(_ path: String, body: Data) async throws -> Data {
         try await request("POST", path, body: body)
     }
 
-    enum APIError: Error { case http(Int) }
+    enum APIError: Error {
+        case http(Int)
+        /// A write was attempted against the LIVE server from a simulator debug build — blocked so
+        /// test runs can never push test data into real user data. See `request`.
+        case writeBlockedInDebug
+    }
 
-    private static func request(_ method: String, _ path: String, body: Data?) async throws -> Data {
-        var req = URLRequest(url: URL(string: baseURL + path)!)
+    /// Where requests go. Simulator debug runs can point at a local mock server by setting
+    /// `DRIVE_API_BASE_URL`; everything else uses the live backend.
+    static var effectiveBaseURL: String {
+        #if DEBUG
+        if let o = ProcessInfo.processInfo.environment["DRIVE_API_BASE_URL"], !o.isEmpty { return o }
+        #endif
+        return baseURL
+    }
+
+    static func request(_ method: String, _ path: String, body: Data?) async throws -> Data {
+        // SAFETY: a debug build running in the iOS Simulator must never WRITE to the live server —
+        // test data created while exercising the app would otherwise land in the real database.
+        // Reads (GET) are still allowed (they only copy real data down into the simulator's local
+        // store), and writes work normally against a mock server set via `DRIVE_API_BASE_URL`.
+        #if DEBUG && targetEnvironment(simulator)
+        if method != "GET", effectiveBaseURL == baseURL { throw APIError.writeBlockedInDebug }
+        #endif
+        var req = URLRequest(url: URL(string: effectiveBaseURL + path)!)
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
@@ -207,6 +228,26 @@ struct APITripCreate: Codable {
     let paidBy: String
     var stops: [RouteStop] = []
     var routeEncoded: String? = nil
+    // Full-fidelity fields the backend stores (see `/api/trips` POST) so a trip can be fully
+    // restored on a fresh install — not just summarized.
+    var endDate: String? = nil
+    var movingSeconds: Int? = nil
+    var maxSpeed: Double? = nil
+    var avgSpeed: Double? = nil
+    var name: String? = nil
+    var matchedPolyline: String? = nil
+    var matchedFraction: Double? = nil
+    var usedRouteMatching: Bool? = nil
+    var isFavorite: Bool? = nil
+    var vehicleName: String? = nil
+    var vehicleMpg: Double? = nil
+    var estimatedGallons: Double? = nil
+    var scheduledDeparture: String? = nil
+    var scheduledArrival: String? = nil
+    var journeyId: String? = nil
+    var legIndex: Int? = nil
+    var legTotal: Int? = nil
+    var isManualEntry: Bool? = nil
 }
 
 // MARK: Scheduled drives

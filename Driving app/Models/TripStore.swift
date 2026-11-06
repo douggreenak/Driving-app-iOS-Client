@@ -403,27 +403,15 @@ enum TripStore {
             // this same trip can complete (flipping `synced` and freeing the slot) during an earlier
             // iteration's `await`, so without this a backlog would upload it a second time.
             if trip.synced { continue }
-            let f = ISO8601DateFormatter()
-            let create = APITripCreate(
-                date: f.string(from: trip.date),
-                startAddress: trip.startAddress,
-                endAddress: trip.endAddress,
-                startLat: trip.startLat, startLng: trip.startLng,
-                endLat: trip.endLat, endLng: trip.endLng,
-                distance: trip.distance,
-                duration: max(1, (trip.duration + 30) / 60),
-                notes: trip.notes,
-                category: trip.categoryRaw,
-                paidBy: trip.paidByRaw,
-                stops: trip.stops,
-                routeEncoded: Polyline.encode(trip.displayCoordinates)
-            )
+            let create = makeCreate(for: trip)
             if let remote = try? await APIClient.createTrip(create) {
                 trip.remoteID = remote.id
                 trip.synced = true
                 synced += 1
+                try? context.save()  // persist right away so a crash can't re-upload it
+                await CloudSync.uploadPoints(for: trip)
             }
-            try? context.save()  // persist each result immediately so a crash can't re-upload it
+            try? context.save()
         }
         return synced
     }
@@ -478,8 +466,22 @@ enum TripStore {
         guard !trip.synced, !uploading.contains(trip.id) else { return }
         uploading.insert(trip.id)
         defer { uploading.remove(trip.id) }
+        let create = makeCreate(for: trip, routeCoords: displayCoords)
+        if let remote = try? await APIClient.createTrip(create) {
+            trip.remoteID = remote.id
+            trip.synced = true
+            // Persist the synced flag now so an app kill before SwiftData's autosave can't
+            // re-upload this trip on next launch (a second duplicate remote row).
+            try? trip.modelContext?.save()
+            await CloudSync.uploadPoints(for: trip)
+        }
+    }
+
+    /// The full-fidelity create payload for a trip — every field the backend stores, so the cloud
+    /// copy can fully restore it (track points go separately via `CloudSync.uploadPoints`).
+    static func makeCreate(for trip: DriveTrip, routeCoords: [CLLocationCoordinate2D]? = nil) -> APITripCreate {
         let f = ISO8601DateFormatter()
-        let create = APITripCreate(
+        var c = APITripCreate(
             date: f.string(from: trip.date),
             startAddress: trip.startAddress,
             endAddress: trip.endAddress,
@@ -491,17 +493,26 @@ enum TripStore {
             notes: trip.notes,
             category: trip.categoryRaw,
             paidBy: trip.paidByRaw,
-            // Include the multi-stop stops on the primary sync path too — this trip is marked
-            // `synced` right after, so `syncPending` (which does send stops) never revisits it.
             stops: trip.stops,
-            routeEncoded: Polyline.encode(displayCoords)
-        )
-        if let remote = try? await APIClient.createTrip(create) {
-            trip.remoteID = remote.id
-            trip.synced = true
-            // Persist the synced flag now so an app kill before SwiftData's autosave can't
-            // re-upload this trip on next launch (a second duplicate remote row).
-            try? trip.modelContext?.save()
-        }
+            routeEncoded: Polyline.encode(routeCoords ?? trip.displayCoordinates))
+        c.endDate = f.string(from: trip.endDate)
+        c.movingSeconds = trip.movingSeconds
+        c.maxSpeed = trip.maxSpeed
+        c.avgSpeed = trip.avgSpeed
+        c.name = trip.name
+        c.matchedPolyline = trip.matchedPolyline?.base64EncodedString()
+        c.matchedFraction = trip.matchedFraction
+        c.usedRouteMatching = trip.usedRouteMatching
+        c.isFavorite = trip.isFavorite
+        c.vehicleName = trip.vehicleName
+        c.vehicleMpg = trip.vehicleMpg
+        c.estimatedGallons = trip.estimatedGallons
+        c.scheduledDeparture = trip.scheduledDeparture.map { f.string(from: $0) }
+        c.scheduledArrival = trip.scheduledArrival.map { f.string(from: $0) }
+        c.journeyId = trip.journeyID?.uuidString
+        c.legIndex = trip.legIndex
+        c.legTotal = trip.legTotal
+        c.isManualEntry = trip.isManualEntry
+        return c
     }
 }
