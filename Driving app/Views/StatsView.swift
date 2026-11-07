@@ -16,6 +16,7 @@ struct StatsView: View {
 
     private var fuelPrice: Double { settingsList.first?.fuelPricePerGallon ?? 3.75 }
 
+    @State private var memo = StatsMemo()
     @State private var gas: APIStats?
     @State private var lastUpdated: Date?
     @State private var isRefreshing = false
@@ -48,7 +49,7 @@ struct StatsView: View {
                 // only ever caught up if some OTHER screen (Trips) happened to pull the edit in first,
                 // which then propagated here for free via the shared `@Query`. Matches this tab
                 // exactly: pull-to-refresh does nothing, but leaving and coming back (via Trips) does.
-                .refreshable { await TripStore.pullRemoteEdits(context: context); await loadGas() }
+                .refreshable { await TripStore.pullRemoteEdits(context: context, force: true); await loadGas() }
                 // `.task(id:)` so this refetches on every tab revisit / app-foreground, not just the
                 // first time this view is created (a bare `.task` doesn't refire on a tab switch).
                 .task(id: activityToken) { await TripStore.pullRemoteEdits(context: context); await loadGas() }
@@ -59,7 +60,13 @@ struct StatsView: View {
         // Compute the (potentially large) stats roll-up once per render instead of once per section.
         let fillUps = Dictionary(vehicles.compactMap { v in v.lastFilledUp.map { (v.name, $0) } },
                                  uniquingKeysWith: { a, _ in a })
-        let stats = DrivingStats(trips: allTrips, fillUps: fillUps)
+        // Recomputed only when the trips (or fill-up dates) actually change — not on every redraw
+        // (the gas load, the refresh spinner, a tab flip each used to re-run the whole roll-up).
+        var h = Hasher()
+        h.combine(allTrips.count)
+        for t in allTrips { h.combine(t.date); h.combine(t.categoryRaw); h.combine(t.paidByRaw); h.combine(t.distance) }
+        for (k, v) in fillUps.sorted(by: { $0.key < $1.key }) { h.combine(k); h.combine(v) }
+        let stats = memo.stats(token: h.finalize()) { DrivingStats(trips: allTrips, fillUps: fillUps) }
         let widgets = orderedWidgets.filter { !hiddenWidgets.contains($0) && isAvailable($0, stats) }
         return VStack(spacing: 20) {
             if allTrips.isEmpty { emptyState }
@@ -524,5 +531,19 @@ struct StatsLayoutEditor: View {
     private func persist() {
         savedOrder = order.map(\.rawValue).joined(separator: ",")
         savedHidden = hidden.map(\.rawValue).joined(separator: ",")
+    }
+}
+
+
+/// Holds the last computed `DrivingStats` so a redraw with unchanged trips doesn't recompute it.
+/// A plain class on purpose: updating it during `body` must not itself trigger another render.
+final class StatsMemo {
+    private var token: Int?
+    private var value: DrivingStats?
+    func stats(token: Int, compute: () -> DrivingStats) -> DrivingStats {
+        if let value, self.token == token { return value }
+        let v = compute()
+        self.token = token; self.value = v
+        return v
     }
 }

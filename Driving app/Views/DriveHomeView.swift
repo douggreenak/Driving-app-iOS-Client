@@ -31,6 +31,7 @@ struct DriveHomeView: View {
     /// scrolls, so a repeating drive's series is effectively infinite instead of stopping early.
     @State private var horizonDays = 21
     private let pageDays = 21
+    private static let maxHorizonDays = 126
 
     /// Every time-derived thing on this screen — the countdown, ON TIME → DELAYED flips, a
     /// completed drive dropping off the board, even the "Good morning/afternoon/evening" greeting —
@@ -61,6 +62,9 @@ struct DriveHomeView: View {
     /// Is there anything past the current horizon worth loading? Repeating drives generate forever;
     /// a one-time drive only extends the list if it departs beyond the horizon.
     private var hasMoreToLoad: Bool {
+        // Bounded: the board used to extend forever as you scrolled, re-expanding every repeating
+        // drive over an ever-growing window on each refresh until the screen crawled.
+        if horizonDays >= Self.maxHorizonDays { return false }
         if drives.contains(where: { $0.isEnabled && $0.repeatRule != .none }) { return true }
         let cal = Calendar.current
         let horizonEnd = cal.date(byAdding: .day, value: horizonDays, to: cal.startOfDay(for: now)) ?? now
@@ -77,11 +81,11 @@ struct DriveHomeView: View {
 
     /// All today/upcoming occurrences across all drives, grouped by day — with the promoted Up Next
     /// occurrence removed so it doesn't appear both in the hero and the board.
-    private var grouped: [(day: Date, items: [DriveOccurrence])] {
+    /// Every upcoming occurrence (including the promoted Up Next one), soonest first.
+    private func allOccurrences(promoted: (drive: ScheduledDrive, departure: Date)?) -> [DriveOccurrence] {
         let cal = Calendar.current
         let start = cal.startOfDay(for: now)
         let end = cal.date(byAdding: .day, value: horizonDays, to: start) ?? start
-        let promoted = upNext
         var all: [DriveOccurrence] = []
         // `upNext`/`hasMoreToLoad`/`broadcastToWatch` all filter on `isEnabled` — this didn't, so a
         // drive disabled/paused from the web dashboard correctly disappeared from Up Next and the
@@ -89,17 +93,18 @@ struct DriveHomeView: View {
         // every one of its occurrences, for the whole (ever-growing) horizon.
         for drive in drives where drive.isEnabled {
             for dep in drive.occurrences(in: start...end) {
-                if let promoted, promoted.drive.id == drive.id, promoted.departure == dep { continue }
                 let occ = DriveOccurrence(drive: drive, departure: dep,
                                           arrival: dep.addingTimeInterval(drive.arrivalBudget), now: now)
                 if occ.isCompleted || occ.isStaleDeparted { continue }
                 all.append(occ)
             }
         }
-        let dict = Dictionary(grouping: all) { cal.startOfDay(for: $0.departure) }
-        return dict.keys.sorted().map { day in
-            (day, dict[day]!.sorted { $0.departure < $1.departure })
-        }
+        return all.sorted { $0.departure < $1.departure }
+    }
+
+    private func isPromoted(_ occ: DriveOccurrence, _ promoted: (drive: ScheduledDrive, departure: Date)?) -> Bool {
+        guard let promoted else { return false }
+        return promoted.drive.id == occ.drive.id && promoted.departure == occ.departure
     }
 
     var body: some View {
@@ -437,12 +442,41 @@ struct DriveHomeView: View {
 
     // MARK: - Board
 
+    private struct BoardModel {
+        var promoted: (drive: ScheduledDrive, departure: Date)?
+        var everything: [DriveOccurrence]
+        var groups: [(day: Date, items: [DriveOccurrence])]
+        var connAfter: [String: (seconds: Int, place: String)]
+    }
+
+    private func boardModel() -> BoardModel {
+        // One pass per render: the old code recomputed Up Next and re-expanded every drive's
+        // occurrences more than once per body evaluation.
+        let promoted = upNext
+        let everything = allOccurrences(promoted: promoted)
+        let cal = Calendar.current
+        let visible = everything.filter { !isPromoted($0, promoted) }
+        let groupsDict = Dictionary(grouping: visible) { cal.startOfDay(for: $0.departure) }
+        let groups = groupsDict.keys.sorted().map { (day: $0, items: groupsDict[$0]!) }
+        // Connection after each occurrence (keyed by its id): the next occurrence departs from where
+        // this one arrives, under 3 hours later. Computed across the whole list so a connection from
+        // the promoted Up Next card to the first board row is still shown.
+        var connAfter: [String: (seconds: Int, place: String)] = [:]
+        for (a, b) in zip(everything, everything.dropFirst()) {
+            if let secs = Connection.gap(from: a, to: b) {
+                connAfter[a.id] = (secs, PlaceNamer.name(for: a.drive.endCoordinate, fallback: a.drive.endAddress, in: savedPlaces))
+            }
+        }
+        return BoardModel(promoted: promoted, everything: everything, groups: groups, connAfter: connAfter)
+    }
+
     @ViewBuilder
     private var boardSections: some View {
-        let groups = grouped
+        let m = boardModel()
+        let promoted = m.promoted, everything = m.everything, groups = m.groups, connAfter = m.connAfter
         if drives.isEmpty {
             emptyBoard
-        } else if groups.isEmpty && upNext == nil {
+        } else if groups.isEmpty && promoted == nil {
             ContentUnavailableView("Nothing scheduled", systemImage: "calendar",
                 description: Text("No upcoming drives. Tap + to schedule one."))
                 .listRowSeparator(.hidden)
@@ -450,6 +484,13 @@ struct DriveHomeView: View {
         } else {
             ForEach(groups, id: \.day) { group in
                 Section {
+                    // Up Next sits above the board; if the first row here connects from it, say so.
+                    if let first = group.items.first,
+                       let promotedOcc = everything.first(where: { isPromoted($0, promoted) }),
+                       let c = connAfter[promotedOcc.id],
+                       everything.firstIndex(where: { $0.id == promotedOcc.id }).map({ $0 + 1 }) == everything.firstIndex(where: { $0.id == first.id }) {
+                        connectionRow(c)
+                    }
                     ForEach(group.items) { occ in
                         NavigationLink {
                             ScheduledDriveDetailView(drive: occ.drive, occurrence: occ.departure)
@@ -458,6 +499,7 @@ struct DriveHomeView: View {
                         }
                         .swipeActions(edge: .leading) { cancelButton(occ) }
                         .swipeActions(edge: .trailing) { deleteButton(occ) }
+                        if let c = connAfter[occ.id] { connectionRow(c) }
                     }
                 } header: {
                     Text(dayLabel(group.day))
@@ -477,6 +519,13 @@ struct DriveHomeView: View {
                 .onAppear { loadMore() }
             }
         }
+    }
+
+    private func connectionRow(_ c: (seconds: Int, place: String)) -> some View {
+        ConnectionPill(seconds: c.seconds, placeName: c.place)
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
     }
 
     private var emptyBoard: some View {

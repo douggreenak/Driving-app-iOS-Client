@@ -33,3 +33,15 @@ extension Connection {
         return Int(seconds)
     }
 }
+
+extension Connection {
+    /// The connection between two *scheduled* occurrences: `earlier` is due to arrive where `later` is
+    /// due to depart (within ~250 m), and the wait is under `maxLayover`.
+    static func gap(from earlier: DriveOccurrence, to later: DriveOccurrence) -> Int? {
+        guard !earlier.isCanceled, !later.isCanceled else { return nil }
+        let seconds = later.departure.timeIntervalSince(earlier.arrival)
+        guard seconds >= 0, isConnection(seconds) else { return nil }
+        guard earlier.drive.endCoordinate.distanceMeters(to: later.drive.startCoordinate) < 250 else { return nil }
+        return Int(seconds)
+    }
+}

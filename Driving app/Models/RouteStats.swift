@@ -53,6 +53,22 @@ enum RouteStats {
 
     /// Every distinct from→to pair in `trips`, most-driven first.
     static func summaries(trips: [DriveTrip], places: [SavedPlace]) -> [RouteSummary] {
+        // The Stats page and Route Explorer ask for this on every redraw; it names both ends of every
+        // trip, so reuse the last answer while the trips and places are unchanged.
+        var h = Hasher()
+        h.combine(trips.count); h.combine(places.count)
+        for t in trips { h.combine(t.date); h.combine(t.distance); h.combine(t.duration) }
+        for p in places { h.combine(p.label); h.combine(p.lat); h.combine(p.lng) }
+        let token = h.finalize()
+        if let c = cache, c.token == token { return c.value }
+        let value = computeSummaries(trips: trips, places: places)
+        cache = (token, value)
+        return value
+    }
+
+    private static var cache: (token: Int, value: [RouteSummary])?
+
+    private static func computeSummaries(trips: [DriveTrip], places: [SavedPlace]) -> [RouteSummary] {
         var groups: [String: RouteSummary] = [:]
         for t in trips.sorted(by: { $0.date > $1.date }) {
             let f = name(t.startCoordinate, t.startAddress, places: places)

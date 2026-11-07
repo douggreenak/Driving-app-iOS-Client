@@ -97,39 +97,42 @@ struct TripEditCard: View {
 }
 
 /// A Flighty-style layover pill: "1h 12m connection at Home", between two trips that share a stop.
+/// A quiet connection marker between two stops, in the manner of Flighty's layover line: hairlines
+/// either side of small secondary-colored text ("1h 10m connection · Home"). No fill, no color —
+/// it reads as a footnote between the two trips, not as a third card. Only a tight connection
+/// (under 20 minutes) picks up a touch of amber.
 struct ConnectionPill: View {
     let seconds: Int
     let placeName: String
     var compact = false
 
+    private var tight: Bool { seconds < 20 * 60 }
+
     var body: some View {
         HStack(spacing: 8) {
-            dash
-            HStack(spacing: 6) {
-                Image(systemName: "clock.arrow.circlepath").font(.caption2)
-                Text(compact ? "\(Connection.label(seconds)) connection"
-                             : "\(Connection.label(seconds)) connection at \(placeName)")
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1).minimumScaleFactor(0.8)
+            hairline
+            HStack(spacing: 4) {
+                Image(systemName: "clock").imageScale(.small)
+                Text(label).lineLimit(1).minimumScaleFactor(0.8)
             }
-            .foregroundStyle(.purple)
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.purple.opacity(0.16), in: .capsule)
+            .font(.caption2)
+            .foregroundStyle(tight ? Color.orange.opacity(0.85) : Color.secondary)
             .layoutPriority(1)
-            dash
+            hairline
         }
         .frame(maxWidth: .infinity)
+        .padding(.vertical, compact ? 0 : 2)
         .accessibilityElement(children: .combine)
     }
 
-    private var dash: some View {
-        Line().stroke(.purple.opacity(0.45), style: StrokeStyle(lineWidth: 1.5, dash: [3, 4]))
-            .frame(minWidth: 8, maxWidth: .infinity).frame(height: 1)
+    private var label: String {
+        let t = Connection.label(seconds)
+        if compact || placeName.isEmpty { return "\(t) connection" }
+        return "\(t) connection · \(placeName)"
     }
 
-    private struct Line: Shape {
-        func path(in rect: CGRect) -> Path {
-            var p = Path(); p.move(to: CGPoint(x: 0, y: rect.midY)); p.addLine(to: CGPoint(x: rect.maxX, y: rect.midY)); return p
-        }
+    private var hairline: some View {
+        Rectangle().fill(Color.secondary.opacity(0.25)).frame(height: 0.5)
+            .frame(minWidth: 12, maxWidth: .infinity)
     }
 }

@@ -88,10 +88,11 @@ struct TripsListView: View {
     var body: some View {
         NavigationStack {
             Group {
+                let items = filtered
                 if trips.isEmpty {
                     ContentUnavailableView("No Trips Yet", systemImage: "road.lanes",
                                            description: Text("Record a drive from the Drive tab and it'll show up here."))
-                } else if filtered.isEmpty {
+                } else if items.isEmpty {
                     if hasActiveFilters {
                         ContentUnavailableView {
                             Label("No Matching Trips", systemImage: "line.3.horizontal.decrease.circle")
@@ -105,7 +106,7 @@ struct TripsListView: View {
                     }
                 } else {
                     List {
-                        ForEach(listRows) { row in
+                        ForEach(listRows(for: items)) { row in
                             switch row {
                             case .trip(let trip):
                                 NavigationLink {
@@ -147,7 +148,7 @@ struct TripsListView: View {
             // Was only on the `List` inside the non-empty branch above — pulling down on the empty
             // state (exactly when a user expects a refresh to fix "outdated/missing trips") did
             // nothing at all, not even attempt a sync, because there was no gesture attached there.
-            .refreshable { await refresh() }
+            .refreshable { await refresh(force: true) }
             // `syncPending` only ever pushed local trips up; nothing pulled server-side edits (the
             // fields actually editable from the web dashboard — category, notes, favorite, payer)
             // back down, so "pull to refresh" could never surface a change made anywhere but this
@@ -269,8 +270,7 @@ struct TripsListView: View {
     /// Trips (newest first) with a connection pill slotted between every adjacent pair where the
     /// older trip ended where the newer one began, under 3 hours apart. Both trips must be visible
     /// (i.e. survive the current search/filters) for the pill to show.
-    private var listRows: [ListRow] {
-        let items = filtered
+    private func listRows(for items: [DriveTrip]) -> [ListRow] {
         var rows: [ListRow] = []
         for (i, later) in items.enumerated() {
             rows.append(.trip(later))
@@ -284,9 +284,9 @@ struct TripsListView: View {
         return rows
     }
 
-    private func refresh() async {
+    private func refresh(force: Bool = false) async {
         await TripStore.syncPending(context: context)
-        await TripStore.pullRemoteEdits(context: context)
+        await TripStore.pullRemoteEdits(context: context, force: force)
     }
 
     private func delete(_ trip: DriveTrip) {

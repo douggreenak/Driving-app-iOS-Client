@@ -13,6 +13,7 @@ enum TripStore {
     /// concurrent `syncPending` (dashboard `.task`, pull-to-refresh) and creating a duplicate
     /// remote row for the same drive.
     private static var uploading: Set<UUID> = []
+    private static var lastRemotePull = Date.distantPast
 
     struct Input {
         var points: [RecordedPoint]
@@ -451,7 +452,11 @@ enum TripStore {
     /// comments). Without this, "pull to refresh" on Trips could never reflect a change made
     /// anywhere but this phone, no matter how many times you pulled.
     @discardableResult
-    static func pullRemoteEdits(context: ModelContext) async -> Int {
+    static func pullRemoteEdits(context: ModelContext, force: Bool = false) async -> Int {
+        // Tab switches fire this constantly (it downloads and decodes the whole trip list); once every
+        // 30 s is plenty unless the user explicitly pulled to refresh.
+        if !force, Date().timeIntervalSince(lastRemotePull) < 30 { return 0 }
+        lastRemotePull = Date()
         // Push the phone's own edits first, so the cloud's older copy can never revert them.
         try? await CloudSync.pushLocalEdits(context)
         guard let remote = try? await APIClient.fetchTrips(), !remote.isEmpty else { return 0 }
