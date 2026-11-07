@@ -22,7 +22,7 @@ struct DriveActivityLiveActivity: Widget {
                     VStack(alignment: .leading, spacing: 2) {
                         Label(speed(context), systemImage: "speedometer")
                             .font(.caption.weight(.semibold)).foregroundStyle(.blue)
-                        Text(elapsed(context)).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        elapsedText(context).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -58,11 +58,22 @@ struct DriveActivityLiveActivity: Widget {
                     }
                 }
             } compactLeading: {
-                Image(systemName: "airplane.departure").foregroundStyle(.blue)
+                // The next maneuver's arrow when there is one — the one thing worth a glance.
+                if let turn = context.state.nextTurn, !context.state.isPaused {
+                    Image(systemName: turnSymbol(turn)).foregroundStyle(.blue)
+                } else {
+                    Image(systemName: "airplane.departure").foregroundStyle(.blue)
+                }
             } compactTrailing: {
                 Text(shortProgress(context)).font(.caption2).monospacedDigit()
             } minimal: {
-                Image(systemName: "airplane.departure").foregroundStyle(.blue)
+                if let turn = context.state.nextTurn, !context.state.isPaused {
+                    Image(systemName: turnSymbol(turn)).foregroundStyle(.blue)
+                } else if let p = context.state.progress {
+                    ProgressView(value: p).progressViewStyle(.circular).tint(delayColor(context))
+                } else {
+                    Image(systemName: "airplane.departure").foregroundStyle(.blue)
+                }
             }
             // Tapping the Dynamic Island (expanded or compact) or the Lock Screen banner (see
             // `LockScreenView` below) opens the app straight at the live tracking screen — see
@@ -97,10 +108,15 @@ struct DriveActivityLiveActivity: Widget {
     private func speed(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
         String(format: "%.0f mph", c.state.currentSpeed)
     }
-    private func elapsed(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
+    /// Elapsed time, ticking in the widget itself when the push carried a start date (no update per
+    /// second needed); the pushed `elapsedSeconds` is the fallback for an older snapshot.
+    private func elapsedText(_ c: ActivityViewContext<DriveActivityAttributes>) -> Text {
+        // `.relative` ("23 min", "1 hr, 4 min") updates by the minute with no seconds — a seconds
+        // timer renders as "24:––" whenever the Lock Screen is dimmed, which reads as broken.
+        if let start = c.state.startDate { return Text(start, style: .relative) }
         let seconds = c.state.elapsedSeconds
         let hours = seconds / 3600, minutes = (seconds % 3600) / 60
-        return hours > 0 ? String(format: "%d:%02d", hours, minutes) : String(format: "%d min", minutes)
+        return Text(hours > 0 ? String(format: "%d:%02d", hours, minutes) : String(format: "%d min", minutes))
     }
     private func distanceSummary(_ c: ActivityViewContext<DriveActivityAttributes>) -> String {
         guard let remaining = c.state.remainingMiles else { return miles(c) }
@@ -195,13 +211,13 @@ private struct LockScreenView: View {
                 ProgressView(value: progress).tint(delayColor).scaleEffect(y: 0.8)
             }
 
-            // 3. Arrival, big; scheduled time small beside it.
+            // 3. Arrival, big; scheduled time small beside it. A destination-less drive has no ETA —
+            //    the elapsed timer is the hero then, rather than a dash for the whole trip.
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(context.state.isPaused ? "Parked"
-                     : (context.state.eta.map { $0.formatted(date: .omitted, time: .shortened) } ?? "—"))
+                heroText
                     .font(.title3.weight(.bold).monospacedDigit()).foregroundStyle(delayColor)
                 if !context.state.isPaused {
-                    Text(context.state.isMultiLeg == true ? "final ETA" : "arrival")
+                    Text(context.state.eta == nil ? "elapsed" : (context.state.isMultiLeg == true ? "final ETA" : "arrival"))
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 6)
@@ -221,7 +237,7 @@ private struct LockScreenView: View {
                         Text(eta.formatted(date: .omitted, time: .shortened))
                     }
                 } else {
-                    Text(statsLine).lineLimit(1).minimumScaleFactor(0.7)
+                    statsLine.lineLimit(1).minimumScaleFactor(0.7)
                 }
             }
             .font(.caption2).foregroundStyle(.secondary)
@@ -231,13 +247,21 @@ private struct LockScreenView: View {
         .widgetURL(URL(string: "drivetracker://active-drive"))
     }
 
-    private var statsLine: String {
+    private var heroText: Text {
+        if context.state.isPaused { return Text("Parked") }
+        if let eta = context.state.eta { return Text(eta.formatted(date: .omitted, time: .shortened)) }
+        return elapsedText
+    }
+
+    private var statsLine: Text {
         var parts: [String] = []
         if let r = context.state.remainingMiles { parts.append(String(format: "%.1f mi left", r)) }
         parts.append(String(format: "%.1f mi driven", context.state.milesTraveled))
         parts.append(String(format: "%.0f mph", context.state.currentSpeed))
-        parts.append(elapsedText)
-        return parts.joined(separator: " · ")
+        let base = Text(parts.joined(separator: " · "))
+        // The elapsed timer already is the hero line when there's no ETA; don't repeat it.
+        if context.state.eta == nil, !context.state.isPaused { return base }
+        return base + Text(" · ") + elapsedText
     }
 
     private func turnDistance(_ meters: Double) -> String {
@@ -254,9 +278,11 @@ private struct LockScreenView: View {
         return "arrow.up"
     }
 
-    private var elapsedText: String {
+    /// Ticks on its own from the pushed start date (see `ContentState.startDate`).
+    private var elapsedText: Text {
+        if let start = context.state.startDate { return Text(start, style: .relative) }
         let seconds = context.state.elapsedSeconds
         let hours = seconds / 3600, minutes = (seconds % 3600) / 60
-        return hours > 0 ? String(format: "%d:%02d", hours, minutes) : String(format: "%d min", minutes)
+        return Text(hours > 0 ? String(format: "%d:%02d", hours, minutes) : String(format: "%d min", minutes))
     }
 }

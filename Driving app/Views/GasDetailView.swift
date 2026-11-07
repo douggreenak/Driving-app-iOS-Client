@@ -48,7 +48,8 @@ struct GasDetailView: View {
 
                 LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 12) {
                     box("fuelpump.fill", .orange, String(format: "%.2f gal", entry.gallons), "Pumped")
-                    box("dollarsign.circle.fill", .green, String(format: "$%.3f", entry.pricePerGallon), "Per gallon")
+                    box("dollarsign.circle.fill", .green,
+                        entry.pricePerGallon.formatted(.currency(code: "USD").precision(.fractionLength(2...3))), "Per gallon")
                     box("drop.fill", .blue, entry.fuelTypeEnum.shortLabel, "Fuel type")
                     box("car.fill", .purple, entry.vehicleName ?? "—", "Car")
                 }

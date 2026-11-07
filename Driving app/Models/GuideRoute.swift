@@ -40,19 +40,30 @@ final class GuideRoute {
     private var cumulative: [Double] = []
     private var lastSegment = 0
     private var alongRoute = 0.0
+    /// Consecutive fixes projected more than `offRouteMeters` from the line — a real wrong turn,
+    /// not one bad fix.
+    private var offRouteCount = 0
+    private static let offRouteMeters = 60.0
+    /// Re-fetch after this much movement even while on route, so the ETA tracks live traffic.
+    private static let trafficRefreshMeters = 2000.0
 
     /// Forget the route (leg changed, drive ended, diverted…).
     func clear() {
         coordinates = []; steps = []; nextTurn = nil; nextTurnMeters = nil; remainingMeters = nil
         lastFetchFrom = nil; stepIndex = 0
-        cumulative = []; lastSegment = 0; alongRoute = 0
+        cumulative = []; lastSegment = 0; alongRoute = 0; offRouteCount = 0
     }
 
     /// Force the next `refresh` to re-fetch even though the driver hasn't moved.
     func invalidate() { lastFetchFrom = nil }
 
-    /// Fetch the fastest route to `tracker.destination` from the current location. Throttled: only
-    /// re-routes after ~250 m of movement (MapKit rate limits), with a back-off after a failure.
+    /// Fetch the fastest route to `tracker.destination` from the current location.
+    ///
+    /// Re-routes when the car has genuinely left the line (several consecutive fixes well off it —
+    /// see `updateNextTurn`), and otherwise only every ~2 km for traffic. The old rule re-fetched
+    /// every 250 m regardless, and wiped the line the moment the car was 800 m from the route's
+    /// START — i.e. every half mile of normal driving the turn banner blanked until MapKit answered.
+    /// The current line is kept on screen until the replacement arrives.
     ///
     /// Guards against three real failure modes: slow first fetches re-requested on every ~1 Hz fix
     /// (MapKit then throttles us into never drawing anything), late responses for a leg the driver
@@ -65,10 +76,12 @@ final class GuideRoute {
         else { return }
         // Target changed under us (next leg / diversion) → the old line is wrong.
         if let t = lastFetchedTarget, !t.isApproximately(dest, toleranceMeters: 30) { clear() }
-        // A line whose start has drifted far from where we are is worse than none.
-        if let first = coordinates.first, first.distanceMeters(to: from) > 800 { coordinates = []; steps = [] }
         guard !inFlight else { return }
-        if let last = lastFetchFrom, from.distanceMeters(to: last) < 250 { return }
+        if let last = lastFetchFrom {
+            let moved = from.distanceMeters(to: last)
+            let offRoute = offRouteCount >= 3
+            guard offRoute || moved >= Self.trafficRefreshMeters || coordinates.isEmpty && moved >= 100 else { return }
+        }
         if let failed = lastFailedAt, Date().timeIntervalSince(failed) < 5 { return }
 
         inFlight = true
@@ -100,7 +113,7 @@ final class GuideRoute {
                 offset += s.distance
             }
             steps = built
-            stepIndex = 0; lastSegment = 0; alongRoute = 0
+            stepIndex = 0; lastSegment = 0; alongRoute = 0; offRouteCount = 0
             tracker.appleMapsExpectedTravelTime = route.expectedTravelTime
             tracker.appleMapsTravelTimeFetchDate = Date()
             updateNextTurn(from: from)
@@ -142,8 +155,15 @@ final class GuideRoute {
         var found = lo < hi ? project(lo..<hi) : nil
         if found == nil || found!.dist > 80 { found = project(1..<n) ?? found }
         if let f = found {
-            lastSegment = f.seg
-            alongRoute = max(alongRoute, f.along)   // never slides backward on GPS jitter
+            if f.dist > Self.offRouteMeters {
+                // Don't advance along the line from a position that isn't on it: a loop/overpass
+                // projection onto a later segment would otherwise skip every turn in between.
+                offRouteCount += 1
+            } else {
+                offRouteCount = 0
+                lastSegment = f.seg
+                alongRoute = max(alongRoute, f.along)   // never slides backward on GPS jitter
+            }
         }
         while stepIndex < steps.count, steps[stepIndex].offset <= alongRoute + 5 { stepIndex += 1 }
         if stepIndex < steps.count {

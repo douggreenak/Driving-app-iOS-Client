@@ -78,34 +78,61 @@ enum ScheduledDriveStore {
         return ok
     }
 
+    // MARK: - Pushed-state fingerprints (skip the PATCH when nothing changed)
+
+    private static let pushedSigKey = "ScheduledDriveStore.pushedSignatures.v1"
+
+    private static func signature(_ p: APIScheduledDrivePayload) -> String {
+        guard let d = try? JSONEncoder().encode(p) else { return UUID().uuidString }
+        return String(decoding: d, as: UTF8.self)
+    }
+
     private static func runSync(context: ModelContext) async -> Bool {
         guard let drives = try? context.fetch(FetchDescriptor<ScheduledDrive>()) else { return false }
 
-        // Upsert every local drive. Track whether every upsert succeeded — a failed create/update
-        // must NOT let the reconcile pass delete rows it simply couldn't confirm this run.
-        var allUpsertsSucceeded = true
+        // Upsert every local drive whose payload changed since the last successful push. Sync runs
+        // on every tab switch and foreground, so PATCHing every drive every time was N network
+        // writes per tab switch for nothing.
+        //
+        // Failures are tracked PER DRIVE: one row the server keeps rejecting (deleted on the web, a
+        // 400 on some field) used to abort the whole pull/reconcile half below on every pass, so a
+        // drive added from the dashboard never reached this phone again.
+        var sigs = (UserDefaults.standard.dictionary(forKey: pushedSigKey) as? [String: String]) ?? [:]
+        var anyCreateFailed = false
         for drive in drives {
+            let p = payload(for: drive)
+            let sig = signature(p)
             if drive.remoteID == nil {
-                if let remote = try? await APIClient.createScheduledDrive(payload(for: drive)) {
+                if let remote = try? await APIClient.createScheduledDrive(p) {
                     drive.remoteID = remote.id
                     drive.synced = true
+                    sigs[remote.id] = sig
                 } else {
-                    allUpsertsSucceeded = false
+                    anyCreateFailed = true
                 }
-            } else {
-                if (try? await APIClient.updateScheduledDrive(payload(for: drive))) != nil {
+            } else if let rid = drive.remoteID, sigs[rid] != sig {
+                do {
+                    try await APIClient.updateScheduledDrive(p)
                     drive.synced = true
-                } else {
-                    allUpsertsSucceeded = false
+                    sigs[rid] = sig
+                } catch APIClient.APIError.http(404) {
+                    // Gone on the server (deleted from the web dashboard while this phone still has
+                    // it). The phone's copy is never deleted: unlink it so the next pass re-creates
+                    // it rather than failing forever.
+                    drive.remoteID = nil
+                    drive.synced = false
+                    sigs[rid] = nil
+                    anyCreateFailed = true
+                } catch {
+                    // Retried next pass; doesn't block the pull below.
                 }
             }
         }
+        UserDefaults.standard.set(sigs, forKey: pushedSigKey)
         try? context.save()
 
-        // Never touch anything below when an upsert failed this run: a just-created row on another
-        // device could look "not local yet" for the wrong reason, and skipping keeps this pass from
-        // reconciling against a set it isn't confident reflects the true local state.
-        guard allUpsertsSucceeded else { return true }
+        // A failed CREATE means a local drive has no remote id yet; the reconcile below keys on
+        // remote ids, so skip it this pass (the pull half is still safe to run).
         guard let remote = try? await APIClient.fetchScheduledDrives() else { return true }
 
         // Re-read local remoteIDs right before reconciling so the upserts above (and anything a
@@ -129,7 +156,7 @@ enum ScheduledDriveStore {
         // either something this device deleted (tombstoned — retry the remote delete it may have
         // missed while offline) or removed on the server by some other means; either way, dropping
         // its local copy (should it exist) and confirming the remote delete is correct here.
-        guard !drives.isEmpty else { return true }
+        guard !drives.isEmpty, !anyCreateFailed else { return true }
         for r in remote where !localRemoteIDs.contains(r.id) && tombstoned[r.id] != nil {
             try? await APIClient.deleteScheduledDrive(id: r.id)
             clearTombstone(r.id)
@@ -140,7 +167,9 @@ enum ScheduledDriveStore {
     /// Build a local `ScheduledDrive` from a remote row this device has never seen and insert it —
     /// the pull half of `runSync`'s reconcile pass.
     private static func insertLocal(from r: APIScheduledDrive, context: ModelContext) {
-        guard let departure = iso.date(from: r.departure), let arrival = iso.date(from: r.scheduledArrival) else { return }
+        // Tolerant of fractional seconds (`…T08:00:00.000Z`) — a plain ISO8601DateFormatter rejects
+        // them, which silently dropped every drive added from the web dashboard.
+        guard let departure = parseDate(r.departure), let arrival = parseDate(r.scheduledArrival) else { return }
         let drive = ScheduledDrive(
             title: r.title, startAddress: r.startAddress, endAddress: r.endAddress,
             startLat: r.startLat, startLng: r.startLng, endLat: r.endLat, endLng: r.endLng,
@@ -152,8 +181,12 @@ enum ScheduledDriveStore {
         drive.remoteID = r.id
         drive.synced = true
         drive.stops = r.stops ?? []
-        drive.lastStartedAt = r.lastStartedAt.flatMap { iso.date(from: $0) }
-        drive.lastCompletedAt = r.lastCompletedAt.flatMap { iso.date(from: $0) }
+        drive.lastStartedAt = parseDate(r.lastStartedAt)
+        drive.lastCompletedAt = parseDate(r.lastCompletedAt)
+        // Record what the server holds so the first sync doesn't PATCH it straight back.
+        var sigs = (UserDefaults.standard.dictionary(forKey: pushedSigKey) as? [String: String]) ?? [:]
+        sigs[r.id] = signature(payload(for: drive))
+        UserDefaults.standard.set(sigs, forKey: pushedSigKey)
         drive.skippedOccurrences = r.skippedOccurrences.map { Date(timeIntervalSince1970: $0) }
         context.insert(drive)
     }

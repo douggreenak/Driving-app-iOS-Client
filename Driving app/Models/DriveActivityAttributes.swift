@@ -45,12 +45,15 @@ struct DriveActivityAttributes: ActivityAttributes {
         var maxSpeed: Double? = nil
         var avgSpeed: Double? = nil
         var gallonsUsed: Double? = nil
+        /// When the drive started. The widget renders elapsed time as a live `Text(timerInterval:)`
+        /// from this, so it ticks every second on its own without a push per second.
+        var startDate: Date? = nil
 
         private enum CodingKeys: String, CodingKey {
             case milesTraveled, currentSpeed, elapsedSeconds, progress, eta, delaySeconds
             case destinationName, isPaused, tripTitle, scheduledArrival
             case remainingMiles, legRemainingMiles, legEta, legDestinationName, isMultiLeg
-            case nextTurn, nextTurnMeters, maxSpeed, avgSpeed, gallonsUsed
+            case nextTurn, nextTurnMeters, maxSpeed, avgSpeed, gallonsUsed, startDate
         }
     }
 
@@ -85,6 +88,7 @@ extension DriveActivityAttributes.ContentState {
         maxSpeed = try values.decodeIfPresent(Double.self, forKey: .maxSpeed)
         avgSpeed = try values.decodeIfPresent(Double.self, forKey: .avgSpeed)
         gallonsUsed = try values.decodeIfPresent(Double.self, forKey: .gallonsUsed)
+        startDate = try values.decodeIfPresent(Date.self, forKey: .startDate)
     }
 }
 #endif

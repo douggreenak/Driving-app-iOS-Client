@@ -91,7 +91,7 @@ enum RepeatRule: String, Codable, CaseIterable {
 
 /// An intermediate stop on a route (between the start and the final destination). Stored as a
 /// Codable value on both scheduled drives and recorded trips so any route can be multi-stop.
-struct RouteStop: Codable, Hashable, Identifiable {
+nonisolated struct RouteStop: Codable, Hashable, Identifiable {
     var id = UUID()
     var address: String
     var lat: Double

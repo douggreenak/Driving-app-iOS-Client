@@ -97,6 +97,7 @@ struct ScheduledDriveDetailView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { showEdit = true } label: { Image(systemName: "pencil") }
+                    .accessibilityLabel("Edit drive")
             }
         }
         // `.task(id:)` (not a bare `.task`) so revisiting this page — the tab was left and come back
@@ -486,9 +487,5 @@ struct ScheduledDriveDetailView: View {
         loadingRoute = false
     }
 
-    private func travelString(_ seconds: Int) -> String {
-        let m = seconds / 60
-        if m >= 60 { return "\(m / 60)h \(m % 60)m" }
-        return "\(m) min"
-    }
+    private func travelString(_ seconds: Int) -> String { Fmt.duration(seconds) }
 }

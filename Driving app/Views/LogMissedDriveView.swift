@@ -58,9 +58,11 @@ struct LogMissedDriveView: View {
     @State private var didPrefillPayer = false
 
     private var fuelPrice: Double { settingsList.first?.fuelPricePerGallon ?? 3.75 }
+    /// Must match what `logDrive()` saves (`vehicleMpg` of the picked car, else the store's 25 MPG
+    /// default) — the estimate card used to preview gallons at the FIRST car's MPG when no car was
+    /// picked, so the saved trip's gallons didn't match the number shown before tapping Log.
     private var ratedMpg: Double {
-        if let named = vehicles.first(where: { $0.name == vehicleName })?.avgMpg { return named }
-        return vehicles.first?.avgMpg ?? 25
+        vehicles.first(where: { $0.name == vehicleName })?.avgMpg ?? 25
     }
 
     private var elapsedSeconds: Int { max(0, Int(arrival.timeIntervalSince(departure))) }
@@ -162,6 +164,7 @@ struct LogMissedDriveView: View {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Clear scheduled drive")
                 }
                 HStack(spacing: 6) {
                     Image(systemName: s.category.icon).font(.subheadline).foregroundStyle(.blue)
@@ -456,9 +459,5 @@ struct LogMissedDriveView: View {
         PlaceNamer.name(for: coord, fallback: fallback, in: savedPlaces)
     }
 
-    private func timeString(_ seconds: Int) -> String {
-        let m = seconds / 60
-        if m >= 60 { return "\(m / 60)h \(m % 60)m" }
-        return "\(m) min"
-    }
+    private func timeString(_ seconds: Int) -> String { Fmt.duration(seconds) }
 }

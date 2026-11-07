@@ -727,6 +727,7 @@ struct EditVehicleView: View {
                             Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Clear last fill-up")
                     }
                 }
             } footer: {

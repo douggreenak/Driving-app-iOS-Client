@@ -118,6 +118,7 @@ struct RoutePredictView: View {
                             Image(systemName: "minus.circle.fill").foregroundStyle(.red)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Remove stop \(index + 1)")
                     }
                 }
             }
@@ -338,11 +339,7 @@ struct RoutePredictView: View {
         full.split(separator: ",").first.map(String.init) ?? full
     }
 
-    private func timeString(_ seconds: Int) -> String {
-        let m = seconds / 60
-        if m >= 60 { return "\(m / 60)h \(m % 60)m" }
-        return "\(m) min"
-    }
+    private func timeString(_ seconds: Int) -> String { Fmt.duration(seconds) }
 
     /// A region that fits all coordinates with a little padding.
     private func regionFitting(_ coords: [CLLocationCoordinate2D]) -> MKCoordinateRegion? {

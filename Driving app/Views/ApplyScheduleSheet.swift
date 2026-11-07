@@ -180,29 +180,34 @@ struct ApplyScheduleSheet: View {
         PlaceNamer.name(for: coord, fallback: fallback, in: savedPlaces)
     }
 
-    private func travelString(_ seconds: Int) -> String {
-        let m = seconds / 60
-        if m >= 60 { return "\(m / 60)h \(m % 60)m" }
-        return "\(m) min"
-    }
+    private func travelString(_ seconds: Int) -> String { Fmt.duration(seconds) }
 
-    /// Apply a schedule's time-of-day targets to this trip (on the trip's own date), rolling arrival
-    /// past midnight when it lands before departure. Adopts the title & category, but NEVER paidBy —
-    /// grading a trip's timing must not silently change who pays for its gas.
+    /// Apply a schedule's time-of-day targets to this trip, rolling arrival past midnight when it
+    /// lands before departure. Adopts the category, and the title only when the trip has no name of
+    /// its own, but NEVER paidBy — grading a trip's timing must not silently change who pays for
+    /// its gas.
     private func apply(_ s: ScheduledDrive) {
         Haptics.success()
         let cal = Calendar.current
         let d = cal.dateComponents([.hour, .minute], from: s.departure)
         let a = cal.dateComponents([.hour, .minute], from: s.scheduledArrival)
-        let departure = cal.date(bySettingHour: d.hour ?? 0, minute: d.minute ?? 0, second: 0, of: trip.date)
-        var arrival = cal.date(bySettingHour: a.hour ?? 0, minute: a.minute ?? 0, second: 0, of: trip.date)
+        // The scheduled departure is the occurrence CLOSEST to when the trip actually began — on
+        // the trip's own day, or the day before/after. A 23:50 schedule graded against a trip that
+        // started at 00:10 used to get a departure a whole day after the drive.
+        let sameDay = cal.date(bySettingHour: d.hour ?? 0, minute: d.minute ?? 0, second: 0, of: trip.date)
+        let candidates: [Date] = [-1, 0, 1].compactMap { offset in
+            guard let day = sameDay else { return nil }
+            return cal.date(byAdding: .day, value: offset, to: day)
+        }
+        let departure = candidates.min { abs($0.timeIntervalSince(trip.date)) < abs($1.timeIntervalSince(trip.date)) }
+        var arrival = departure.flatMap { cal.date(bySettingHour: a.hour ?? 0, minute: a.minute ?? 0, second: 0, of: $0) }
         // Overnight schedule: arrival time-of-day precedes departure → it's the next day.
         if let dep = departure, let arr = arrival, arr < dep {
             arrival = cal.date(byAdding: .day, value: 1, to: arr)
         }
         trip.scheduledDeparture = departure
         trip.scheduledArrival = arrival
-        trip.name = s.title
+        if (trip.name ?? "").trimmingCharacters(in: .whitespaces).isEmpty { trip.name = s.title }
         trip.category = s.category
         // Intentionally NOT touching trip.paidBy — see doc comment.
         try? context.save()

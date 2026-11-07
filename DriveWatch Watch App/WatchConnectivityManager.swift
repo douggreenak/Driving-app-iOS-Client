@@ -65,12 +65,13 @@ struct WatchSyncPayload: Codable {
         var destinationName: String? = nil
         var maxSpeed: Double? = nil
         var isStopped: Bool? = nil
+        var sentAt: Date? = nil
 
         private enum CodingKeys: String, CodingKey {
             case tripName, milesTraveled, currentSpeed, elapsedSeconds, eta, delaySeconds
             case progress, legText, isPaused, canAdvanceLeg
             case remainingMiles, legRemainingMiles, legEta
-            case nextTurn, nextTurnMeters, destinationName, maxSpeed, isStopped
+            case nextTurn, nextTurnMeters, destinationName, maxSpeed, isStopped, sentAt
         }
     }
     var drives: [Drive]
@@ -98,6 +99,7 @@ extension WatchSyncPayload.Live {
         destinationName = try values.decodeIfPresent(String.self, forKey: .destinationName)
         maxSpeed = try values.decodeIfPresent(Double.self, forKey: .maxSpeed)
         isStopped = try values.decodeIfPresent(Bool.self, forKey: .isStopped)
+        sentAt = try values.decodeIfPresent(Date.self, forKey: .sentAt)
     }
 }
 
@@ -111,28 +113,70 @@ final class WatchConnectivityManager: NSObject, WCSessionDelegate {
     var payload: WatchSyncPayload?
     /// The drive currently being recorded on the phone, streamed live. Nil when nothing is active.
     var live: WatchSyncPayload.Live?
+    /// When the last live frame arrived (watch clock), for the staleness logic below.
+    private(set) var lastLiveAt: Date?
+    /// Set when a control tap couldn't reach the phone; cleared on the next successful send.
+    var lastSendError: String?
+
+    /// No frame for this long → the live screen says "Reconnecting…".
+    static let staleAfter: TimeInterval = 20
+    /// No frame for this long → the drive is treated as over (the phone died without sending the
+    /// terminator) and the watch goes back to Up Next instead of showing dead controls forever.
+    static let deadAfter: TimeInterval = 3 * 60
+
+    private var staleTimer: Timer?
 
     func activate() {
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
         session.delegate = self
         session.activate()
+        staleTimer?.invalidate()
+        let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.expireIfDead() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        staleTimer = t
+    }
+
+    /// True once no frame has arrived for `staleAfter`.
+    var liveIsStale: Bool {
+        guard live != nil, let at = lastLiveAt else { return false }
+        return Date().timeIntervalSince(at) > Self.staleAfter
+    }
+
+    private func expireIfDead() {
+        guard live != nil, let at = lastLiveAt, Date().timeIntervalSince(at) > Self.deadAfter else { return }
+        live = nil
     }
 
     /// Ask the phone to start a scheduled drive by its id.
     func startDrive(id: String) { send(["action": "start", "id": id], queueIfNeeded: true) }
-    /// Live-drive controls (only meaningful while a drive is active, so no need to queue).
-    func endDrive()     { send(["action": "end"]) }
+    /// Live-drive controls. "End" is the one whose loss is costly (the drive keeps recording), so it
+    /// is queued too when the phone can't be reached right now.
+    func endDrive()     { send(["action": "end"], queueIfNeeded: true) }
     func arriveAtStop() { send(["action": "arrive"]) }
     func startNextLeg() { send(["action": "nextLeg"]) }
 
+    /// Sends with a reply handler so a dropped message is noticed: on error, fall back to the queued
+    /// transfer when allowed and surface a short status for the UI.
     private func send(_ message: [String: Any], queueIfNeeded: Bool = false) {
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
         if session.isReachable {
-            session.sendMessage(message, replyHandler: nil, errorHandler: nil)
+            session.sendMessage(message, replyHandler: { [weak self] _ in
+                Task { @MainActor in self?.lastSendError = nil }
+            }, errorHandler: { [weak self] _ in
+                Task { @MainActor in
+                    if queueIfNeeded { try? session.transferUserInfo(message) }
+                    self?.lastSendError = queueIfNeeded ? "iPhone not reachable — will retry" : "Couldn't reach iPhone"
+                }
+            })
         } else if queueIfNeeded {
             try? session.transferUserInfo(message)
+            lastSendError = "iPhone not reachable — will retry"
+        } else {
+            lastSendError = "Couldn't reach iPhone"
         }
     }
 
@@ -167,8 +211,11 @@ final class WatchConnectivityManager: NSObject, WCSessionDelegate {
         if let data = message["live"] as? Data,
            let decoded = try? JSONDecoder().decode(WatchSyncPayload.Live.self, from: data) {
             live = decoded
+            lastLiveAt = Date()
+            lastSendError = nil
         } else if message["liveEnded"] != nil {
             live = nil
+            lastLiveAt = nil
         }
     }
 

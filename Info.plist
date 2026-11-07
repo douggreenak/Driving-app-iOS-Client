@@ -9,6 +9,10 @@
 	<!-- Enables ActivityKit Live Activities (trip progress on the Lock Screen / Dynamic Island). -->
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<!-- A drive pushes a fresh ETA/turn every few seconds for an hour or more; without this
+	     ActivityKit throttles and then stops delivering updates, freezing the Lock Screen mid-drive. -->
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
 	<!-- Injected at build time from Secrets.xcconfig (API_KEY); never hard-coded here. -->
 	<key>APIKey</key>
 	<string>$(API_KEY)</string>

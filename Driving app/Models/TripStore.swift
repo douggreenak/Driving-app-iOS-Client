@@ -326,15 +326,22 @@ enum TripStore {
         // to the web copy so its map markers and labels stay consistent with the trimmed route.
         if let remoteID = trip.remoteID {
             let f = ISO8601DateFormatter()
-            try? await APIClient.patchTripTrim(
-                id: remoteID,
-                date: f.string(from: trip.date),
-                distance: trip.distance,
-                duration: max(1, (trip.duration + 30) / 60),
-                startAddress: trip.startAddress, endAddress: trip.endAddress,
-                startLat: trip.startLat, startLng: trip.startLng,
-                endLat: trip.endLat, endLng: trip.endLng,
-                routeEncoded: Polyline.encode(trip.displayCoordinates))
+            do {
+                try await APIClient.patchTripTrim(
+                    id: remoteID,
+                    date: f.string(from: trip.date),
+                    distance: trip.distance,
+                    duration: max(1, (trip.duration + 30) / 60),
+                    startAddress: trip.startAddress, endAddress: trip.endAddress,
+                    startLat: trip.startLat, startLng: trip.startLng,
+                    endLat: trip.endLat, endLng: trip.endLng,
+                    routeEncoded: Polyline.encode(trip.displayCoordinates))
+                // The endpoints/date are part of the edit fingerprint: record the pushed state so the
+                // next edit pass doesn't re-PATCH the same fields.
+                CloudSync.recordEditSignature(trip)
+            } catch {
+                // Leave the fingerprint stale: `pushLocalEdits` retries the endpoint fields later.
+            }
         }
         return true
     }
@@ -472,6 +479,11 @@ enum TripStore {
         var updated = 0
         for r in remote {
             guard let trip = byRemoteID[r.id] else { continue }
+            // A phone-side edit whose PATCH hasn't landed yet (offline, server error, the PATCH
+            // timing out while this GET got through) must not be overwritten by the cloud's older
+            // copy — that would revert it AND fingerprint the reverted state as in-sync, so the
+            // user's change would never be sent again.
+            if CloudSync.hasUnpushedEdit(trip) { continue }
             var changed = false
             if trip.categoryRaw != r.category { trip.categoryRaw = r.category; changed = true }
             if trip.notes != r.notes { trip.notes = r.notes; changed = true }

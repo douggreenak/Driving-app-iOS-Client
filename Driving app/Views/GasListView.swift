@@ -25,6 +25,12 @@ struct GasListView: View {
         return PayerGroup.resolve(key: filterKey, in: payerGroups).name
     }
 
+    /// Why the last fetch failed, when nothing (not even a cache) could be shown instead — so an
+    /// unreachable server doesn't masquerade as "No Gas Entries".
+    @State private var loadError: String?
+    /// A swipe-delete that the server refused; shown as an alert instead of silently doing nothing.
+    @State private var deleteError: String?
+
     private var filteredTotal: Double { filteredEntries.reduce(0) { $0 + $1.totalCost } }
     private var filteredGallons: Double { filteredEntries.reduce(0) { $0 + $1.gallons } }
 
@@ -72,6 +78,15 @@ struct GasListView: View {
                 if loading {
                     ProgressView().padding(.top, 40)
                     Spacer()
+                } else if entries.isEmpty, let loadError {
+                    ContentUnavailableView {
+                        Label("Couldn't Load the Gas Log", systemImage: "wifi.exclamationmark")
+                    } description: {
+                        Text(loadError)
+                    } actions: {
+                        Button { Task { await loadEntries() } } label: { Label("Retry", systemImage: "arrow.clockwise") }
+                            .buttonStyle(.borderedProminent)
+                    }
                 } else if filteredEntries.isEmpty {
                     ContentUnavailableView {
                         Label("No Gas Entries", systemImage: "fuelpump")
@@ -131,6 +146,10 @@ struct GasListView: View {
                     pendingDelete = nil
                 }
             }
+            .alert("Couldn't Delete Fill-up", isPresented: Binding(get: { deleteError != nil },
+                                                                   set: { if !$0 { deleteError = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: { Text(deleteError ?? "") }
             .refreshable { await loadEntries() }
             // `.task(id:)` (rather than a bare `.task`) so this refetches every time the Gas tab is
             // revisited or the app returns to the foreground, not just the first time this view is
@@ -189,9 +208,11 @@ struct GasListView: View {
             entries = fresh
             lastUpdated = .now
             loading = false
+            loadError = nil
             Self.cache(fresh, at: .now)
         } catch {
             loading = false
+            loadError = "The server couldn't be reached. Pull down or tap Retry when you're back online."
             #if DEBUG
             // Manual-testing fallback: with no reachable backend, fall back to a local fixture so the
             // pumped-vs-estimated comparison can still be checked. Only when explicitly launched with
@@ -237,6 +258,7 @@ struct GasListView: View {
                 Self.cache(entries, at: lastUpdated ?? .now)
             } catch {
                 // Leave the entry in place; the cache/refresh keeps it consistent with the server.
+                deleteError = "The fill-up is still on the server — check your connection and try again."
             }
         }
     }
@@ -277,7 +299,8 @@ private struct GasRow: View {
                     Text(entry.parsedDate, style: .date)
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text(String(format: "%.1f gal @ $%.2f/gal", entry.gallons, entry.pricePerGallon))
+                Text(String(format: "%.1f gal @ ", entry.gallons)
+                     + entry.pricePerGallon.formatted(.currency(code: "USD").precision(.fractionLength(2...3))) + "/gal")
                     .font(.subheadline).fontWeight(.medium)
                 // Show car and/or station when present (e.g. "Subaru · Costco").
                 let subtitle = [entry.vehicleName, entry.stationName]

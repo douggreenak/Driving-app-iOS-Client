@@ -11,9 +11,12 @@ enum LiveActivityController {
     private static var lastPush: Date = .distantPast
     private static var lastState: DriveActivityAttributes.ContentState?
     /// Minimum spacing between routine pushes. CoreLocation delivers several fixes per second while
-    /// driving; ActivityKit budgets frequent updates and will throttle then stop delivering, freezing
-    /// the Lock Screen. ~3s keeps us comfortably under budget while staying live.
-    private static let minInterval: TimeInterval = 3
+    /// driving; ActivityKit budgets updates and will throttle then stop delivering, freezing the
+    /// Lock Screen. Elapsed time ticks in the widget itself (`ContentState.startDate`), and anything a
+    /// driver would notice — a new turn, the turn distance shrinking, the ETA minute, a stop reached —
+    /// goes out immediately via `isMeaningfulChange`, so routine pushes only carry speed/miles.
+    /// (`NSSupportsLiveActivitiesFrequentUpdates` is also set in Info.plist.)
+    private static let minInterval: TimeInterval = 15
     /// How far ahead each push marks its content stale. Without this (it used to be `nil` on every
     /// push) the OS never dims/greys a frozen activity — so if the pushing side ever genuinely stops
     /// (e.g. this exact class of bug: the periodic-push wiring silently missing), the Lock Screen
@@ -73,7 +76,21 @@ enum LiveActivityController {
         // tap could sit under the 3s throttle and leave the Lock Screen reading "Parked" for a few
         // seconds after the car is already moving again.
         if a.isPaused != b.isPaused { return true }
+        if a.nextTurn != b.nextTurn { return true }  // new maneuver
+        // The turn distance is the thing you glance at on approach: push when its displayed value
+        // would change (every 0.1 mi far out, every 50 ft close in) — but no more than once a second.
+        if let ma = a.nextTurnMeters, let mb = b.nextTurnMeters, turnBucket(ma) != turnBucket(mb),
+           Date().timeIntervalSince(lastPush) >= 1 { return true }
+        let ea = a.eta.map { Int($0.timeIntervalSince1970 / 60) }, eb = b.eta.map { Int($0.timeIntervalSince1970 / 60) }
+        if ea != eb { return true }  // arrival minute changed
+        if a.scheduledArrival != b.scheduledArrival || a.tripTitle != b.tripTitle { return true }
         return false
+    }
+
+    private static func turnBucket(_ meters: Double) -> Int {
+        let miles = meters / 1609.34
+        if miles >= 0.2 { return 1000 + Int(miles * 10) }
+        return Int((meters * 3.28084 / 50).rounded())
     }
 
     /// True while a just-finished drive's terminal frame is deliberately being held on screen (see
@@ -129,9 +146,15 @@ enum LiveActivityController {
     /// that window ended the activity that had just started — and left `start()`'s `activity == nil`
     /// guard permanently unable to request a new one for the rest of the process, since the static
     /// reference was never cleared to match.
+    ///
+    /// Also leaves alone any activity that is no longer `.active`: `endWithFinal` ends the drive's
+    /// activity with a 2-minute dismissal so the "Arrived" frame lingers, and that ended activity is
+    /// not an orphan — sweeping it here (which every tab switch after the summary closes used to do)
+    /// is why the terminal frame almost never survived.
     static func endOrphaned() async {
         let mine = activity?.id
-        for orphan in Activity<DriveActivityAttributes>.activities where orphan.id != mine {
+        for orphan in Activity<DriveActivityAttributes>.activities
+        where orphan.id != mine && orphan.activityState == .active {
             await orphan.end(nil, dismissalPolicy: .immediate)
         }
     }

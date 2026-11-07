@@ -182,6 +182,7 @@ struct TripDetailView: View {
                 Button { showAddStop = true } label: {
                     Image(systemName: "plus.circle.fill").font(.title3).foregroundStyle(.blue)
                 }
+                .accessibilityLabel("Add stop")
             }
             if trip.stops.isEmpty {
                 Text("No stops yet. Add the places you stopped along this drive.")
@@ -198,6 +199,7 @@ struct TripDetailView: View {
                             Image(systemName: "minus.circle.fill").foregroundStyle(.red)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Remove stop \(i + 1)")
                     }
                 }
             }
@@ -330,14 +332,20 @@ struct TripDetailView: View {
     private func deleteTrip() {
         Haptics.warning()
         let jid = trip.journeyID
-        if let remoteID = trip.remoteID {
-            Task { try? await APIClient.deleteTrip(id: remoteID) }
-        }
-        context.delete(trip)
-        try? context.save()
-        // Keep the rest of the journey consistent (renumber, or demote a lone survivor).
-        TripStore.renumberJourney(jid, context: context)
+        let remoteID = trip.remoteID
+        let doomed = trip
+        let ctx = context
+        // Pop FIRST, then delete: `trip` is @Bindable and read all over this body (`derivedKey`
+        // alone touches `points.count`), so deleting it while the view is still on screen risks a
+        // re-render dereferencing an invalidated SwiftData model during the pop animation.
         dismiss()
+        Task { @MainActor in
+            if let remoteID { try? await APIClient.deleteTrip(id: remoteID) }
+            ctx.delete(doomed)
+            try? ctx.save()
+            // Keep the rest of the journey consistent (renumber, or demote a lone survivor).
+            TripStore.renumberJourney(jid, context: ctx)
+        }
     }
 
     // MARK: - Map header
@@ -708,11 +716,7 @@ struct TripDetailView: View {
         .disabled(d.chart.count < 2)
     }
 
-    private func durationString(_ seconds: Int) -> String {
-        let h = seconds / 3600, m = (seconds % 3600) / 60
-        if h > 0 { return "\(h)h \(m)m" }
-        return "\(m) min"
-    }
+    private func durationString(_ seconds: Int) -> String { Fmt.duration(seconds) }
 }
 
 /// Pre-computed, render-stable view of a trip's track. Built once via `.task`.

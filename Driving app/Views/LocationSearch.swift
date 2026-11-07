@@ -76,6 +76,11 @@ final class CurrentLocationProvider: NSObject, CLLocationManagerDelegate {
         manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
     }
 
+    /// Location access was refused (or is restricted) — the caller should point at Settings.
+    var isDenied: Bool {
+        manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted
+    }
+
     /// Request authorization (if needed) and return the device's current fix, or nil on failure.
     func current() async -> PickedLocation? {
         let status = manager.authorizationStatus
@@ -192,6 +197,15 @@ struct LocationSearchSheet: View {
             .overlay {
                 if resolving { ProgressView().controlSize(.large) }
             }
+            // Picking used to fail silently (the spinner vanished and nothing happened) when an
+            // address couldn't be resolved or location access was off.
+            .alert(pickError?.title ?? "", isPresented: Binding(get: { pickError != nil },
+                                                               set: { if !$0 { pickError = nil } })) {
+                if pickError?.offerSettings == true, let url = URL(string: UIApplication.openSettingsURLString) {
+                    Button("Open Settings") { UIApplication.shared.open(url) }
+                }
+                Button("OK", role: .cancel) {}
+            } message: { Text(pickError?.message ?? "") }
             .sheet(isPresented: $showingAdd) {
                 AddBookmarkView(nextOrder: (places.map(\.sortOrder).max() ?? -1) + 1)
             }
@@ -216,6 +230,13 @@ struct LocationSearchSheet: View {
         }
     }
 
+    private struct PickError {
+        var title: String
+        var message: String
+        var offerSettings = false
+    }
+    @State private var pickError: PickError?
+
     private var searchBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -228,6 +249,7 @@ struct LocationSearchSheet: View {
                 Button { query = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
+                .accessibilityLabel("Clear search")
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
@@ -317,6 +339,13 @@ struct LocationSearchSheet: View {
         defer { resolving = false }
         if let picked = await locator.current() {
             pick(picked)
+        } else if locator.isDenied {
+            pickError = PickError(title: "Location Access Is Off",
+                                  message: "Allow location access for Drive Tracker in Settings to use where you are now.",
+                                  offerSettings: true)
+        } else {
+            pickError = PickError(title: "Couldn't Get Your Location",
+                                  message: "No GPS fix yet — try again in a moment, or search for the address.")
         }
     }
 
@@ -343,6 +372,9 @@ struct LocationSearchSheet: View {
         defer { resolving = false }
         if let picked = await completer.resolve(completion) {
             pick(picked)
+        } else {
+            pickError = PickError(title: "Couldn't Find That Address",
+                                  message: "Maps had no details for that suggestion. Try another one, or a more specific search.")
         }
     }
 

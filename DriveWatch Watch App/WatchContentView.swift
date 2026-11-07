@@ -54,6 +54,18 @@ private struct LiveDriveView: View {
                         Text("Stopped — ready for the next leg").font(.caption2).foregroundStyle(.secondary)
                     }
 
+                    // Re-evaluated every few seconds so a frozen feed is called out instead of the
+                    // last numbers sitting there looking live.
+                    TimelineView(.periodic(from: .now, by: 5)) { _ in
+                        if link.liveIsStale {
+                            Label("Reconnecting to iPhone…", systemImage: "antenna.radiowaves.left.and.right.slash")
+                                .font(.caption2).foregroundStyle(.orange)
+                        }
+                    }
+                    if let err = link.lastSendError {
+                        Text(err).font(.caption2).foregroundStyle(.orange).multilineTextAlignment(.center)
+                    }
+
                     controls.padding(.top, 2)
                 }
                 .padding(.horizontal, 4).padding(.vertical, 6)
@@ -220,6 +232,9 @@ private struct UpNextView: View {
                     }
                     .padding(.horizontal, 2)
                 }
+                if let err = link.lastSendError {
+                    Text(err).font(.caption2).foregroundStyle(.orange).padding(.top, 6)
+                }
             }
             .navigationTitle("Up Next")
         }
@@ -230,6 +245,12 @@ private struct UpNextView: View {
         return Button {
             startedID = drive.id
             link.startDrive(id: drive.id)
+            // If the phone never takes over (unreachable, or the drive no longer exists there) the
+            // card must not read "Starting on phone…" forever with no way to tap again.
+            Task {
+                try? await Task.sleep(for: .seconds(15))
+                if startedID == drive.id, link.live == nil { startedID = nil }
+            }
         } label: {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {

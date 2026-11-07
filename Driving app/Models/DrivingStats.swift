@@ -160,9 +160,6 @@ struct DrivingStats {
         ]
     }
 
-    static func duration(_ seconds: Int) -> String {
-        let h = seconds / 3600, m = (seconds % 3600) / 60
-        if h > 0 { return "\(h)h \(m)m" }
-        return "\(m)m"
-    }
+    /// One format everywhere ("45 min", "1h 5m", "2h") — see `Fmt.duration`.
+    static func duration(_ seconds: Int) -> String { Fmt.duration(seconds) }
 }

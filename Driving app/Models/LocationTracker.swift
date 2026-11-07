@@ -176,12 +176,6 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         let m = CLLocationManager()
         m.delegate = self
         m.activityType = .automotiveNavigation
-        // Only enable background updates if the app actually declares the location background mode,
-        // otherwise CoreLocation raises an assertion and crashes.
-        if Self.backgroundLocationEnabled {
-            m.allowsBackgroundLocationUpdates = true
-            m.showsBackgroundLocationIndicator = true
-        }
         m.pausesLocationUpdatesAutomatically = false
         manager = m
         authorizationStatus = m.authorizationStatus
@@ -205,6 +199,15 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         } else {
             manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
             manager.distanceFilter = 50
+        }
+        // Background location ONLY while a drive is under way. The idle manager (map dot on the
+        // Track tab, the summary sheet after End Drive) used to keep running in the background for
+        // as long as the tracker object lived — blue status indicator, battery drain, no benefit.
+        // Only touched if the app declares the `location` background mode, otherwise CoreLocation
+        // raises an assertion and crashes.
+        if Self.backgroundLocationEnabled {
+            manager.allowsBackgroundLocationUpdates = tracking
+            manager.showsBackgroundLocationIndicator = tracking
         }
     }
 
@@ -691,12 +694,19 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
                 // Only reflect speed while actually recording — parked between legs (or idle before
                 // a drive) shouldn't show GPS-noise speed on the HUD or inflate the drive's max.
                 currentSpeed = isRecording ? mph : 0
-                if isRecording { maxSpeed = max(maxSpeed, mph) }
+                // A poor-accuracy fix can carry a wild speed (40 mph while parked); the saved trip
+                // recomputes max from good points, so keep the live number honest the same way.
+                if isRecording, location.horizontalAccuracy <= 50 { maxSpeed = max(maxSpeed, mph) }
             }
 
             // Capture points only while recording a leg. Paused (between legs) keeps the session
             // alive for the map/ETA without recording a stationary blob at the stop.
             guard isTracking, isRecording else { continue }
+
+            // The first fix after (re)starting updates can be a cached one from minutes ago (after a
+            // long park, or resuming a recovered drive). Its stale timestamp would become the leg's
+            // start and inflate moving time, so skip anything clearly older than "now".
+            guard abs(location.timestamp.timeIntervalSinceNow) < 30 else { continue }
 
             let point = RecordedPoint(
                 t: location.timestamp,

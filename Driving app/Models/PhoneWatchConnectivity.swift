@@ -77,12 +77,15 @@ struct WatchSyncPayload: Codable {
         var maxSpeed: Double? = nil
         /// Seconds the car has been (nearly) stopped, so the watch can say "Stopped".
         var isStopped: Bool? = nil
+        /// When the phone built this frame, so the watch can tell a live drive from a frozen one
+        /// (the phone process died mid-drive and never sent the "ended" terminator).
+        var sentAt: Date? = nil
 
         private enum CodingKeys: String, CodingKey {
             case tripName, milesTraveled, currentSpeed, elapsedSeconds, eta, delaySeconds
             case progress, legText, isPaused, canAdvanceLeg
             case remainingMiles, legRemainingMiles, legEta
-            case nextTurn, nextTurnMeters, destinationName, maxSpeed, isStopped
+            case nextTurn, nextTurnMeters, destinationName, maxSpeed, isStopped, sentAt
         }
     }
     var drives: [Drive]
@@ -110,6 +113,7 @@ extension WatchSyncPayload.Live {
         destinationName = try values.decodeIfPresent(String.self, forKey: .destinationName)
         maxSpeed = try values.decodeIfPresent(Double.self, forKey: .maxSpeed)
         isStopped = try values.decodeIfPresent(Bool.self, forKey: .isStopped)
+        sentAt = try values.decodeIfPresent(Date.self, forKey: .sentAt)
     }
 }
 
@@ -190,6 +194,16 @@ final class PhoneWatchConnectivity: NSObject, WCSessionDelegate {
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
         Task { @MainActor in self.handleAction(message) }
+    }
+
+    /// The watch sends its controls with a reply handler so it can tell "the phone got it" from
+    /// "dropped on the floor" — see `WatchConnectivityManager.send`.
+    nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any],
+                             replyHandler: @escaping ([String: Any]) -> Void) {
+        Task { @MainActor in
+            self.handleAction(message)
+            replyHandler(["ok": true])
+        }
     }
 
     /// `WatchConnectivityManager.send(_:queueIfNeeded:)` falls back to `transferUserInfo` whenever

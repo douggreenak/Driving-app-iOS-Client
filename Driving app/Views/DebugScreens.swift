@@ -649,6 +649,13 @@ enum DebugLiveActivity {
             st.legRemainingMiles = 3.2
         }
         st.maxSpeed = 61; st.avgSpeed = 33; st.gallonsUsed = 0.48
+        st.startDate = now.addingTimeInterval(-1380)   // the widget ticks elapsed time from this
+        if variant == "open" {
+            // An ad-hoc "Start a Drive": no destination, no ETA, no progress — the timer is the hero.
+            st.eta = nil; st.delaySeconds = nil; st.progress = nil; st.remainingMiles = nil
+            st.destinationName = nil; st.scheduledArrival = nil; st.isMultiLeg = false
+            st.nextTurn = nil; st.nextTurnMeters = nil; st.tripTitle = "Drive"
+        }
         LiveActivityController.start(title: st.tripTitle ?? "Drive", scheduledArrival: st.scheduledArrival, state: st)
     }
 }

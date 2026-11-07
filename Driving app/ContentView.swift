@@ -200,6 +200,7 @@ struct ContentView: View {
         .task(id: watchSyncKey) { broadcastToWatch() }
         // Shortcuts / Siri hand-off (see `IntentBridge`): drain on launch and on each new request.
         .task {
+            ActiveDriveController.current = activeDrive   // lets Siri answer "what's my ETA" in place
             IntentBridge.shared.onRequest = { handleIntentRequests() }
             handleIntentRequests()
             DriveShortcuts.updateAppShortcutParameters()   // teach Siri the current saved places

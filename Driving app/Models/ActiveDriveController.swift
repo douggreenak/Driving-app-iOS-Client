@@ -24,6 +24,9 @@ import ActivityKit
 @Observable
 @MainActor
 final class ActiveDriveController {
+    /// The app's live controller, for App Intents that answer in place (e.g. "What's my ETA").
+    /// `ContentView` sets this on launch.
+    @ObservationIgnored static weak var current: ActiveDriveController?
     enum Presentation: Equatable { case none, full, minimized }
 
     /// Everything needed to reconstruct `LiveTrackingView` identically whether this is the first
@@ -151,7 +154,10 @@ final class ActiveDriveController {
                      nextTurn: tracker.isPausedBetweenLegs ? nil : guide.nextTurn,
                      nextTurnMeters: tracker.isPausedBetweenLegs ? nil : guide.nextTurnMeters,
                      maxSpeed: tracker.maxSpeed, avgSpeed: tracker.avgSpeedMph,
-                     gallonsUsed: tracker.accumulatedGallons)
+                     gallonsUsed: tracker.accumulatedGallons,
+                     // Only while under way: the terminal "Arrived" frame must show a frozen total,
+                     // not a timer that keeps counting after the drive ended.
+                     startDate: tracker.isTracking ? tracker.startTime : nil)
     }
     #endif
 
@@ -179,10 +185,22 @@ final class ActiveDriveController {
         broadcastLive()
     }
 
+    private var lastWatchFrame: Date = .distantPast
+    private var lastWatchFrameKey = ""
+
     /// Stream the current drive to the Apple Watch so it can be the live focus.
+    ///
+    /// Throttled to one frame a second (plus immediately on a change the driver would notice): this
+    /// is called from the 1 s timer, from every location fix AND from `ContentView`'s `.onChange`
+    /// drivers, so it used to send 2–4 WCSession messages per second for the whole drive.
     func broadcastLive() {
         #if canImport(WatchConnectivity) && os(iOS)
         guard let tracker, tracker.isTracking else { return }
+        let key = "\(tracker.isPausedBetweenLegs)|\(tracker.currentLegIndex)|\(guide.nextTurn ?? "")|\(Int(tracker.distanceMiles * 10))"
+        let now = Date()
+        if now.timeIntervalSince(lastWatchFrame) < 1, key == lastWatchFrameKey { return }
+        lastWatchFrame = now
+        lastWatchFrameKey = key
         var progress: Double?
         if let remaining = tracker.remainingMiles {
             let done = tracker.distanceMiles
@@ -216,7 +234,8 @@ final class ActiveDriveController {
             nextTurnMeters: tracker.isPausedBetweenLegs ? nil : guide.nextTurnMeters,
             destinationName: tracker.finalDestinationName ?? tracker.destinationName,
             maxSpeed: tracker.maxSpeed,
-            isStopped: tracker.currentSpeed < 3)
+            isStopped: tracker.currentSpeed < 3,
+            sentAt: now)
         PhoneWatchConnectivity.shared.sendLive(live)
         #endif
     }

@@ -19,16 +19,22 @@ final class CloudSyncStatus {
     var tripsRestoredThisRun = 0
     var pointsRestoredTrips = 0
     var pendingPointDownloads = 0
+    /// Trips not yet created in the cloud.
     var pendingUploads = 0
+    /// Trips whose GPS track still has to be sent (the trip row itself exists in the cloud).
+    var pendingTrackUploads = 0
 }
 
 // MARK: - Wire models (mirror the backend's Prisma models)
 
-private let isoFrac: ISO8601DateFormatter = {
+nonisolated(unsafe) private let isoFrac: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
 }()
-private let isoPlain = ISO8601DateFormatter()
-private func parseDate(_ s: String?) -> Date? {
+nonisolated(unsafe) private let isoPlain = ISO8601DateFormatter()
+/// Accepts both `2025-01-01T08:00:00Z` and `2025-01-01T08:00:00.000Z` (what a JS/Prisma backend
+/// serializes). Every remote date must go through this — a plain `ISO8601DateFormatter` silently
+/// rejects fractional seconds.
+nonisolated func parseDate(_ s: String?) -> Date? {
     guard let s else { return nil }
     return isoFrac.date(from: s) ?? isoPlain.date(from: s)
 }
@@ -120,7 +126,11 @@ enum CloudSync {
     private static var running = false
     private static var lastStart = Date.distantPast
     private static let settingsPulledKey = "cloud.settingsPulled.v1"
-    private static let noRemotePointsKey = "cloud.noRemotePoints.v1"
+    /// `[remoteID: epoch seconds]` of trips the cloud had no track for when last asked. Entries expire
+    /// (see `noRemotePointsRetry`) so a track that arrives later — from this phone's own pending
+    /// upload or another device — is still picked up instead of being given up on forever.
+    private static let noRemotePointsKey = "cloud.noRemotePoints.v2"
+    private static let noRemotePointsRetry: TimeInterval = 24 * 3600
     private static let pendingPointUploadsKey = "cloud.pendingPointUploads.v1"
     private static var status: CloudSyncStatus { .shared }
 
@@ -179,7 +189,7 @@ enum CloudSync {
     private static let editSigKey = "cloud.tripEditSignatures.v1"
 
     /// A fingerprint of every field of a trip the web API lets a client change after creation.
-    private static func editSignature(_ t: DriveTrip) -> String {
+    static func editSignature(_ t: DriveTrip) -> String {
         let stops = (try? JSONEncoder().encode(t.stops)).map { String(decoding: $0, as: UTF8.self) } ?? ""
         return [t.categoryRaw, t.notes ?? "", t.isFavorite ? "1" : "0", t.paidByRaw,
                 String(Int(t.date.timeIntervalSince1970)), t.startAddress, t.endAddress,
@@ -196,6 +206,16 @@ enum CloudSync {
         var sigs = (UserDefaults.standard.dictionary(forKey: editSigKey) as? [String: String]) ?? [:]
         sigs[id] = editSignature(t)
         UserDefaults.standard.set(sigs, forKey: editSigKey)
+    }
+
+    /// True when the phone has changed this trip since the last successful PATCH (or first sighting).
+    /// A pull must never overwrite such a trip with the cloud's older copy: the edit is still queued
+    /// and would otherwise be reverted *and* re-fingerprinted as "in sync", losing it for good.
+    static func hasUnpushedEdit(_ t: DriveTrip) -> Bool {
+        guard let id = t.remoteID,
+              let sigs = UserDefaults.standard.dictionary(forKey: editSigKey) as? [String: String],
+              let old = sigs[id] else { return false }
+        return old != editSignature(t)
     }
 
     static func pushLocalEdits(_ ctx: ModelContext) async throws {
@@ -260,8 +280,10 @@ enum CloudSync {
     private static func getJSON<T: Decodable & Sendable>(_ path: String, as: T.Type = T.self) async throws -> T {
         try await APIClient.decodeOffMain(T.self, from: try await APIClient.get(path))
     }
-    private static func send<B: Encodable>(_ method: String, _ path: String, _ body: B) async throws {
-        _ = try await APIClient.request(method, path, body: try JSONEncoder().encode(body))
+    private static func send<B: Encodable & Sendable>(_ method: String, _ path: String, _ body: B) async throws {
+        // Encode off the main actor: a track upload body holds thousands of points.
+        let data = try await APIClient.encodeOffMain(body)
+        _ = try await APIClient.request(method, path, body: data)
     }
 
     // MARK: Payer groups
@@ -350,7 +372,7 @@ enum CloudSync {
 
     // MARK: Settings
 
-    private struct SettingsPush: Encodable {
+    private nonisolated struct SettingsPush: Encodable {
         let monthlyBudget: Double, distanceUnit: String, fuelPricePerGallon: Double, defaultPaidBy: String
     }
 
@@ -382,6 +404,8 @@ enum CloudSync {
 
         let local = (try? ctx.fetch(FetchDescriptor<DriveTrip>())) ?? []
         var knownRemote = Set(local.compactMap(\.remoteID))
+        // Only a hint: local remoteIDs the server has since deleted (web dashboard) make this
+        // undercount, so the page walk below never uses it as its stop condition.
         let missing = probe.total - knownRemote.count
         // Also walk the cloud list when this phone has trips with no cloud id — an upload that landed
         // on the server but whose reply never got back (weak signal) must be LINKED to its cloud row
@@ -398,15 +422,23 @@ enum CloudSync {
                                   uniquingKeysWith: { a, _ in a })
         var journeyIDs: [String: UUID] = [:]
         var inserted = 0, page = 1
-        while inserted < missing || (!unlinked.isEmpty && (page - 1) * 20 < probe.total) {
-            let result: RemoteTripsPage = try await getJSON("/api/trips?full=true&page=\(page)&pageSize=20")
+        let pageSize = 20
+        // Newest first. Walk until a whole page holds nothing new (and no unlinked trip is still
+        // waiting for its cloud row), or the list is exhausted.
+        while (page - 1) * pageSize < probe.total {
+            let result: RemoteTripsPage = try await getJSON("/api/trips?full=true&page=\(page)&pageSize=\(pageSize)")
             if result.items.isEmpty { break }
+            var newOnPage = 0
             for r in result.items where !knownRemote.contains(r.id) {
                 guard let date = parseDate(r.date) else { continue }
+                newOnPage += 1
                 if let dup = unlinked[key(date, r.startLat, r.startLng)] {
                     dup.remoteID = r.id; dup.synced = true
                     unlinked[key(date, r.startLat, r.startLng)] = nil
                     knownRemote.insert(r.id); inserted += 1
+                    // The cloud row exists but may have been created without its track (the reply
+                    // that would have triggered the upload never arrived) — queue it.
+                    markTrackPending(r.id)
                     continue
                 }
                 insertTrip(r, date: date, journeyIDs: &journeyIDs, into: ctx)
@@ -415,6 +447,7 @@ enum CloudSync {
             }
             try? ctx.save()
             page += 1
+            if newOnPage == 0 && unlinked.isEmpty && inserted >= missing { break }
             await Task.yield()
         }
         status.pendingPointDownloads = max(0, status.pendingPointDownloads)
@@ -423,8 +456,10 @@ enum CloudSync {
 
     private static func insertTrip(_ r: RemoteTripFull, date: Date, journeyIDs: inout [String: UUID],
                                    into ctx: ModelContext) {
+        // The server stores whole minutes (rounded); the exact end stamp is better when it exists.
         let end = parseDate(r.endDate) ?? date.addingTimeInterval(TimeInterval(r.duration * 60))
-        let seconds = max(r.duration * 60, Int(end.timeIntervalSince(date)))
+        let exact = Int(end.timeIntervalSince(date))
+        let seconds = r.endDate != nil && exact > 0 ? exact : r.duration * 60
         let poly: Data? = r.matchedPolyline.flatMap { Data(base64Encoded: $0) }
         let trip = DriveTrip(
             date: date, endDate: end,
@@ -481,15 +516,31 @@ enum CloudSync {
         UserDefaults.standard.set(Array(s), forKey: key)
     }
 
+    /// Remote ids whose "no track in the cloud" answer is still fresh enough to trust.
+    private static func noRemotePoints() -> Set<String> {
+        let raw = (UserDefaults.standard.dictionary(forKey: noRemotePointsKey) as? [String: Double]) ?? [:]
+        let cutoff = Date().timeIntervalSince1970 - noRemotePointsRetry
+        return Set(raw.filter { $0.value >= cutoff }.keys)
+    }
+    private static func rememberNoRemotePoints(_ rid: String) {
+        var raw = (UserDefaults.standard.dictionary(forKey: noRemotePointsKey) as? [String: Double]) ?? [:]
+        raw[rid] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(raw, forKey: noRemotePointsKey)
+    }
+    private static func forgetNoRemotePoints(_ rid: String) {
+        var raw = (UserDefaults.standard.dictionary(forKey: noRemotePointsKey) as? [String: Double]) ?? [:]
+        guard raw.removeValue(forKey: rid) != nil else { return }
+        UserDefaults.standard.set(raw, forKey: noRemotePointsKey)
+    }
+
     /// Download one trip's track from the cloud (used on demand when a trip is opened, and in batches).
     @discardableResult
     static func restorePoints(for trip: DriveTrip) async -> Bool {
         guard let rid = trip.remoteID, trip.points.isEmpty, !trip.isManualEntry,
               let ctx = trip.modelContext else { return false }
-        var none = set(noRemotePointsKey)
-        if none.contains(rid) { return false }
+        if noRemotePoints().contains(rid) { return false }
         guard let pts = try? await getJSON("/api/trips/\(rid)/points", as: [RemotePoint].self) else { return false }
-        guard pts.count >= 2 else { none.insert(rid); store(none, noRemotePointsKey); return false }
+        guard pts.count >= 2 else { rememberNoRemotePoints(rid); return false }
         for (i, p) in pts.enumerated() {
             let tp = TrackPoint(seq: p.seq, t: parseDate(p.t) ?? trip.date, lat: p.lat, lng: p.lng,
                                 speed: p.speed, course: p.course, accuracy: p.accuracy,
@@ -514,7 +565,7 @@ enum CloudSync {
     /// main thread, which is what made the app crawl and lock up. Now trips already known to have (or
     /// not have) a track are remembered by id, and only a bounded handful are inspected per pass.
     private static func restoreMissingPoints(_ ctx: ModelContext, limit: Int) async {
-        let none = set(noRemotePointsKey)
+        let none = noRemotePoints()
         var present = set(pointsPresentKey)
         let trips = (try? ctx.fetch(FetchDescriptor<DriveTrip>(
             predicate: #Predicate { $0.remoteID != nil && !$0.isManualEntry },
@@ -540,31 +591,54 @@ enum CloudSync {
 
     // MARK: Track points — upload
 
+    /// Queue a trip's track for upload on the next sync pass.
+    static func markTrackPending(_ rid: String) {
+        var pending = set(pendingPointUploadsKey); pending.insert(rid); store(pending, pendingPointUploadsKey)
+        status.pendingTrackUploads = pending.count
+    }
+
     static func uploadPoints(for trip: DriveTrip) async {
         guard let rid = trip.remoteID else { return }
         let pts = trip.orderedPoints
         guard pts.count >= 2 else { return }
-        struct Body: Encodable { let points: [RemotePoint] }
+        nonisolated struct Body: Encodable { let points: [RemotePoint] }
         let body = Body(points: pts.enumerated().map { i, p in
             RemotePoint(seq: i, t: stamp(p.t), lat: p.lat, lng: p.lng, speed: p.speed,
                         course: p.course, accuracy: p.accuracy, altitude: p.altitude, onRoad: p.onRoad)
         })
+        // Mark it pending BEFORE the request: this POST carries thousands of points and runs right
+        // after End Drive, when the phone is about to be pocketed. If iOS suspends or kills the app
+        // mid-request, no `catch` ever runs — the pending flag is what makes the next pass retry
+        // instead of the track being lost from the cloud for good.
+        markTrackPending(rid)
         do {
             try await send("POST", "/api/trips/\(rid)/points", body)
             var pending = set(pendingPointUploadsKey); pending.remove(rid); store(pending, pendingPointUploadsKey)
+            forgetNoRemotePoints(rid)
         } catch {
-            var pending = set(pendingPointUploadsKey); pending.insert(rid); store(pending, pendingPointUploadsKey)
+            // Stays pending.
         }
-        status.pendingUploads = set(pendingPointUploadsKey).count
+        status.pendingTrackUploads = set(pendingPointUploadsKey).count
     }
 
     private static func flushPendingPointUploads(_ ctx: ModelContext) async {
         let pending = set(pendingPointUploadsKey)
-        status.pendingUploads = pending.count
+        status.pendingTrackUploads = pending.count
         guard !pending.isEmpty,
               let trips = try? ctx.fetch(FetchDescriptor<DriveTrip>(predicate: #Predicate { $0.remoteID != nil }))
         else { return }
-        for t in trips where pending.contains(t.remoteID ?? "") { await uploadPoints(for: t) }
+        var seen: Set<String> = []
+        for t in trips {
+            guard let rid = t.remoteID, pending.contains(rid), !seen.contains(rid) else { continue }
+            seen.insert(rid)
+            await uploadPoints(for: t)
+            if t.orderedPoints.count < 2 {
+                // Nothing to send (manual entry, or the track never made it to this device): drop
+                // the flag so it doesn't sit in the queue forever.
+                var p = set(pendingPointUploadsKey); p.remove(rid); store(p, pendingPointUploadsKey)
+            }
+        }
+        status.pendingTrackUploads = set(pendingPointUploadsKey).count
     }
 
     // MARK: Polyline decode (precision 5, matches `Polyline.encode`)

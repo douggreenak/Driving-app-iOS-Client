@@ -94,7 +94,9 @@ struct DwellTimePicker: View {
                 // ── Hours column ──────────────────────────
                 ZStack(alignment: .trailing) {
                     Picker("Hours", selection: hoursBinding) {
-                        ForEach(0...5, id: \.self) { h in
+                        // Extend past 5 h when the bound value already is (a long layover synced
+                        // from the cloud), or the wheel shows no selection and can't be reduced.
+                        ForEach(0...max(5, selectedHours), id: \.self) { h in
                             Text("\(h)").tag(h)
                         }
                     }

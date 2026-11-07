@@ -52,6 +52,7 @@ struct LiveTrackingView: View {
     @State private var showingAddStop = false
     @State private var showingDivertSearch = false
     @State private var recovered: DriveLogger.Recovered?
+    @State private var confirmDiscardRecovered = false
     /// Measured height of `bottomControls`, so `recenterButton` can sit just above it regardless of
     /// which of its several states (pre-start / paused / mid-route-with-fuel-chip / …) is showing.
     @State private var bottomControlsHeight: CGFloat = 160
@@ -469,6 +470,7 @@ struct LiveTrackingView: View {
                 Button { Haptics.tap(); showingAddStop = true } label: {
                     Image(systemName: "plus.circle.fill").font(.title3).foregroundStyle(.blue)
                 }
+                .accessibilityLabel("Add stop")
             }
             HStack {
                 Text("Leg \(min(tracker.currentLegIndex + 1, tracker.totalLegs)) of \(tracker.totalLegs)")
@@ -617,6 +619,7 @@ struct LiveTrackingView: View {
                         .background(.ultraThinMaterial, in: .circle)
                         .shadow(radius: 4, y: 2)
                 }
+                .accessibilityLabel("Recenter on my location")
                 }
                 .padding(.trailing, 20)
                 .padding(.bottom, bottomControlsHeight + 12)
@@ -737,7 +740,18 @@ struct LiveTrackingView: View {
                         .font(.caption.weight(.bold)).buttonStyle(.borderedProminent)
                 }
             }
-            Button {
+            Button { confirmDiscardRecovered = true } label: {
+                Image(systemName: "trash").foregroundStyle(.red)
+            }
+            .accessibilityLabel("Discard recovered drive")
+        }
+        .padding()
+        .background(.ultraThinMaterial, in: .rect(cornerRadius: 16))
+        // One mis-tap used to throw the whole unsaved track away, with no way back — and this
+        // banner shows up right after a crash, exactly when people poke at things.
+        .confirmationDialog("Discard the recovered drive?", isPresented: $confirmDiscardRecovered,
+                            titleVisibility: .visible) {
+            Button("Discard \(rec.points.count) Points", role: .destructive) {
                 LocationTracker.discardRecoverableSession()
                 recovered = nil
                 // This recovered session belongs to a previous process that force-quit before
@@ -747,12 +761,10 @@ struct LiveTrackingView: View {
                 #if canImport(ActivityKit) && !os(macOS)
                 Task { await LiveActivityController.endOrphaned() }
                 #endif
-            } label: {
-                Image(systemName: "trash").foregroundStyle(.red)
             }
+        } message: {
+            Text("The GPS track from the interrupted drive will be deleted. Save it instead to keep it.")
         }
-        .padding()
-        .background(.ultraThinMaterial, in: .rect(cornerRadius: 16))
     }
 
     // MARK: - Bottom controls

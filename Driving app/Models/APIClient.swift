@@ -24,10 +24,15 @@ struct APIClient {
         try await Task.detached(priority: .userInitiated) { try JSONDecoder().decode(T.self, from: data) }.value
     }
 
+    /// Encode on a background thread (a trip create carries the whole snapped polyline).
+    nonisolated static func encodeOffMain<T: Encodable & Sendable>(_ value: T) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) { try JSONEncoder().encode(value) }.value
+    }
+
     static func createTrip(_ trip: APITripCreate) async throws -> APITrip {
-        let body = try JSONEncoder.api.encode(trip)
+        let body = try await encodeOffMain(trip)
         let data = try await post("/api/trips", body: body)
-        return try JSONDecoder.api.decode(APITrip.self, from: data)
+        return try await decodeOffMain(APITrip.self, from: data)
     }
 
     static func deleteTrip(id: String) async throws {
@@ -98,7 +103,7 @@ struct APIClient {
 
     static func fetchGasEntries() async throws -> [APIGasEntry] {
         let data = try await get("/api/gas")
-        return try JSONDecoder.api.decode([APIGasEntry].self, from: data)
+        return try await decodeOffMain([APIGasEntry].self, from: data)
     }
 
     static func createGasEntry(_ entry: APIGasEntryCreate) async throws -> APIGasEntry {
@@ -134,7 +139,7 @@ struct APIClient {
 
     static func fetchScheduledDrives() async throws -> [APIScheduledDrive] {
         let data = try await get("/api/scheduled")
-        return try JSONDecoder.api.decode([APIScheduledDrive].self, from: data)
+        return try await decodeOffMain([APIScheduledDrive].self, from: data)
     }
 
     static func createScheduledDrive(_ drive: APIScheduledDrivePayload) async throws -> APIScheduledDrive {

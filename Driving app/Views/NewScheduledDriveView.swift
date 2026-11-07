@@ -128,6 +128,7 @@ struct NewScheduledDriveView: View {
                                 Image(systemName: "minus.circle.fill").foregroundStyle(.red)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Remove stop \(index + 1)")
                         }
                         // Clock-style dwell picker: collapses to a row, expands to a wheel on tap.
                         DwellTimePicker(
@@ -399,11 +400,7 @@ struct NewScheduledDriveView: View {
         return drive
     }
 
-    private func travelString(_ seconds: Int) -> String {
-        let m = seconds / 60
-        if m >= 60 { return "\(m / 60)h \(m % 60)m" }
-        return "\(m) min"
-    }
+    private func travelString(_ seconds: Int) -> String { Fmt.duration(seconds) }
 
     private static func defaultDeparture() -> Date {
         let cal = Calendar.current
