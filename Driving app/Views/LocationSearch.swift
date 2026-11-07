@@ -8,18 +8,26 @@ struct PickedLocation {
     var coordinate: CLLocationCoordinate2D
 }
 
+extension MKLocalSearchCompletion {
+    /// A stable identity for a suggestion (title + subtitle), so list rows aren't rebuilt on each update.
+    var resultID: String { title + "\u{1F}" + subtitle }
+}
+
 /// Live address autocomplete backed by MapKit's `MKLocalSearchCompleter`.
 @Observable
 final class AddressCompleter: NSObject, MKLocalSearchCompleterDelegate {
     private let completer = MKLocalSearchCompleter()
     var results: [MKLocalSearchCompletion] = []
+    private var lastFragment = ""
 
     var query: String = "" {
         didSet {
             let trimmed = query.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty {
-                results = []
-            } else {
+                if !results.isEmpty { results = [] }
+                lastFragment = ""
+            } else if trimmed != lastFragment {
+                lastFragment = trimmed
                 completer.queryFragment = trimmed
             }
         }
@@ -32,7 +40,11 @@ final class AddressCompleter: NSObject, MKLocalSearchCompleterDelegate {
     }
 
     func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
-        results = completer.results
+        // Skip identical batches so the list isn't torn down and redrawn for nothing.
+        var seen = Set<String>()
+        let new = completer.results.filter { seen.insert($0.resultID).inserted }
+        guard new.map(\.resultID) != results.map(\.resultID) else { return }
+        results = new
     }
 
     func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
@@ -163,6 +175,11 @@ struct LocationSearchSheet: View {
                 searchBar
                 if isSearching {
                     List { resultsSection }.listStyle(.plain)
+                        // Scrolling the suggestions must NOT toggle the keyboard: the default
+                        // dismiss-on-scroll fought with the live result updates (each new batch of
+                        // suggestions re-rendered the list), so the keyboard kept sliding down and
+                        // back up. It now stays put until a place is picked or Cancel is tapped.
+                        .scrollDismissesKeyboard(.never)
                 } else {
                     savedCards
                 }
@@ -232,6 +249,7 @@ struct LocationSearchSheet: View {
             .padding(.horizontal)
             .padding(.bottom, 24)
         }
+        .scrollDismissesKeyboard(.never)
     }
 
     private var currentLocationCard: some View {
@@ -304,7 +322,7 @@ struct LocationSearchSheet: View {
 
     @ViewBuilder
     private var resultsSection: some View {
-        ForEach(Array(completer.results.enumerated()), id: \.offset) { _, result in
+        ForEach(completer.results, id: \.resultID) { result in
             Button { Task { await select(result) } } label: {
                 HStack(spacing: 12) {
                     Image(systemName: "mappin.circle.fill").foregroundStyle(.red).frame(width: 26)

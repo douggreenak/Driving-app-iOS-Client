@@ -490,30 +490,52 @@ enum CloudSync {
         if none.contains(rid) { return false }
         guard let pts = try? await getJSON("/api/trips/\(rid)/points", as: [RemotePoint].self) else { return false }
         guard pts.count >= 2 else { none.insert(rid); store(none, noRemotePointsKey); return false }
-        for p in pts {
+        for (i, p) in pts.enumerated() {
             let tp = TrackPoint(seq: p.seq, t: parseDate(p.t) ?? trip.date, lat: p.lat, lng: p.lng,
                                 speed: p.speed, course: p.course, accuracy: p.accuracy,
                                 altitude: p.altitude, onRoad: p.onRoad)
             tp.trip = trip
             ctx.insert(tp)
+            // Let the UI breathe during a big track (thousands of rows) instead of freezing for it.
+            if i % 400 == 399 { await Task.yield() }
         }
         try? ctx.save()
+        var present = set(pointsPresentKey); present.insert(rid); store(present, pointsPresentKey)
         return true
     }
 
+    private static let pointsPresentKey = "cloud.pointsPresent.v1"
+
+    /// Downloads missing tracks a few trips at a time.
+    ///
+    /// IMPORTANT for speed: this must never touch `trip.points` for the whole trip list. Reading that
+    /// relationship loads every track point of the trip into memory, and the old "which trips have no
+    /// points?" filter did it for ALL trips on every sync pass — hundreds of thousands of rows on the
+    /// main thread, which is what made the app crawl and lock up. Now trips already known to have (or
+    /// not have) a track are remembered by id, and only a bounded handful are inspected per pass.
     private static func restoreMissingPoints(_ ctx: ModelContext, limit: Int) async {
         let none = set(noRemotePointsKey)
-        let trips = ((try? ctx.fetch(FetchDescriptor<DriveTrip>(
+        var present = set(pointsPresentKey)
+        let trips = (try? ctx.fetch(FetchDescriptor<DriveTrip>(
             predicate: #Predicate { $0.remoteID != nil && !$0.isManualEntry },
-            sortBy: [SortDescriptor(\.date, order: .reverse)]))) ?? [])
-            .filter { $0.points.isEmpty && !none.contains($0.remoteID ?? "") }
-        status.pendingPointDownloads = trips.count
-        var done = 0
-        for t in trips.prefix(limit) {
-            if await restorePoints(for: t) { done += 1; status.pointsRestoredTrips += 1 }
-            status.pendingPointDownloads = max(0, trips.count - done)
+            sortBy: [SortDescriptor(\.date, order: .reverse)]))) ?? []
+        let candidates = trips.filter {
+            guard let r = $0.remoteID else { return false }
+            return !none.contains(r) && !present.contains(r)
+        }
+        status.pendingPointDownloads = candidates.count
+        var restored = 0, examined = 0
+        let maxExamined = limit == .max ? Int.max : 40
+        for t in candidates {
+            if restored >= limit || examined >= maxExamined { break }
+            guard let rid = t.remoteID else { continue }
+            examined += 1
+            if !t.points.isEmpty { present.insert(rid); continue }   // faults ONE trip, once
+            if await restorePoints(for: t) { restored += 1; status.pointsRestoredTrips += 1 }
+            status.pendingPointDownloads = max(0, candidates.count - examined)
             await Task.yield()
         }
+        store(present, pointsPresentKey)
     }
 
     // MARK: Track points — upload
