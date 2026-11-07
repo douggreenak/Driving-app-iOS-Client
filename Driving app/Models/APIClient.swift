@@ -14,7 +14,14 @@ struct APIClient {
 
     static func fetchTrips() async throws -> [APITrip] {
         let data = try await get("/api/trips")
-        return try JSONDecoder.api.decode([APITrip].self, from: data)
+        return try await decodeOffMain([APITrip].self, from: data)
+    }
+
+    /// Decode on a background thread. This app defaults to main-actor isolation, so a plain
+    /// `JSONDecoder().decode` of the whole trip list (hundreds of rows, each carrying route strings)
+    /// ran ON the UI thread — the ~1 s freeze that hit on tab switches and app resumes.
+    nonisolated static func decodeOffMain<T: Decodable & Sendable>(_ type: T.Type, from data: Data) async throws -> T {
+        try await Task.detached(priority: .userInitiated) { try JSONDecoder().decode(T.self, from: data) }.value
     }
 
     static func createTrip(_ trip: APITripCreate) async throws -> APITrip {
@@ -233,7 +240,7 @@ struct APIClient {
 
 // MARK: - API Models
 
-struct APITrip: Codable, Identifiable {
+nonisolated struct APITrip: Codable, Identifiable {
     let id: String
     let date: String
     let startAddress: String
@@ -262,7 +269,7 @@ struct APITrip: Codable, Identifiable {
     }
 }
 
-struct APITripCreate: Codable {
+nonisolated struct APITripCreate: Codable {
     let date: String
     let startAddress: String
     let endAddress: String
@@ -302,7 +309,7 @@ struct APITripCreate: Codable {
 // MARK: Scheduled drives
 
 /// A scheduled drive as returned by the backend (dates are ISO-8601 strings).
-struct APIScheduledDrive: Codable, Identifiable {
+nonisolated struct APIScheduledDrive: Codable, Identifiable {
     let id: String
     let title: String
     let startAddress: String
@@ -328,7 +335,7 @@ struct APIScheduledDrive: Codable, Identifiable {
 }
 
 /// Payload for creating (id nil) or updating (id set) a scheduled drive.
-struct APIScheduledDrivePayload: Codable {
+nonisolated struct APIScheduledDrivePayload: Codable {
     var id: String?
     let title: String
     let startAddress: String
@@ -356,7 +363,7 @@ struct APIScheduledDrivePayload: Codable {
     let stops: [RouteStop]
 }
 
-struct APIGasEntry: Codable, Identifiable {
+nonisolated struct APIGasEntry: Codable, Identifiable {
     let id: String
     let date: String
     let gallons: Double
@@ -387,7 +394,7 @@ struct APIGasEntry: Codable, Identifiable {
     }
 }
 
-struct APIGasEntryCreate: Codable {
+nonisolated struct APIGasEntryCreate: Codable {
     let date: String
     let gallons: Double
     let pricePerGallon: Double
@@ -398,7 +405,7 @@ struct APIGasEntryCreate: Codable {
     let vehicleName: String?
 }
 
-struct APIStats: Codable {
+nonisolated struct APIStats: Codable {
     let totalTrips: Int
     let totalMiles: Double
     let totalGallons: Double

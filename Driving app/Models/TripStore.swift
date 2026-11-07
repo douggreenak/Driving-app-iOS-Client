@@ -458,7 +458,7 @@ enum TripStore {
     static func pullRemoteEdits(context: ModelContext, force: Bool = false) async -> Int {
         // Tab switches fire this constantly (it downloads and decodes the whole trip list); once every
         // 30 s is plenty unless the user explicitly pulled to refresh.
-        if !force, Date().timeIntervalSince(lastRemotePull) < 30 { return 0 }
+        if !force, Date().timeIntervalSince(lastRemotePull) < 90 { return 0 }
         lastRemotePull = Date()
         // Push the phone's own edits first, so the cloud's older copy can never revert them.
         try? await CloudSync.pushLocalEdits(context)

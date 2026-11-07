@@ -34,7 +34,7 @@ private func parseDate(_ s: String?) -> Date? {
 }
 private func stamp(_ d: Date) -> String { isoPlain.string(from: d) }
 
-struct RemoteTripFull: Decodable {
+nonisolated struct RemoteTripFull: Decodable {
     let id: String
     let date: String
     let endDate: String?
@@ -67,16 +67,16 @@ struct RemoteTripFull: Decodable {
     let stops: [RouteStop]?
 }
 
-private struct RemoteTripsPage: Decodable { let items: [RemoteTripFull]; let total: Int }
+private nonisolated struct RemoteTripsPage: Decodable { let items: [RemoteTripFull]; let total: Int }
 
-struct RemotePoint: Codable {
+nonisolated struct RemotePoint: Codable {
     let seq: Int
     let t: String
     let lat: Double, lng: Double, speed: Double, course: Double, accuracy: Double, altitude: Double
     let onRoad: Bool
 }
 
-private struct RemoteVehicle: Codable {
+private nonisolated struct RemoteVehicle: Codable {
     var id: String?
     let name: String
     let make: String?, model: String?
@@ -85,19 +85,19 @@ private struct RemoteVehicle: Codable {
     let lastFilledUp: String?
 }
 
-private struct RemotePayer: Codable {
+private nonisolated struct RemotePayer: Codable {
     let key: String, name: String, icon: String, colorName: String
     let sortOrder: Int, isBuiltIn: Bool, isArchived: Bool
 }
 
-private struct RemotePlace: Codable {
+private nonisolated struct RemotePlace: Codable {
     var id: String?
     let label: String, address: String
     let lat: Double, lng: Double
     let icon: String, sortOrder: Int
 }
 
-private struct RemoteSettingsEnvelope: Decodable {
+private nonisolated struct RemoteSettingsEnvelope: Decodable {
     struct S: Decodable {
         let monthlyBudget: Double?, distanceUnit: String?, fuelPricePerGallon: Double?, defaultPaidBy: String?
     }
@@ -257,8 +257,8 @@ enum CloudSync {
 
     // MARK: JSON helpers
 
-    private static func getJSON<T: Decodable>(_ path: String, as: T.Type = T.self) async throws -> T {
-        try JSONDecoder().decode(T.self, from: try await APIClient.get(path))
+    private static func getJSON<T: Decodable & Sendable>(_ path: String, as: T.Type = T.self) async throws -> T {
+        try await APIClient.decodeOffMain(T.self, from: try await APIClient.get(path))
     }
     private static func send<B: Encodable>(_ method: String, _ path: String, _ body: B) async throws {
         _ = try await APIClient.request(method, path, body: try JSONEncoder().encode(body))
@@ -376,7 +376,7 @@ enum CloudSync {
 
     private static func restoreTrips(_ ctx: ModelContext) async throws {
         // Cheap probe first: the total, without any bulky columns.
-        struct Probe: Decodable { let total: Int }
+        nonisolated struct Probe: Decodable { let total: Int }
         let probe: Probe = try await getJSON("/api/trips?page=1&pageSize=1")
         status.remoteTripTotal = probe.total
 
