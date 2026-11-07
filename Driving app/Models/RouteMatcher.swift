@@ -14,7 +14,7 @@ import MapKit
 ///     drive is not force-fit onto the suggested route.
 enum RouteMatcher {
 
-    struct Result {
+    nonisolated struct Result {
         /// Display polyline: snapped where the driver was on a known road, raw GPS on detours.
         var coordinates: [CLLocationCoordinate2D]
         /// Per-input-point flag: was this point on a known road?
@@ -28,7 +28,7 @@ enum RouteMatcher {
     }
 
     /// Points within this distance of a candidate road are considered "on road".
-    static let toleranceMeters: Double = 35
+    nonisolated static let toleranceMeters: Double = 35
 
     /// Fetch candidate driving routes between two coordinates, preferring the fastest route
     /// (Apple Maps recommended). Returns routes sorted by travel time (fastest first).
@@ -109,14 +109,27 @@ enum RouteMatcher {
                           fitMeters: 0, matchedFraction: 0, usedRoute: false)
         }
 
+        // The scoring/snapping below is O(points × route segments) — thousands of points against
+        // thousands of segments. It used to run right here on the main actor (this app defaults to
+        // main-actor isolation), freezing the UI for seconds when a drive was finished. Pull the
+        // MapKit objects apart on main, then crunch plain arrays on a background thread.
+        let polys = routes.map { $0.polyline.coordinates() }
+        let times = routes.map(\.expectedTravelTime)
+        return await Task.detached(priority: .userInitiated) {
+            computeMatch(coords: coords, polys: polys, times: times)
+        }.value
+    }
+
+    nonisolated private static func computeMatch(coords: [CLLocationCoordinate2D],
+                                                 polys: [[CLLocationCoordinate2D]],
+                                                 times: [TimeInterval]) -> Result {
+        let start = coords[0]
         let plane = LocalPlane(reference: start)
 
         // Project each candidate route's polyline into the local plane once.
-        let projected: [[(x: Double, y: Double)]] = routes.map { route in
-            route.polyline.coordinates().map { plane.xy($0) }
-        }
+        let projected: [[(x: Double, y: Double)]] = polys.map { $0.map { plane.xy($0) } }
         let gps = coords.map { plane.xy($0) }
-        let fastest = routes.map(\.expectedTravelTime).min() ?? 1
+        let fastest = times.min() ?? 1
 
         // Score = mean GPS-to-route distance, lightly penalized for inefficiency.
         var best: Int?
@@ -124,7 +137,7 @@ enum RouteMatcher {
         for (i, poly) in projected.enumerated() {
             guard poly.count >= 2 else { continue }
             let fit = meanFit(gps: gps, route: poly)
-            let inefficiency = routes[i].expectedTravelTime / max(fastest, 1) - 1  // 0 for the fastest
+            let inefficiency = times[i] / max(fastest, 1) - 1  // 0 for the fastest
             let score = fit + inefficiency * 15  // ~15 m of fit per 100% slower → tie-breaker only
             if score < bestScore {
                 bestScore = score
@@ -183,7 +196,7 @@ enum RouteMatcher {
 
     // MARK: - Geometry
 
-    private static func meanFit(gps: [(x: Double, y: Double)], route: [(x: Double, y: Double)]) -> Double {
+    nonisolated private static func meanFit(gps: [(x: Double, y: Double)], route: [(x: Double, y: Double)]) -> Double {
         guard !gps.isEmpty else { return .greatestFiniteMagnitude }
         var sum = 0.0
         for p in gps { sum += nearest(point: p, on: route).distance }
@@ -191,7 +204,7 @@ enum RouteMatcher {
     }
 
     /// How many segments either side of the last match's position `nearest(from:)` searches first.
-    private static let matchWindow = 6
+    nonisolated private static let matchWindow = 6
 
     /// Nearest point on a polyline (in planar meters) to `point`, with the distance to it and the
     /// index of the segment it landed on (`route[segment - 1]` → `route[segment]`).
@@ -209,7 +222,7 @@ enum RouteMatcher {
     /// (GPS dropped out and reacquired much further down the route) match normally, same as before —
     /// only the AMBIGUOUS case (a close match nearby AND a close match far away) is resolved
     /// differently now, in favor of the nearby one.
-    private static func nearest(point p: (x: Double, y: Double), on poly: [(x: Double, y: Double)],
+    nonisolated private static func nearest(point p: (x: Double, y: Double), on poly: [(x: Double, y: Double)],
                                 from cursor: Int = 0) -> (distance: Double, point: (x: Double, y: Double), segment: Int) {
         guard poly.count > 1 else {
             let pt = poly.first ?? p
@@ -235,7 +248,7 @@ enum RouteMatcher {
 
     /// Nearest projected point to `p` among `poly`'s segments in `range` (1-indexed segment ends),
     /// or nil if `range` is empty.
-    private static func scanSegments(_ p: (x: Double, y: Double), _ poly: [(x: Double, y: Double)],
+    nonisolated private static func scanSegments(_ p: (x: Double, y: Double), _ poly: [(x: Double, y: Double)],
                                      _ range: Range<Int>) -> (distance: Double, point: (x: Double, y: Double), segment: Int)? {
         var bestD = Double.greatestFiniteMagnitude
         var bestPt = poly.first ?? p
@@ -256,7 +269,7 @@ enum RouteMatcher {
         return nil
     }
 
-    private static func projectOntoSegment(_ p: (x: Double, y: Double),
+    nonisolated private static func projectOntoSegment(_ p: (x: Double, y: Double),
                                            _ a: (x: Double, y: Double),
                                            _ b: (x: Double, y: Double)) -> (x: Double, y: Double) {
         let dx = b.x - a.x, dy = b.y - a.y
@@ -268,7 +281,7 @@ enum RouteMatcher {
     }
 
     /// Ramer–Douglas–Peucker-ish thinning to drop redundant collinear points (meters tolerance).
-    private static func simplify(_ coords: [CLLocationCoordinate2D], tolerance: Double) -> [CLLocationCoordinate2D] {
+    nonisolated private static func simplify(_ coords: [CLLocationCoordinate2D], tolerance: Double) -> [CLLocationCoordinate2D] {
         guard coords.count > 2 else { return coords }
         var out: [CLLocationCoordinate2D] = [coords[0]]
         for i in 1..<coords.count - 1 {

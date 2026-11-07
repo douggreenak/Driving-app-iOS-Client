@@ -56,6 +56,11 @@ struct LiveTrackingView: View {
     /// which of its several states (pre-start / paused / mid-route-with-fuel-chip / …) is showing.
     @State private var bottomControlsHeight: CGFloat = 160
     @State private var didAutoStart = false
+    /// Bottom edge (screen coordinates) of the stats/turn cards stacked at the top. The map keeps that
+    /// much of its top covered so the car's marker sits in the VISIBLE middle, not under the cards.
+    @State private var topCoverHeight: CGFloat = 0
+    /// Thinned copy of the recorded track, grown incrementally (see `TrailCache`).
+    @State private var trail = TrailCache()
 
     /// The dotted light-blue guide line + next-turn data. Owned by `ActiveDriveController` so it keeps
     /// refreshing (and feeding the Watch / Live Activity) while this view is minimized.
@@ -99,16 +104,19 @@ struct LiveTrackingView: View {
                 mapLayer
 
                 VStack(spacing: 12) {
-                    if let recovered, !tracker.isTracking {
-                        recoveryBanner(recovered)
-                    }
-                    if tracker.isTracking {
-                        if tracker.isMultiLeg, tracker.hasActiveTarget {
-                            legProgressStrip
+                    VStack(spacing: 12) {
+                        if let recovered, !tracker.isTracking {
+                            recoveryBanner(recovered)
                         }
-                        unifiedHUD
-                        nextTurnBanner
+                        if tracker.isTracking {
+                            if tracker.isMultiLeg, tracker.hasActiveTarget {
+                                legProgressStrip
+                            }
+                            unifiedHUD
+                            nextTurnBanner
+                        }
                     }
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { topCoverHeight = $0 }
                     Spacer()
                     bottomControls
                 }
@@ -316,8 +324,9 @@ struct LiveTrackingView: View {
             // Traveled track — the actual recorded drive, this app's core record. Slightly receded
             // (vs. full-opacity blue) so the guide route ahead reads as the primary "what to do next"
             // element while actively driving, without losing visibility of where you've been.
-            if tracker.points.count >= 2 {
-                MapPolyline(coordinates: tracker.points.map(\.coordinate))
+            let traveled = trail.coordinates(for: tracker.points)
+            if traveled.count >= 2 {
+                MapPolyline(coordinates: traveled)
                     .stroke(.blue.opacity(0.85), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
             }
             if let start = tracker.startCoordinate, tracker.isTracking {
@@ -352,13 +361,18 @@ struct LiveTrackingView: View {
         // Keep MapKit's logo / Legal link (and the camera's visual centre) clear of the bottom
         // controls, which used to be drawn directly over them.
         .safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: bottomControlsHeight + 8) }
+        // Same for the top: the stats + next-turn cards cover the upper part of the map, so the camera's
+        // visual centre (where the car sits) is the middle of what's actually visible.
+        .safeAreaInset(edge: .top, spacing: 0) { Color.clear.frame(height: max(0, topCoverHeight + 8)) }
         // The very first location fix: set the (zoomed-out) follow camera right away. Waiting for a
         // fix COUNT change left the pre-start map on MapKit's default street-level zoom until the phone
         // moved, which it never does while parked.
         .onChange(of: tracker.currentLocation != nil) { _, known in
             if known, followUser { cameraPosition = followCameraPosition() }
         }
-        .onMapCameraChange(frequency: .continuous) { ctx in mapHeading = ctx.camera.heading }
+        // `.onEnd`, not `.continuous`: a continuous callback writes @State on every frame of a pan/pinch,
+        // re-evaluating this whole view (and its big polylines) mid-gesture — the lag on first touch.
+        .onMapCameraChange(frequency: .onEnd) { ctx in mapHeading = ctx.camera.heading }
         // Apple-Maps behavior: panning or pinching the map breaks the follow lock; the recenter
         // button re-engages it.
         .simultaneousGesture(DragGesture(minimumDistance: 6).onChanged { _ in
@@ -524,6 +538,25 @@ struct LiveTrackingView: View {
         return .camera(MapCamera(centerCoordinate: loc, distance: followDistance, heading: 0, pitch: 0))
     }
 
+    /// Zoom out so the whole drive fits: where you've been, the guide line ahead, every stop and the
+    /// destination. Releases the follow lock (tap the location button to go back to following).
+    private func fitWholeRoute() {
+        var pts = trail.coordinates(for: tracker.points)
+        pts.append(contentsOf: guide.coordinates)
+        pts.append(contentsOf: tracker.legTargets.map(\.coordinate))
+        if let loc = tracker.currentLocation { pts.append(loc) }
+        if let d = tracker.destination { pts.append(d) }
+        pts = pts.filter(\.isUsableCoordinate)
+        guard !pts.isEmpty else { return }
+        var rect = MKMapRect.null
+        for c in pts { rect = rect.union(MKMapRect(origin: MKMapPoint(c), size: MKMapSize(width: 0, height: 0))) }
+        // Breathing room, and a floor so a short drive isn't zoomed to a single street.
+        let pad = max(rect.width, rect.height) * 0.18
+        rect = rect.insetBy(dx: -max(pad, 900), dy: -max(pad, 900))
+        followUser = false
+        withAnimation(.easeInOut(duration: 0.5)) { cameraPosition = .rect(rect) }
+    }
+
     /// Appears only while the map is rotated (like the system compass); tap to snap back to north-up.
     @ViewBuilder
     private var compassButton: some View {
@@ -557,6 +590,17 @@ struct LiveTrackingView: View {
                 Spacer()
                 VStack(spacing: 10) {
                 compassButton
+                if tracker.isTracking {
+                    Button { Haptics.tap(); fitWholeRoute() } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.title3)
+                            .foregroundStyle(.blue)
+                            .padding(12)
+                            .background(.ultraThinMaterial, in: .circle)
+                            .shadow(radius: 4, y: 2)
+                    }
+                    .accessibilityLabel("Show entire route")
+                }
                 Button {
                     followUser = true
                     if let loc = tracker.currentLocation {
@@ -1324,6 +1368,31 @@ struct LiveTrackingView: View {
             return name
         }
         return fallback
+    }
+}
+
+/// Grows a thinned copy of the recorded track as fixes arrive. Rebuilding `points.map(\.coordinate)` for
+/// thousands of fixes on every redraw (about once a second) made the live map heavier the longer a
+/// drive ran; this only touches the new points. Reference type on purpose: mutating it during `body`
+/// must not invalidate the view.
+final class TrailCache {
+    private var coords: [CLLocationCoordinate2D] = []
+    private var consumed = 0
+
+    func coordinates(for points: [RecordedPoint]) -> [CLLocationCoordinate2D] {
+        if points.count < consumed { coords = []; consumed = 0 }   // a new drive
+        guard points.count > consumed else { return coords }
+        for p in points[consumed...] {
+            if let last = coords.last, p.coordinate.distanceMeters(to: last) < 4 { continue }
+            coords.append(p.coordinate)
+        }
+        // Always end exactly on the newest fix so the line reaches the car.
+        if let newest = points.last?.coordinate, let last = coords.last,
+           last.latitude != newest.latitude || last.longitude != newest.longitude {
+            coords.append(newest)
+        }
+        consumed = points.count
+        return coords
     }
 }
 

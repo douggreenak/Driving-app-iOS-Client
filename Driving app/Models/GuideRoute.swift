@@ -7,6 +7,8 @@ import Observation
 struct GuideStep {
     var instruction: String
     var start: CLLocationCoordinate2D
+    /// Metres along the route polyline from its start to where this maneuver happens.
+    var offset: Double = 0
 }
 
 /// The most-efficient (fastest) road route from where the driver is now to the current target:
@@ -33,11 +35,17 @@ final class GuideRoute {
     private var requestID = 0
     private var lastFailedAt: Date?
     private var stepIndex = 0
+    /// Cumulative metres along `coordinates` at each vertex, and the last segment we were on (so the
+    /// along-route position only ever searches near where we already were).
+    private var cumulative: [Double] = []
+    private var lastSegment = 0
+    private var alongRoute = 0.0
 
     /// Forget the route (leg changed, drive ended, diverted…).
     func clear() {
         coordinates = []; steps = []; nextTurn = nil; nextTurnMeters = nil; remainingMeters = nil
         lastFetchFrom = nil; stepIndex = 0
+        cumulative = []; lastSegment = 0; alongRoute = 0
     }
 
     /// Force the next `refresh` to re-fetch even though the driver hasn't moved.
@@ -80,40 +88,78 @@ final class GuideRoute {
             lastFetchedTarget = dest
             lastFailedAt = nil
             coordinates = route.polyline.coordinates()
-            steps = route.steps.compactMap { s in
-                guard !s.instructions.isEmpty, s.polyline.pointCount > 0 else { return nil }
-                return GuideStep(instruction: s.instructions, start: s.polyline.coordinates()[0])
+            cumulative = Self.cumulativeLengths(coordinates)
+            // Each maneuver's position ALONG the route = the summed length of every step before it
+            // (empty-instruction steps still take up road, so they count toward the offset).
+            var offset = 0.0
+            var built: [GuideStep] = []
+            for s in route.steps where s.polyline.pointCount > 0 {
+                if !s.instructions.isEmpty {
+                    built.append(GuideStep(instruction: s.instructions, start: s.polyline.coordinates()[0], offset: offset))
+                }
+                offset += s.distance
             }
-            stepIndex = 0
+            steps = built
+            stepIndex = 0; lastSegment = 0; alongRoute = 0
             tracker.appleMapsExpectedTravelTime = route.expectedTravelTime
             tracker.appleMapsTravelTimeFetchDate = Date()
             updateNextTurn(from: from)
         }
     }
 
-    /// Advance past maneuvers already reached and publish the next one.
+    /// Publish the next maneuver STILL AHEAD of the car.
+    ///
+    /// This used to treat a maneuver as "reached" as soon as the car was within 35 m of it — so for the
+    /// last 35 m of approaching a turn the banner already jumped to the turn AFTER it ("turn onto B"
+    /// while you were still short of A). Now the car's position is projected onto the route polyline,
+    /// and a maneuver only counts as done once the car has actually passed it along the route; the
+    /// distance shown is the distance along the road, not a straight line.
     func updateNextTurn(from here: CLLocationCoordinate2D?) {
         guard let here else { return }
-        while stepIndex < steps.count, steps[stepIndex].start.distanceMeters(to: here) < 35 { stepIndex += 1 }
+        guard coordinates.count >= 2, cumulative.count == coordinates.count else {
+            nextTurn = nil; nextTurnMeters = nil
+            return
+        }
+        let plane = LocalPlane(reference: here)
+        let p = (x: 0.0, y: 0.0)
+        func project(_ range: Range<Int>) -> (dist: Double, along: Double, seg: Int)? {
+            var best: (dist: Double, along: Double, seg: Int)?
+            for i in range {
+                let a = plane.xy(coordinates[i - 1]), b = plane.xy(coordinates[i])
+                let dx = b.x - a.x, dy = b.y - a.y
+                let len2 = dx * dx + dy * dy
+                var t = len2 == 0 ? 0 : ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2
+                t = max(0, min(1, t))
+                let d = hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+                if best == nil || d < best!.dist {
+                    best = (d, cumulative[i - 1] + t * (cumulative[i] - cumulative[i - 1]), i)
+                }
+            }
+            return best
+        }
+        let n = coordinates.count
+        let lo = max(1, lastSegment - 3), hi = min(n, lastSegment + 400)
+        var found = lo < hi ? project(lo..<hi) : nil
+        if found == nil || found!.dist > 80 { found = project(1..<n) ?? found }
+        if let f = found {
+            lastSegment = f.seg
+            alongRoute = max(alongRoute, f.along)   // never slides backward on GPS jitter
+        }
+        while stepIndex < steps.count, steps[stepIndex].offset <= alongRoute + 5 { stepIndex += 1 }
         if stepIndex < steps.count {
             nextTurn = steps[stepIndex].instruction
-            nextTurnMeters = steps[stepIndex].start.distanceMeters(to: here)
+            nextTurnMeters = max(0, steps[stepIndex].offset - alongRoute)
         } else {
             nextTurn = nil; nextTurnMeters = nil
         }
-        if coordinates.count >= 2 {
-            // Remaining length ahead: from the polyline point nearest to us onward.
-            var nearest = 0; var best = Double.greatestFiniteMagnitude
-            for (i, c) in coordinates.enumerated() {
-                let d = c.distanceMeters(to: here)
-                if d < best { best = d; nearest = i }
-            }
-            var m = best
-            if nearest + 1 < coordinates.count {
-                for i in (nearest + 1)..<coordinates.count { m += coordinates[i - 1].distanceMeters(to: coordinates[i]) }
-            }
-            remainingMeters = m
-        }
+        remainingMeters = max(0, (cumulative.last ?? 0) - alongRoute) + (found?.dist ?? 0)
+    }
+
+    private static func cumulativeLengths(_ c: [CLLocationCoordinate2D]) -> [Double] {
+        var out = [Double](repeating: 0, count: c.count)
+        guard c.count > 1 else { return out }
+        for i in 1..<c.count { out[i] = out[i - 1] + c[i - 1].distanceMeters(to: c[i]) }
+        return out
     }
 
     /// "0.3 mi" / "500 ft" style distance for the next-turn banner.

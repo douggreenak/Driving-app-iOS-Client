@@ -524,7 +524,6 @@ struct DriveHomeView: View {
     private func connectionRow(_ c: (seconds: Int, place: String)) -> some View {
         ConnectionPill(seconds: c.seconds, placeName: c.place)
             .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
     }
 

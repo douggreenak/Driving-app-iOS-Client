@@ -115,6 +115,9 @@ enum TripStore {
                                 altitude: p.altitude, onRoad: onRoad)
             tp.trip = trip
             context.insert(tp)
+            // A long drive is thousands of rows; inserting them in one go on the main actor froze the
+            // app right after "End Drive". Let the UI breathe between batches.
+            if i % 300 == 299 { await Task.yield() }
         }
 
         try? context.save()

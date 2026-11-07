@@ -95,7 +95,7 @@ enum PlaceNamer {
 
 /// Simple local-tangent-plane projection so we can do fast planar geometry (point-to-segment
 /// projection for map matching) at city/region scale without expensive geodesic math.
-struct LocalPlane {
+nonisolated struct LocalPlane {
     let refLat: Double
     let refLng: Double
     private let mPerDegLat: Double

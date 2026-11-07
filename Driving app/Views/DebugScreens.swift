@@ -107,6 +107,11 @@ struct ScreenshotHarness: View {
                 LiveTrackingView(previewTracker: SampleData.openDriveTracker())
             case "gotostatus":
                 LiveTrackingView(previewTracker: SampleData.goToStatusTracker())
+            case "liveactivity":
+                // Starts a (local-only) Live Activity with worst-case content so the Lock Screen layout
+                // can be checked with a real screenshot. UITEST_LA = full | noturn | paused.
+                Text("Live Activity started — lock the device")
+                    .onAppear { DebugLiveActivity.start(variant: ProcessInfo.processInfo.environment["UITEST_LA"] ?? "full") }
             case "statuschips":
                 StatusChipGallery()
             case "applyschedule":
@@ -621,4 +626,31 @@ extension SampleData {
         ]
     }
 }
+
+#if canImport(ActivityKit) && !os(macOS)
+enum DebugLiveActivity {
+    @MainActor static func start(variant: String) {
+        let now = Date()
+        var st = DriveActivityAttributes.ContentState(
+            milesTraveled: 12.4, currentSpeed: 42, elapsedSeconds: 1380, progress: 0.62,
+            eta: now.addingTimeInterval(14 * 60), delaySeconds: 240,
+            destinationName: "Providence Alaska Medical Center · Stop 2/3",
+            isPaused: variant == "paused",
+            tripTitle: "Morning commute to the hospital and then home",
+            scheduledArrival: now.addingTimeInterval(10 * 60),
+            remainingMiles: 7.6, isMultiLeg: variant != "noturn")
+        if variant == "full" || variant == "noturn" {
+            st.nextTurn = "Turn right onto East Northern Lights Boulevard"
+            st.nextTurnMeters = 640
+        }
+        if variant == "noturn" { st.nextTurn = nil; st.nextTurnMeters = nil }
+        if variant == "paused" {
+            st.legEta = now.addingTimeInterval(22 * 60); st.legDestinationName = "Fred Meyer on Dimond Boulevard"
+            st.legRemainingMiles = 3.2
+        }
+        st.maxSpeed = 61; st.avgSpeed = 33; st.gallonsUsed = 0.48
+        LiveActivityController.start(title: st.tripTitle ?? "Drive", scheduledArrival: st.scheduledArrival, state: st)
+    }
+}
+#endif
 #endif

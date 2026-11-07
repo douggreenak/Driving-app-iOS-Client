@@ -23,6 +23,8 @@ struct TripSummaryView: View {
     @State private var startAddress = ""
     @State private var endAddress = ""
 
+    /// Computed once per appearance (not twice per redraw) and thinned — a long drive is thousands of fixes.
+    @State private var summaryCoords: [CLLocationCoordinate2D] = []
     private var mpg: Double { vehicle?.avgMpg ?? 25 }
     private var gallonsUsed: Double { tracker.estimatedGallons(mpg: mpg) }
 
@@ -73,7 +75,16 @@ struct TripSummaryView: View {
             // "Other" unless the user happened to reselect the right one by hand. Seed it alongside
             // `paidBy`, which already does this correctly.
             .onAppear { if !didInit { paidBy = initialPaidBy; category = tracker.plannedCategory; didInit = true } }
-            .task { await resolveDetails() }
+            .task {
+                if summaryCoords.isEmpty {
+                    let all = tracker.points.map(\.coordinate)
+                    var out: [CLLocationCoordinate2D] = []
+                    for c in all where out.last.map({ c.distanceMeters(to: $0) >= 6 }) ?? true { out.append(c) }
+                    if let l = all.last { out.append(l) }
+                    summaryCoords = out
+                }
+                await resolveDetails()
+            }
         }
     }
 
@@ -108,8 +119,8 @@ struct TripSummaryView: View {
 
     private var routeMap: some View {
         Map(position: $cameraPosition) {
-            if tracker.points.map(\.coordinate).count >= 2 {
-                MapPolyline(coordinates: tracker.points.map(\.coordinate))
+            if summaryCoords.count >= 2 {
+                MapPolyline(coordinates: summaryCoords)
                     .stroke(.blue, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
             }
             if let start = tracker.startCoordinate {

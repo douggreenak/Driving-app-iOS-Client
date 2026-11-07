@@ -13,7 +13,7 @@ struct DriveActivityLiveActivity: Widget {
         ActivityConfiguration(for: DriveActivityAttributes.self) { context in
             // Lock Screen / banner presentation.
             LockScreenView(context: context)
-                .padding()
+                .padding(.horizontal, 16).padding(.vertical, 12)
                 .activityBackgroundTint(Color.black.opacity(0.6))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
@@ -160,28 +160,26 @@ private struct LockScreenView: View {
         return "On time"
     }
 
+    private var hasTurn: Bool { context.state.nextTurn != nil && !context.state.isPaused }
+
+    /// Lock Screen Live Activities get ~160 pt of height; the old layout stacked seven rows and spilled
+    /// past both edges. This keeps four quiet rows: who/where + status, the next turn (only when there
+    /// is one), the arrival time, and a single line of small stats.
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label(title, systemImage: "airplane.departure")
-                    .font(.headline).foregroundStyle(.white)
-                Spacer()
-                if let dest = context.state.destinationName {
-                    Text(dest).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
+        VStack(alignment: .leading, spacing: 7) {
+            // 1. Title + one status word.
+            HStack(spacing: 8) {
+                Image(systemName: "airplane.departure").font(.footnote).foregroundStyle(.blue)
+                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                Spacer(minLength: 6)
+                Text(statusText).font(.caption.weight(.semibold)).foregroundStyle(delayColor).lineLimit(1)
             }
 
-            // Nil (not a permanent 0%) for a destination-less drive — an empty bar for the whole
-            // trip reads as broken, so the bar itself is omitted when there's nothing to measure.
-            if let progress = context.state.progress {
-                ProgressView(value: progress).tint(delayColor)
-            }
-
-            // Next maneuver from the phone's guide route.
-            if let turn = context.state.nextTurn, !context.state.isPaused {
-                HStack(spacing: 8) {
-                    Image(systemName: turnSymbol(turn)).font(.title3.weight(.bold)).foregroundStyle(.white)
-                        .frame(width: 32, height: 32).background(Color.blue.gradient, in: .rect(cornerRadius: 8))
+            // 2. Next maneuver from the phone's guide route.
+            if hasTurn, let turn = context.state.nextTurn {
+                HStack(spacing: 10) {
+                    Image(systemName: turnSymbol(turn)).font(.body.weight(.bold)).foregroundStyle(.white)
+                        .frame(width: 30, height: 30).background(Color.blue.gradient, in: .rect(cornerRadius: 7))
                     VStack(alignment: .leading, spacing: 0) {
                         if let m = context.state.nextTurnMeters {
                             Text(turnDistance(m)).font(.subheadline.weight(.bold)).foregroundStyle(.white).monospacedDigit()
@@ -192,59 +190,54 @@ private struct LockScreenView: View {
                 }
             }
 
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Scheduled").font(.caption2).foregroundStyle(.secondary)
-                    Text(scheduledArrival.map { $0.formatted(date: .omitted, time: .shortened) } ?? "—")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                }
-                Spacer()
-                VStack(spacing: 1) {
-                    Text(statusText).font(.caption2.weight(.bold)).foregroundStyle(delayColor)
-                    Image(systemName: "airplane.arrival").font(.caption2).foregroundStyle(.secondary)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text(context.state.isMultiLeg == true ? "Final ETA" : "Estimated")
+            // Nil (not a permanent 0%) for a destination-less drive: an empty bar all trip reads as broken.
+            if let progress = context.state.progress {
+                ProgressView(value: progress).tint(delayColor).scaleEffect(y: 0.8)
+            }
+
+            // 3. Arrival, big; scheduled time small beside it.
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(context.state.isPaused ? "Parked"
+                     : (context.state.eta.map { $0.formatted(date: .omitted, time: .shortened) } ?? "—"))
+                    .font(.title3.weight(.bold).monospacedDigit()).foregroundStyle(delayColor)
+                if !context.state.isPaused {
+                    Text(context.state.isMultiLeg == true ? "final ETA" : "arrival")
                         .font(.caption2).foregroundStyle(.secondary)
-                    Text(context.state.isPaused
-                         ? "Parked"
-                         : (context.state.eta.map { $0.formatted(date: .omitted, time: .shortened) } ?? "—"))
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(delayColor)
+                }
+                Spacer(minLength: 6)
+                if let sched = scheduledArrival {
+                    Text("Scheduled \(sched.formatted(date: .omitted, time: .shortened))")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
 
-            HStack(spacing: 8) {
-                metric("Driven", String(format: "%.1f mi", context.state.milesTraveled))
-                metric("Remaining", context.state.remainingMiles.map { String(format: "%.1f mi", $0) } ?? "—")
-                metric("Speed", String(format: "%.0f mph", context.state.currentSpeed))
-                metric("Elapsed", elapsedText)
-            }
-            .padding(.top, 1)
-
-            HStack(spacing: 8) {
-                metric("Avg", context.state.avgSpeed.map { String(format: "%.0f mph", $0) } ?? "—")
-                metric("Top", context.state.maxSpeed.map { String(format: "%.0f mph", $0) } ?? "—")
-                metric("Gas", context.state.gallonsUsed.map { String(format: "%.2f gal", $0) } ?? "—")
-            }
-
-            if let eta = context.state.legEta {
-                HStack(spacing: 4) {
-                    Image(systemName: "mappin.and.ellipse").foregroundStyle(.blue)
-                    Text("Next: \(context.state.legDestinationName ?? "Stop")")
-                        .lineLimit(1)
-                    Spacer(minLength: 1)
-                    Text(eta.formatted(date: .omitted, time: .shortened))
-                    if let miles = context.state.legRemainingMiles {
-                        Text("· \(String(format: "%.1f mi", miles))")
+            // 4. One line of small stats — or, parked between stops, where you're headed next.
+            Group {
+                if let eta = context.state.legEta {
+                    HStack(spacing: 4) {
+                        Image(systemName: "mappin.and.ellipse").foregroundStyle(.blue)
+                        Text("Next: \(context.state.legDestinationName ?? "Stop")").lineLimit(1)
+                        Spacer(minLength: 2)
+                        Text(eta.formatted(date: .omitted, time: .shortened))
                     }
+                } else {
+                    Text(statsLine).lineLimit(1).minimumScaleFactor(0.7)
                 }
-                .font(.caption2).foregroundStyle(.secondary)
             }
+            .font(.caption2).foregroundStyle(.secondary)
         }
         // Tapping the Lock Screen banner opens the app straight at the live tracking screen — see
         // the Dynamic Island's matching `.widgetURL` above and `ContentView.onOpenURL`.
         .widgetURL(URL(string: "drivetracker://active-drive"))
+    }
+
+    private var statsLine: String {
+        var parts: [String] = []
+        if let r = context.state.remainingMiles { parts.append(String(format: "%.1f mi left", r)) }
+        parts.append(String(format: "%.1f mi driven", context.state.milesTraveled))
+        parts.append(String(format: "%.0f mph", context.state.currentSpeed))
+        parts.append(elapsedText)
+        return parts.joined(separator: " · ")
     }
 
     private func turnDistance(_ meters: Double) -> String {
@@ -265,14 +258,5 @@ private struct LockScreenView: View {
         let seconds = context.state.elapsedSeconds
         let hours = seconds / 3600, minutes = (seconds % 3600) / 60
         return hours > 0 ? String(format: "%d:%02d", hours, minutes) : String(format: "%d min", minutes)
-    }
-
-    private func metric(_ title: String, _ value: String) -> some View {
-        VStack(spacing: 1) {
-            Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
-            Text(value).font(.caption.weight(.semibold).monospacedDigit()).foregroundStyle(.white)
-                .lineLimit(1).minimumScaleFactor(0.75)
-        }
-        .frame(maxWidth: .infinity)
     }
 }

@@ -123,7 +123,9 @@ struct TripsListView: View {
                                 // Layered between the two trips that share this stop, Flighty-style.
                                 ConnectionPill(seconds: seconds, placeName: place, compact: dense)
                                     .listRowSeparator(.hidden)
-                                    .listRowBackground(Color.clear)
+                                    // Same row background as the trips either side (NOT clear): a clear
+                                    // row let the black list background show through as a hard gap
+                                    // splitting the gray block in two.
                                     .padding(.vertical, -2)
                             }
                         }
