@@ -129,15 +129,7 @@ struct ContentView: View {
         // {...}` *inside* the closure left a fully-chrome'd, empty glass bar sitting above the tab bar
         // with no drive active. `isEnabled:` tells the system to collapse the slot itself, chrome
         // included, when there's nothing to show.
-        .tabViewBottomAccessory(isEnabled: activeDrive.isMinimized) {
-            if let tracker = activeDrive.tracker {
-                MinimizedDriveBar(tracker: tracker) {
-                    Haptics.tap()
-                    activeDrive.restore()
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
+        .modifier(MinimizedAccessory(activeDrive: activeDrive))
         .tabBarMinimizeBehavior(.never)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: activeDrive.isMinimized)
         .environment(activeDrive)
@@ -362,3 +354,30 @@ struct ContentView: View {
 
 /// Identifiable wrapper so a watch "start" request can drive a `.fullScreenCover(item:)`.
 struct WatchStartRequest: Identifiable { let id: String }
+
+
+/// Docks the minimized-drive bar in the tab bar's accessory slot. `isEnabled:` (which collapses the
+/// slot's glass chrome when nothing is minimized) only exists from iOS 26.1; on 26.0 the plain
+/// accessory is used and the bar view is simply empty when no drive is minimized.
+private struct MinimizedAccessory: ViewModifier {
+    let activeDrive: ActiveDriveController
+
+    @ViewBuilder
+    private var bar: some View {
+        if let tracker = activeDrive.tracker {
+            MinimizedDriveBar(tracker: tracker) {
+                Haptics.tap()
+                activeDrive.restore()
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.1, *) {
+            content.tabViewBottomAccessory(isEnabled: activeDrive.isMinimized) { bar }
+        } else {
+            content.tabViewBottomAccessory { if activeDrive.isMinimized { bar } }
+        }
+    }
+}
