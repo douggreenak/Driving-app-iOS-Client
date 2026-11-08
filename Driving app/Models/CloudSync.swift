@@ -163,6 +163,7 @@ enum CloudSync {
         await step("Vehicles") { try await syncVehicles(context) }
         await step("Saved places") { try await syncPlaces(context) }
         await step("Settings") { try await syncSettings(context) }
+        await step("Deleting trips") { await flushPendingTripDeletes() }
         await step("Restoring trips") { try await restoreTrips(context) }
         await step("Uploading trips") { try await TripStore.uploadPending(context: context) }
         await step("Uploading edits") { try await pushLocalEdits(context) }
@@ -182,6 +183,32 @@ enum CloudSync {
             }
         }
         return "\(step): \(error.localizedDescription)"
+    }
+
+    // MARK: Trips — delete
+
+    /// Remote ids of trips deleted on this phone whose server DELETE hasn't been confirmed. Without
+    /// this, a delete that failed (offline) left the row in the cloud, and the next restore pass
+    /// pulled the "unknown" row straight back down as a resurrected duplicate.
+    private static let pendingTripDeletesKey = "cloud.pendingTripDeletes.v1"
+
+    static func pendingTripDeletes() -> Set<String> { set(pendingTripDeletesKey) }
+
+    /// Delete a trip's cloud row — now if possible, retried on later sync passes if not.
+    static func deleteRemoteTrip(_ remoteID: String) async {
+        var pending = set(pendingTripDeletesKey); pending.insert(remoteID); store(pending, pendingTripDeletesKey)
+        do {
+            try await APIClient.deleteTrip(id: remoteID)
+            pending = set(pendingTripDeletesKey); pending.remove(remoteID); store(pending, pendingTripDeletesKey)
+        } catch APIClient.APIError.http(404) {
+            pending = set(pendingTripDeletesKey); pending.remove(remoteID); store(pending, pendingTripDeletesKey)
+        } catch {
+            // Stays pending.
+        }
+    }
+
+    private static func flushPendingTripDeletes() async {
+        for id in set(pendingTripDeletesKey) { await deleteRemoteTrip(id) }
     }
 
     // MARK: Trips — push edits
@@ -429,7 +456,8 @@ enum CloudSync {
             let result: RemoteTripsPage = try await getJSON("/api/trips?full=true&page=\(page)&pageSize=\(pageSize)")
             if result.items.isEmpty { break }
             var newOnPage = 0
-            for r in result.items where !knownRemote.contains(r.id) {
+            let deleting = pendingTripDeletes()
+            for r in result.items where !knownRemote.contains(r.id) && !deleting.contains(r.id) {
                 guard let date = parseDate(r.date) else { continue }
                 newOnPage += 1
                 if let dup = unlinked[key(date, r.startLat, r.startLng)] {

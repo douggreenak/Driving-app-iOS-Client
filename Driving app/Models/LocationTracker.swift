@@ -411,7 +411,10 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
     /// Resume a drive that was interrupted (kill/force-quit) mid-route — replaying the recorded
     /// points to rebuild distance/fuel and restoring which leg it was on, so a multi-stop drive can
     /// be continued instead of restarted. Keeps appending to the same crash log.
-    func resume(from rec: DriveLogger.Recovered) {
+    ///
+    /// `rewriteLog`: start a fresh crash log seeded with the given points (used when resuming from a
+    /// SAVED trip, where no log exists) instead of appending to the interrupted drive's existing one.
+    func resume(from rec: DriveLogger.Recovered, rewriteLog: Bool = false) {
         configureIfNeeded()
         points = rec.points
         // Rebuild derived totals from the recovered track.
@@ -454,7 +457,12 @@ final class LocationTracker: NSObject, CLLocationManagerDelegate {
         isRecording = !m.isPaused
         lastLocation = nil
         lastMovingSample = nil
-        logger.reopen()
+        if rewriteLog {
+            logger.begin(meta: currentMeta())
+            for p in points { logger.append(p) }
+        } else {
+            logger.reopen()
+        }
         applyPowerProfile(tracking: isRecording)
         manager?.startUpdatingLocation()
         startElapsedTimer()

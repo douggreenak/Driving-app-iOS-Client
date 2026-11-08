@@ -1170,6 +1170,20 @@ struct LiveTrackingView: View {
     /// drive had no leg with ≥2 points (not a recordable trip), so nothing is saved.
     @MainActor
     private func saveInputs(_ inputs: [TripStore.Input]) async {
+        var inputs = inputs
+        // A drive resumed from a saved trip replaces that trip: the new recording contains the whole
+        // old track plus everything since. Carry the original's notes/favorite over, and remove the
+        // original (cloud row too — retried by sync if the delete can't reach the server right now).
+        var keepFavorite = false
+        if let original = activeDrive.context.resumedTrip {
+            if !inputs.isEmpty, inputs[0].notes == nil { inputs[0].notes = original.notes }
+            keepFavorite = original.isFavorite
+            let jid = original.journeyID
+            if let rid = original.remoteID { await CloudSync.deleteRemoteTrip(rid) }
+            context.delete(original)
+            try? context.save()
+            TripStore.renumberJourney(jid, context: context)
+        }
         // A stop shorter than `Connection.maxLayover` is a *connection* inside one journey; a longer
         // one ends the trip, so the legs on either side are saved as separate groups.
         var groups: [[TripStore.Input]] = []
@@ -1188,6 +1202,11 @@ struct LiveTrackingView: View {
             } else {
                 await TripStore.saveJourney(group, context: context)
             }
+        }
+        if keepFavorite {
+            var d = FetchDescriptor<DriveTrip>(sortBy: [SortDescriptor(\.date, order: .reverse)])
+            d.fetchLimit = 1
+            if let newest = try? context.fetch(d).first { newest.isFavorite = true; try? context.save() }
         }
     }
 

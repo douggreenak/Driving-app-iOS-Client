@@ -35,6 +35,9 @@ final class ActiveDriveController {
         var scheduled: ScheduledDrive?
         var goTo: QuickTrip?
         var asModal: Bool
+        /// The saved trip this drive continues (see `resume(fromTrip:)`): replaced by the longer
+        /// recording when the drive is saved, untouched if it's discarded.
+        var resumedTrip: DriveTrip? = nil
     }
 
     /// A "drive to this saved place" request from a Shortcut / Siri, picked up by the Drive tab (which
@@ -79,6 +82,38 @@ final class ActiveDriveController {
         tracker = t
         context = Context(scheduled: nil, goTo: nil, asModal: true)
         presentation = .full
+    }
+
+    /// Pick a saved trip back up — the undo for an accidental "End Drive": the tracker is rebuilt
+    /// from the trip's recorded track exactly like a crash recovery, keeps recording from here, and
+    /// when the drive is saved the longer recording replaces the original trip (`LiveTrackingView`
+    /// handles that via `Context.resumedTrip`). Returns false when a drive is already active or the
+    /// trip has no usable track.
+    @discardableResult
+    func resume(fromTrip trip: DriveTrip, ratedMpg: Double?) -> Bool {
+        guard tracker == nil else { return false }
+        let pts = trip.orderedPoints.map {
+            RecordedPoint(t: $0.t, coordinate: $0.coordinate, speed: $0.speed,
+                          course: $0.course, accuracy: $0.accuracy, altitude: $0.altitude)
+        }
+        guard pts.count >= 2 else { return false }
+        // An open (destination-less) continuation: the trip's old endpoint isn't where the driver is
+        // going now. A stop can be added from the live screen as usual.
+        let meta = DriveLogger.Meta(
+            start: trip.date, destinationName: nil, scheduledArrival: trip.scheduledArrival,
+            scheduledDeparture: trip.scheduledDeparture, category: trip.categoryRaw,
+            vehicleName: trip.vehicleName, tripName: trip.name, paidBy: trip.paidByRaw)
+        let t = LocationTracker()
+        t.ratedMpg = ratedMpg
+        wireLiveUpdates(t)
+        t.resume(from: DriveLogger.Recovered(meta: meta, points: pts), rewriteLog: true)
+        tracker = t
+        context = Context(scheduled: nil, goTo: nil, asModal: true, resumedTrip: trip)
+        presentation = .full
+        guide.clear(); guide.invalidate(); guide.refresh(tracker: t)
+        startLiveActivity()
+        broadcastLive()
+        return true
     }
 
     /// Push the Live Activity/Watch broadcast from the model itself, not just from `ContentView`'s

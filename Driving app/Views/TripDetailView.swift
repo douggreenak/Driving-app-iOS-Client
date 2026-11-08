@@ -12,6 +12,11 @@ struct TripDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \SavedPlace.sortOrder) private var savedPlaces: [SavedPlace]
     @Query(sort: \PayerGroup.sortOrder) private var payerGroups: [PayerGroup]
+    @Query private var vehicles: [Vehicle]
+    @Environment(ActiveDriveController.self) private var activeDrive
+    /// True when this is the most recent trip on record — the only one that can be resumed.
+    @State private var isNewest = false
+    @State private var resumeBlocked: String?
 
     /// The sibling legs of this trip's journey (including itself), in leg order. Fetched on demand
     /// only when this trip is a journey leg — never loading the whole trip history for a standalone.
@@ -68,7 +73,11 @@ struct TripDetailView: View {
                 .accessibilityLabel(trip.isFavorite ? "Remove from favorites" : "Add to favorites")
             }
         }
-        .task(id: derivedKey) { derived = TripDerived(trip: trip); loadJourneyLegs() }
+        .task(id: derivedKey) { derived = TripDerived(trip: trip); loadJourneyLegs(); checkNewest() }
+        .alert("Can't Resume Yet", isPresented: Binding(get: { resumeBlocked != nil },
+                                                       set: { if !$0 { resumeBlocked = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(resumeBlocked ?? "") }
         // A trip restored from the cloud arrives without its GPS track; fetch it the first time it's
         // opened (the derived stats/map above refresh themselves when the points land).
         .task { await CloudSync.restorePoints(for: trip) }
@@ -110,6 +119,7 @@ struct TripDetailView: View {
                 fuelCard(d)
                 if !d.chart.isEmpty { speedChartCard(d) }
                 if !trip.isManualEntry {
+                    if isNewest, trip.points.count >= 2 { resumeButton }
                     playButton(d)
                     trimButton
                 }
@@ -299,6 +309,45 @@ struct TripDetailView: View {
         PlaceNamer.name(for: coord, fallback: fallback, in: savedPlaces)
     }
 
+    private func checkNewest() {
+        var d = FetchDescriptor<DriveTrip>(sortBy: [SortDescriptor(\.date, order: .reverse)])
+        d.fetchLimit = 1
+        isNewest = (try? context.fetch(d).first?.persistentModelID) == trip.persistentModelID
+    }
+
+    /// Undo an accidental "End Drive": keep recording from where this trip left off. Only offered on
+    /// the newest trip; on save the longer recording replaces this one.
+    private var resumeButton: some View {
+        Button {
+            Haptics.tap()
+            if activeDrive.hasActiveDrive {
+                resumeBlocked = "A drive is already being recorded. Finish it first."
+                return
+            }
+            if LocationTracker.recoverableSession() != nil {
+                resumeBlocked = "There's an unsaved drive waiting on the Drive tab. Save or discard it first."
+                return
+            }
+            let mpg = vehicles.first(where: { $0.name == trip.vehicleName })?.avgMpg ?? trip.vehicleMpg
+            guard activeDrive.resume(fromTrip: trip, ratedMpg: mpg) else {
+                resumeBlocked = "This trip has no recorded track to continue from."
+                return
+            }
+            // Leave the detail page: this trip is replaced when the resumed drive is saved.
+            dismiss()
+        } label: {
+            VStack(spacing: 2) {
+                Label("Resume Tracking", systemImage: "play.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                Text("Continue this drive — ended \(Fmt.duration(Int(Date().timeIntervalSince(trip.endDate)))) ago")
+                    .font(.caption2).foregroundStyle(.white.opacity(0.85))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity).padding(.vertical, 12)
+            .background(Color.green.gradient, in: .capsule)
+        }
+    }
+
     /// Trim the recorded track (cut off a forgotten stationary tail, or a late start).
     private var trimButton: some View {
         Button {
@@ -340,7 +389,7 @@ struct TripDetailView: View {
         // re-render dereferencing an invalidated SwiftData model during the pop animation.
         dismiss()
         Task { @MainActor in
-            if let remoteID { try? await APIClient.deleteTrip(id: remoteID) }
+            if let remoteID { await CloudSync.deleteRemoteTrip(remoteID) }
             ctx.delete(doomed)
             try? ctx.save()
             // Keep the rest of the journey consistent (renumber, or demote a lone survivor).
