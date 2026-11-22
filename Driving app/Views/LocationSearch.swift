@@ -180,6 +180,7 @@ struct LocationSearchSheet: View {
                 searchBar
                 if isSearching {
                     List { resultsSection }.listStyle(.plain)
+                        .transaction { $0.animation = nil }
                         // Scrolling the suggestions must NOT toggle the keyboard: the default
                         // dismiss-on-scroll fought with the live result updates (each new batch of
                         // suggestions re-rendered the list), so the keyboard kept sliding down and
@@ -225,7 +226,13 @@ struct LocationSearchSheet: View {
                 // (New Scheduled Drive's Start/stops/Destination, Log a Missed Drive, Add Bookmark,
                 // Live Tracking's Add Stop) opens this sheet to a search field with no keyboard up,
                 // costing an extra tap before typing can even start.
-                focused = true
+            }
+            // Focus once, after the sheet's presentation animation settles. Setting it in `onAppear`
+            // raced the transition (keyboard requested mid-animation, then dropped and re-requested
+            // as layout changed), which showed up as the keyboard flickering in and out.
+            .task {
+                try? await Task.sleep(for: .milliseconds(450))
+                if !focused { focused = true }
             }
         }
     }
@@ -244,7 +251,7 @@ struct LocationSearchSheet: View {
                 .focused($focused)
                 .autocorrectionDisabled()
                 .submitLabel(.search)
-                .onChange(of: query) { _, v in completer.query = v }
+                .onChange(of: query) { _, v in if completer.query != v { completer.query = v } }
             if !query.isEmpty {
                 Button { query = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)

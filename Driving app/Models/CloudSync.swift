@@ -249,7 +249,8 @@ enum CloudSync {
         let trips = ((try? ctx.fetch(FetchDescriptor<DriveTrip>(predicate: #Predicate { $0.synced }))) ?? [])
         var sigs = (UserDefaults.standard.dictionary(forKey: editSigKey) as? [String: String]) ?? [:]
         var firstError: Error?
-        for t in trips {
+        for (n, t) in trips.enumerated() {
+            if n % 40 == 39 { await Task.yield() }
             guard let id = t.remoteID else { continue }
             let sig = editSignature(t)
             guard let old = sigs[id] else { sigs[id] = sig; continue }

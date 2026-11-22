@@ -12,8 +12,7 @@ struct DriveActivityLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: DriveActivityAttributes.self) { context in
             // Lock Screen / banner presentation.
-            LockScreenView(context: context)
-                .padding(.horizontal, 16).padding(.vertical, 12)
+            ActivityRoot(context: context)
                 .activityBackgroundTint(Color.black.opacity(0.6))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
@@ -81,6 +80,9 @@ struct DriveActivityLiveActivity: Widget {
             // last selected, leaving the currently-tracking drive minimized with no obvious way back.
             .widgetURL(URL(string: "drivetracker://active-drive"))
         }
+        // Also show on the paired Apple Watch's Smart Stack (watchOS 11+). Tapping that Smart Stack
+        // card launches the Watch app (which jumps straight to its live-drive screen), not the phone.
+        .supplementalActivityFamilies([.small, .medium])
     }
 
     private func turnDistance(_ meters: Double) -> String {
@@ -284,5 +286,69 @@ private struct LockScreenView: View {
         let seconds = context.state.elapsedSeconds
         let hours = seconds / 3600, minutes = (seconds % 3600) / 60
         return Text(hours > 0 ? String(format: "%d:%02d", hours, minutes) : String(format: "%d min", minutes))
+    }
+}
+
+
+/// Picks the layout for where the activity is rendering: the Lock Screen/banner, or the Apple
+/// Watch Smart Stack (`.small`).
+private struct ActivityRoot: View {
+    let context: ActivityViewContext<DriveActivityAttributes>
+    @Environment(\.activityFamily) private var family
+
+    var body: some View {
+        switch family {
+        case .small: WatchSmartStackView(context: context)
+        default:
+            LockScreenView(context: context)
+                .padding(.horizontal, 16).padding(.vertical, 12)
+        }
+    }
+}
+
+/// Compact glanceable layout for the Watch Smart Stack: next turn (or ETA), speed, miles left.
+private struct WatchSmartStackView: View {
+    let context: ActivityViewContext<DriveActivityAttributes>
+
+    var body: some View {
+        let s = context.state
+        VStack(alignment: .leading, spacing: 2) {
+            if s.isPaused {
+                Label("Parked", systemImage: "parkingsign.circle.fill").font(.headline)
+            } else if let turn = s.nextTurn {
+                HStack(spacing: 4) {
+                    Image(systemName: symbol(turn)).foregroundStyle(.blue)
+                    if let m = s.nextTurnMeters { Text(distance(m)).font(.headline).monospacedDigit() }
+                }
+                Text(turn).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            } else if let eta = s.eta {
+                Text(eta.formatted(date: .omitted, time: .shortened)).font(.headline).monospacedDigit()
+                Text("Arrival").font(.caption2).foregroundStyle(.secondary)
+            } else {
+                Text(String(format: "%.0f mph", s.currentSpeed)).font(.headline).monospacedDigit()
+            }
+            HStack {
+                Text(String(format: "%.0f mph", s.currentSpeed)).monospacedDigit()
+                Spacer(minLength: 2)
+                Text(s.remainingMiles.map { String(format: "%.1f mi left", $0) }
+                     ?? String(format: "%.1f mi", s.milesTraveled)).monospacedDigit()
+            }
+            .font(.caption2.weight(.medium))
+            if let p = s.progress { ProgressView(value: p).tint(.blue) }
+        }
+    }
+
+    private func distance(_ meters: Double) -> String {
+        let miles = meters / 1609.34
+        if miles >= 0.2 { return String(format: "%.1f mi", miles) }
+        return "\(max(50, Int((meters * 3.28084 / 50).rounded() * 50))) ft"
+    }
+    private func symbol(_ text: String) -> String {
+        let t = text.lowercased()
+        if t.contains("u-turn") { return "arrow.uturn.left" }
+        if t.contains("left") { return "arrow.turn.up.left" }
+        if t.contains("right") { return "arrow.turn.up.right" }
+        if t.contains("arrive") || t.contains("destination") { return "mappin.circle.fill" }
+        return "arrow.up"
     }
 }

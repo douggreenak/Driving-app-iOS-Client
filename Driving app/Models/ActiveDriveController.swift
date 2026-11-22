@@ -228,12 +228,12 @@ final class ActiveDriveController {
     /// Throttled to one frame a second (plus immediately on a change the driver would notice): this
     /// is called from the 1 s timer, from every location fix AND from `ContentView`'s `.onChange`
     /// drivers, so it used to send 2–4 WCSession messages per second for the whole drive.
-    func broadcastLive() {
+    func broadcastLive(force: Bool = false) {
         #if canImport(WatchConnectivity) && os(iOS)
         guard let tracker, tracker.isTracking else { return }
         let key = "\(tracker.isPausedBetweenLegs)|\(tracker.currentLegIndex)|\(guide.nextTurn ?? "")|\(Int(tracker.distanceMiles * 10))"
         let now = Date()
-        if now.timeIntervalSince(lastWatchFrame) < 1, key == lastWatchFrameKey { return }
+        if !force, now.timeIntervalSince(lastWatchFrame) < 1, key == lastWatchFrameKey { return }
         lastWatchFrame = now
         lastWatchFrameKey = key
         var progress: Double?
@@ -270,7 +270,9 @@ final class ActiveDriveController {
             destinationName: tracker.finalDestinationName ?? tracker.destinationName,
             maxSpeed: tracker.maxSpeed,
             isStopped: tracker.currentSpeed < 3,
-            sentAt: now)
+            sentAt: now,
+            avgSpeed: tracker.avgSpeedMph, gallonsUsed: tracker.accumulatedGallons,
+            startDate: tracker.startTime)
         PhoneWatchConnectivity.shared.sendLive(live)
         #endif
     }

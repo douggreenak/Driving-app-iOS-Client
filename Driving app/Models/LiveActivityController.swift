@@ -93,25 +93,14 @@ enum LiveActivityController {
         return Int((meters * 3.28084 / 50).rounded())
     }
 
-    /// True while a just-finished drive's terminal frame is deliberately being held on screen (see
-    /// `endWithFinal`) — lets `end()` tell "nothing to end" apart from "something IS ending, on
-    /// purpose, leave it alone" when it falls through to `endOrphaned()`.
-    private static var finalizing = false
-
-    /// Push a final state (e.g. "Arrived, 42.3 mi, on time") and end the activity a couple of
-    /// minutes later, so the widget shows a real terminal frame instead of just vanishing —
-    /// `dismissalPolicy: .immediate` in `end()` skipped straight past whatever was last on screen.
+    /// Drive finished: dismiss the activity right away. (It used to push a terminal frame, sleep 1s,
+    /// then hold it on the Lock Screen for 2 minutes, which read as the activity "not going away".)
+    /// The activity is detached synchronously so nothing else can touch it while the end request runs.
     static func endWithFinal(_ state: DriveActivityAttributes.ContentState) {
-        guard let activity else { return }
+        guard let activity else { end(); return }
         self.activity = nil
         lastState = nil
-        finalizing = true
-        Task {
-            await activity.update(.init(state: state, staleDate: nil))
-            try? await Task.sleep(for: .seconds(1))
-            await activity.end(.init(state: state, staleDate: nil), dismissalPolicy: .after(Date().addingTimeInterval(120)))
-            finalizing = false
-        }
+        Task { await activity.end(.init(state: state, staleDate: nil), dismissalPolicy: .immediate) }
     }
 
     /// End and dismiss the activity when the drive stops. Falls back to sweeping every orphaned
@@ -124,7 +113,7 @@ enum LiveActivityController {
     /// supposed to linger for two minutes, so it always vanished the instant the summary closed.
     static func end() {
         guard let activity else {
-            if !finalizing { Task { await endOrphaned() } }
+            Task { await endOrphaned() }
             return
         }
         self.activity = nil

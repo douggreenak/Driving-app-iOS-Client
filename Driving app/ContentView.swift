@@ -75,6 +75,9 @@ struct ContentView: View {
     /// `ActiveDriveController` for why this has to live above any single tab's view.
     @State private var activeDrive = ActiveDriveController()
     @State private var activityToken = 0
+    /// Bumps only on launch/foreground — NOT on tab switches — so the heavy main-actor cloud sync
+    /// doesn't run (and stutter the UI) every time the user taps a tab.
+    @State private var syncToken = 0
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.modelContext) private var modelContext
 
@@ -172,7 +175,9 @@ struct ContentView: View {
         // Activity sweep's own `recoverableSession() == nil` guard already covers "a real in-progress
         // drive is running right now" (its log file makes it "recoverable" too) regardless of how
         // many times this runs, not just at first launch.
-        .task(id: activityToken) {
+        .task(id: syncToken) {
+            // Never sync mid-drive: it competes with tracking/Live Activity pushes for the main actor.
+            if activeDrive.hasActiveDrive { return }
             // Cloud sync first: it restores anything the cloud has that this device doesn't and links
             // already-uploaded trips BEFORE `syncPending` could upload a duplicate.
             await CloudSync.run(context: modelContext)
@@ -208,13 +213,15 @@ struct ContentView: View {
         }
         .onChange(of: selection) { _, _ in activityToken += 1 }
         .onChange(of: scenePhase) { old, new in
-            if new == .active, old != .active { activityToken += 1; activeDrive.pushLiveUpdate() }
+            if new == .active, old != .active {
+                activityToken += 1; syncToken += 1
+                activeDrive.pushLiveUpdate(); broadcastToWatch()
+            }
         }
-        // The Live Activity / Watch live screen push, per `ActiveDriveController`'s doc comment —
-        // driven from here (not `LiveTrackingView`) so it keeps running while a drive is minimized,
-        // when that view doesn't exist. `LocationTracker` is `@Observable`; both tick while tracking.
-        .onChange(of: activeDrive.tracker?.fixCount) { _, _ in activeDrive.pushLiveUpdate() }
-        .onChange(of: activeDrive.tracker?.elapsedSeconds) { _, _ in activeDrive.pushLiveUpdate() }
+        // The Live Activity / Watch push is driven by `LocationTracker.onUpdate` (wired in
+        // `ActiveDriveController`), so it keeps running while minimized. Do NOT also observe
+        // `tracker.fixCount`/`elapsedSeconds` here: reading them in this body re-evaluated the whole
+        // TabView every second during a drive, and doubled every push.
         .fullScreenCover(isPresented: Binding(
             get: { activeDrive.isFull },
             // SwiftUI routes any system-driven dismissal (e.g. `LiveTrackingView`'s own
@@ -272,6 +279,10 @@ struct ContentView: View {
                 activeDrive.start(scheduled: drive)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .watchRequestedSync)) { _ in
+            broadcastToWatch()
+            activeDrive.broadcastLive(force: true)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .endDriveFromWatch)) { _ in
             activeDrive.handleEndFromWatch()
         }
@@ -289,7 +300,10 @@ struct ContentView: View {
     }
 
     /// Changes whenever the drives/trips the watch mirrors change, so we re-push then.
-    private var watchSyncKey: String { "\(scheduled.count)-\(allTrips.count)" }
+    private var watchSyncKey: String {
+        let drives = scheduled.map { "\($0.id)\($0.title)\($0.isEnabled)\($0.endAddress)" }.joined()
+        return "\(allTrips.count)-\(drives.hashValue)-\(payerGroups.count)-\(fuelPrice)"
+    }
 
     /// Mirror upcoming drives + headline stats to the Apple Watch companion.
     private func broadcastToWatch() {

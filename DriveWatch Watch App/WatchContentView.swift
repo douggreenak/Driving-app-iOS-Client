@@ -21,57 +21,109 @@ private struct LiveDriveView: View {
     let live: WatchSyncPayload.Live
     let link: WatchConnectivityManager
 
+    @State private var confirmingEnd = false
+
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 9) {
-                    // What to do next: the upcoming turn from the phone's guide route.
-                    if let turn = live.nextTurn, !live.isPaused { turnCard(turn) }
+        // Three vertical pages (Digital Crown / swipe): navigate, trip stats, controls.
+        TabView {
+            navigatePage
+            statsPage
+            controlsPage
+        }
+        .tabViewStyle(.verticalPage)
+        .confirmationDialog("End this drive?", isPresented: $confirmingEnd, titleVisibility: .visible) {
+            Button("End Drive", role: .destructive) { link.endDrive() }
+            Button("Keep Driving", role: .cancel) {}
+        }
+    }
 
-                    // Big current speed — the hero readout.
-                    VStack(spacing: 0) {
-                        Text("\(Int(live.currentSpeed.rounded()))")
-                            .font(.system(size: 46, weight: .bold, design: .rounded))
-                            .contentTransition(.numericText())
-                            .minimumScaleFactor(0.6).lineLimit(1)
-                        Text("mph").font(.caption2).foregroundStyle(.secondary)
-                    }
+    // MARK: Page 1 — navigate
 
-                    VStack(spacing: 4) {
-                        HStack(spacing: 4) {
-                            readout(String(format: "%.1f", live.milesTraveled), "driven mi", .blue)
-                            readout(live.remainingMiles.map { String(format: "%.1f", $0) } ?? "—",
-                                    "remaining mi", .teal)
-                        }
-                        readout(elapsed, "elapsed", .orange)
-                    }
-
-                    if live.eta != nil || live.legText != nil {
-                        etaCard
-                    }
-
-                    if live.isPaused {
-                        Text("Stopped — ready for the next leg").font(.caption2).foregroundStyle(.secondary)
-                    }
-
-                    // Re-evaluated every few seconds so a frozen feed is called out instead of the
-                    // last numbers sitting there looking live.
-                    TimelineView(.periodic(from: .now, by: 5)) { _ in
-                        if link.liveIsStale {
-                            Label("Reconnecting to iPhone…", systemImage: "antenna.radiowaves.left.and.right.slash")
-                                .font(.caption2).foregroundStyle(.orange)
-                        }
-                    }
-                    if let err = link.lastSendError {
-                        Text(err).font(.caption2).foregroundStyle(.orange).multilineTextAlignment(.center)
-                    }
-
-                    controls.padding(.top, 2)
+    private var navigatePage: some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                if let turn = live.nextTurn, !live.isPaused { turnCard(turn) }
+                VStack(spacing: 0) {
+                    Text("\(Int(live.currentSpeed.rounded()))")
+                        .font(.system(size: 48, weight: .bold, design: .rounded))
+                        .contentTransition(.numericText())
+                        .minimumScaleFactor(0.6).lineLimit(1)
+                    Text("mph").font(.caption2).foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 4).padding(.vertical, 6)
+                if live.eta != nil || live.legText != nil { etaCard }
+                if live.isPaused {
+                    Text("Stopped — ready for the next leg").font(.caption2).foregroundStyle(.secondary)
+                }
+                statusLine
             }
-            .navigationTitle(live.tripName)
-            .navigationBarTitleDisplayMode(.inline)
+            .padding(.horizontal, 4).padding(.vertical, 6)
+        }
+        .navigationTitle(live.tripName)
+    }
+
+    // MARK: Page 2 — trip stats
+
+    private var statsPage: some View {
+        ScrollView {
+            VStack(spacing: 6) {
+                HStack(spacing: 4) {
+                    readout(String(format: "%.1f", live.milesTraveled), "driven mi", .blue)
+                    readout(live.remainingMiles.map { String(format: "%.1f", $0) } ?? "—", "left mi", .teal)
+                }
+                HStack(spacing: 4) {
+                    readout(elapsedView, "elapsed", .orange)
+                    readout(live.eta.map { $0.formatted(.dateTime.hour().minute()) } ?? "—", "arrival", .green)
+                }
+                HStack(spacing: 4) {
+                    readout(live.maxSpeed.map { String(format: "%.0f", $0) } ?? "—", "max mph", .red)
+                    readout(live.avgSpeed.map { String(format: "%.0f", $0) } ?? "—", "avg mph", .purple)
+                }
+                if let g = live.gallonsUsed {
+                    readout(String(format: "%.2f", g), "gal used", .mint)
+                }
+                if let p = live.progress { ProgressView(value: p).tint(delayColor).padding(.top, 2) }
+                statusLine
+            }
+            .padding(.horizontal, 4).padding(.vertical, 6)
+        }
+        .navigationTitle("Trip")
+    }
+
+    // MARK: Page 3 — controls
+
+    private var controlsPage: some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                controls
+                statusLine
+            }
+            .padding(.horizontal, 4).padding(.vertical, 6)
+        }
+        .navigationTitle("Controls")
+    }
+
+    /// Re-evaluated every few seconds so a frozen feed is called out instead of the last numbers
+    /// sitting there looking live.
+    private var statusLine: some View {
+        VStack(spacing: 2) {
+            TimelineView(.periodic(from: .now, by: 5)) { _ in
+                if link.liveIsStale {
+                    Label("Reconnecting to iPhone…", systemImage: "antenna.radiowaves.left.and.right.slash")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+            }
+            if let err = link.lastSendError {
+                Text(err).font(.caption2).foregroundStyle(.orange).multilineTextAlignment(.center)
+            }
+        }
+    }
+
+    /// Ticks locally from the drive's start date between phone frames.
+    @ViewBuilder private var elapsedView: some View {
+        if let start = live.startDate, !live.isPaused {
+            Text(start, style: .timer)
+        } else {
+            Text(elapsed)
         }
     }
 
@@ -107,9 +159,12 @@ private struct LiveDriveView: View {
     }
 
     private func readout(_ value: String, _ unit: String, _ tint: Color) -> some View {
+        readout(Text(value), unit, tint)
+    }
+
+    private func readout<V: View>(_ value: V, _ unit: String, _ tint: Color) -> some View {
         VStack(spacing: 1) {
-            Text(value).font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(tint)
-                .monospacedDigit()
+            value.font(.system(.title3, design: .rounded, weight: .bold).monospacedDigit()).foregroundStyle(tint)
             Text(unit).font(.system(size: 9)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -138,14 +193,14 @@ private struct LiveDriveView: View {
             }
             if let eta = live.legEta {
                 HStack(spacing: 3) {
-                    Text("Next stop").foregroundStyle(.secondary)
+                    Text("Next stop").foregroundStyle(.secondary).lineLimit(1)
                     Spacer(minLength: 2)
-                    Text(eta, format: .dateTime.hour().minute()).monospacedDigit()
+                    Text(eta, format: .dateTime.hour().minute()).monospacedDigit().lineLimit(1)
                     if let miles = live.legRemainingMiles {
-                        Text("· \(String(format: "%.1f mi", miles))").monospacedDigit()
+                        Text("· \(String(format: "%.1f mi", miles))").monospacedDigit().lineLimit(1)
                     }
                 }
-                .font(.caption2.weight(.medium))
+                .font(.caption2.weight(.medium)).minimumScaleFactor(0.7)
             }
             if let progress = live.progress {
                 ProgressView(value: progress).tint(delayColor)
@@ -167,13 +222,13 @@ private struct LiveDriveView: View {
                 bigButton("Arrived — Next Stop", "checkmark.circle.fill", .green) { link.arriveAtStop() }
                 smallEnd
             } else {
-                bigButton("End Drive", "stop.fill", .red) { link.endDrive() }
+                bigButton("End Drive", "stop.fill", .red) { confirmingEnd = true }
             }
         }
     }
 
     private var smallEnd: some View {
-        Button { link.endDrive() } label: {
+        Button { confirmingEnd = true } label: {
             Text("End drive").font(.caption.weight(.semibold)).foregroundStyle(.red)
                 .frame(maxWidth: .infinity).padding(.vertical, 6)
         }

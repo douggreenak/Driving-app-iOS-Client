@@ -11,6 +11,8 @@ extension Notification.Name {
     static let arriveStopFromWatch = Notification.Name("arriveStopFromWatch")
     /// The watch asked to resume the next leg after a stop.
     static let startNextLegFromWatch = Notification.Name("startNextLegFromWatch")
+    /// The watch just opened / became reachable and wants the latest drives, stats and live frame now.
+    static let watchRequestedSync = Notification.Name("watchRequestedSync")
 }
 
 #if canImport(WatchConnectivity) && os(iOS)
@@ -80,12 +82,17 @@ struct WatchSyncPayload: Codable {
         /// When the phone built this frame, so the watch can tell a live drive from a frozen one
         /// (the phone process died mid-drive and never sent the "ended" terminator).
         var sentAt: Date? = nil
+        var avgSpeed: Double? = nil
+        var gallonsUsed: Double? = nil
+        /// When the drive started, so the watch can tick elapsed time itself between frames.
+        var startDate: Date? = nil
 
         private enum CodingKeys: String, CodingKey {
             case tripName, milesTraveled, currentSpeed, elapsedSeconds, eta, delaySeconds
             case progress, legText, isPaused, canAdvanceLeg
             case remainingMiles, legRemainingMiles, legEta
             case nextTurn, nextTurnMeters, destinationName, maxSpeed, isStopped, sentAt
+            case avgSpeed, gallonsUsed, startDate
         }
     }
     var drives: [Drive]
@@ -114,6 +121,9 @@ extension WatchSyncPayload.Live {
         maxSpeed = try values.decodeIfPresent(Double.self, forKey: .maxSpeed)
         isStopped = try values.decodeIfPresent(Bool.self, forKey: .isStopped)
         sentAt = try values.decodeIfPresent(Date.self, forKey: .sentAt)
+        avgSpeed = try values.decodeIfPresent(Double.self, forKey: .avgSpeed)
+        gallonsUsed = try values.decodeIfPresent(Double.self, forKey: .gallonsUsed)
+        startDate = try values.decodeIfPresent(Date.self, forKey: .startDate)
     }
 }
 
@@ -188,6 +198,7 @@ final class PhoneWatchConnectivity: NSObject, WCSessionDelegate {
         case "end":     NotificationCenter.default.post(name: .endDriveFromWatch, object: nil)
         case "arrive":  NotificationCenter.default.post(name: .arriveStopFromWatch, object: nil)
         case "nextLeg": NotificationCenter.default.post(name: .startNextLegFromWatch, object: nil)
+        case "hello":   NotificationCenter.default.post(name: .watchRequestedSync, object: nil)
         default: break
         }
     }
@@ -222,6 +233,10 @@ final class PhoneWatchConnectivity: NSObject, WCSessionDelegate {
         // e.g. only a departure time or destination changed — could go out while this session hadn't
         // finished activating yet (see `sync(_:)`) and never get resent.
         Task { @MainActor in if let payload = self.pendingSync { self.sync(payload) } }
+    }
+    nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+        guard session.isReachable else { return }
+        Task { @MainActor in NotificationCenter.default.post(name: .watchRequestedSync, object: nil) }
     }
     nonisolated func sessionDidBecomeInactive(_ session: WCSession) {}
     nonisolated func sessionDidDeactivate(_ session: WCSession) { WCSession.default.activate() }

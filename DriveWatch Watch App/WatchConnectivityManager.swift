@@ -66,12 +66,17 @@ struct WatchSyncPayload: Codable {
         var maxSpeed: Double? = nil
         var isStopped: Bool? = nil
         var sentAt: Date? = nil
+        var avgSpeed: Double? = nil
+        var gallonsUsed: Double? = nil
+        /// When the drive started, so the watch can tick elapsed time itself between frames.
+        var startDate: Date? = nil
 
         private enum CodingKeys: String, CodingKey {
             case tripName, milesTraveled, currentSpeed, elapsedSeconds, eta, delaySeconds
             case progress, legText, isPaused, canAdvanceLeg
             case remainingMiles, legRemainingMiles, legEta
             case nextTurn, nextTurnMeters, destinationName, maxSpeed, isStopped, sentAt
+            case avgSpeed, gallonsUsed, startDate
         }
     }
     var drives: [Drive]
@@ -100,6 +105,9 @@ extension WatchSyncPayload.Live {
         maxSpeed = try values.decodeIfPresent(Double.self, forKey: .maxSpeed)
         isStopped = try values.decodeIfPresent(Bool.self, forKey: .isStopped)
         sentAt = try values.decodeIfPresent(Date.self, forKey: .sentAt)
+        avgSpeed = try values.decodeIfPresent(Double.self, forKey: .avgSpeed)
+        gallonsUsed = try values.decodeIfPresent(Double.self, forKey: .gallonsUsed)
+        startDate = try values.decodeIfPresent(Date.self, forKey: .startDate)
     }
 }
 
@@ -117,6 +125,8 @@ final class WatchConnectivityManager: NSObject, WCSessionDelegate {
     private(set) var lastLiveAt: Date?
     /// Set when a control tap couldn't reach the phone; cleared on the next successful send.
     var lastSendError: String?
+    /// When drives/stats last arrived from the phone.
+    private(set) var lastSyncAt: Date?
 
     /// No frame for this long → the live screen says "Reconnecting…".
     static let staleAfter: TimeInterval = 20
@@ -156,6 +166,13 @@ final class WatchConnectivityManager: NSObject, WCSessionDelegate {
     /// is queued too when the phone can't be reached right now.
     func endDrive()     { send(["action": "end"], queueIfNeeded: true) }
     func arriveAtStop() { send(["action": "arrive"]) }
+    /// Ask the phone for the latest drives/stats/live frame right now (on launch, on foreground and
+    /// whenever the phone becomes reachable) instead of waiting for its next scheduled push.
+    func requestSync() {
+        guard WCSession.isSupported(), WCSession.default.activationState == .activated,
+              WCSession.default.isReachable else { return }
+        WCSession.default.sendMessage(["action": "hello"], replyHandler: nil, errorHandler: nil)
+    }
     func startNextLeg() { send(["action": "nextLeg"]) }
 
     /// Sends with a reply handler so a dropped message is noticed: on error, fall back to the queued
@@ -184,6 +201,7 @@ final class WatchConnectivityManager: NSObject, WCSessionDelegate {
         guard let data = context["payload"] as? Data,
               let decoded = try? JSONDecoder().decode(WatchSyncPayload.self, from: data) else { return }
         payload = decoded
+        lastSyncAt = Date()
     }
 
     // MARK: WCSessionDelegate
@@ -191,6 +209,7 @@ final class WatchConnectivityManager: NSObject, WCSessionDelegate {
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
         Task { @MainActor in self.decode(applicationContext) }
     }
+    
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
         Task { @MainActor in self.handleLiveMessage(message) }
@@ -222,7 +241,12 @@ final class WatchConnectivityManager: NSObject, WCSessionDelegate {
     nonisolated func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         // Pick up whatever context was last delivered while we were asleep.
         let ctx = session.receivedApplicationContext
-        Task { @MainActor in self.decode(ctx) }
+        Task { @MainActor in self.decode(ctx); self.requestSync() }
+    }
+
+    nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+        guard session.isReachable else { return }
+        Task { @MainActor in self.requestSync() }
     }
 }
 

@@ -5,6 +5,7 @@ import SwiftUI
 @main
 struct DriveWatchApp: App {
     @State private var link = WatchConnectivityManager.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -22,6 +23,7 @@ struct DriveWatchApp: App {
                     #endif
                     link.activate()
                 }
+                .onChange(of: scenePhase) { _, phase in if phase == .active { link.requestSync() } }
         }
     }
 }
